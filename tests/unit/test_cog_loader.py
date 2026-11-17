@@ -24,7 +24,8 @@ class CogDeclarationLoaderTests(unittest.TestCase):
 
     def test_valid_cog_boots(self) -> None:
         _write(
-            self.root, "goodcog",
+            self.root,
+            "goodcog",
             "from core.plugin_base import PluginBase\n"
             "from discord.ext import commands\n"
             "class GoodCog(commands.Cog):\n"
@@ -40,7 +41,8 @@ class CogDeclarationLoaderTests(unittest.TestCase):
 
     def test_instance_not_class_fails(self) -> None:
         _write(
-            self.root, "badcog",
+            self.root,
+            "badcog",
             "from core.plugin_base import PluginBase\n"
             "from discord.ext import commands\n"
             "class C(commands.Cog):\n"
@@ -55,7 +57,8 @@ class CogDeclarationLoaderTests(unittest.TestCase):
 
     def test_non_cog_class_fails(self) -> None:
         _write(
-            self.root, "notcog",
+            self.root,
+            "notcog",
             "from core.plugin_base import PluginBase\n"
             "class NotPlugin(PluginBase):\n"
             "    name = 'notcog'\n"
@@ -67,7 +70,8 @@ class CogDeclarationLoaderTests(unittest.TestCase):
 
     def test_absent_cog_still_boots_during_migration(self) -> None:
         _write(
-            self.root, "legacy",
+            self.root,
+            "legacy",
             "from core.plugin_base import PluginBase\n"
             "class Legacy(PluginBase):\n"
             "    name = 'legacy'\n",

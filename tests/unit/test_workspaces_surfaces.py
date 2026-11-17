@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 
 from core.api import ControlAPI
 from core.event_bus import EventBus
@@ -21,7 +22,7 @@ from database.db import Database
 
 LOG_NS = NS(logger=NS(warning=lambda *a, **k: None))
 
-ACCOUNT_ROWS = [
+ACCOUNT_ROWS: list[dict[str, Any]] = [
     {"name": "alpha", "status": "running", "enabled": True, "workspace": None},
     {"name": "beta", "status": "stopped", "enabled": True, "workspace": None},
 ]
@@ -36,7 +37,7 @@ class _StubAccountsManager:
     def __init__(self) -> None:
         self._accounts = {row["name"]: _StubAccount() for row in ACCOUNT_ROWS}
 
-    async def accounts(self, *, refresh_records: bool = False):
+    async def accounts(self, *, refresh_records: bool = False) -> list[dict[str, Any]]:
         return [dict(row) for row in ACCOUNT_ROWS]
 
     def refresh_workspace(self, name: str, workspace: str | None) -> None:
@@ -65,21 +66,25 @@ class ControlApiWorkspacesTestBase(unittest.IsolatedAsyncioTestCase):
         await self.db.accounts.add("alpha")
         await self.db.accounts.add("beta")
         self.accounts_mgr = _StubAccountsManager()
-        self.api = ControlAPI(
-            accounts=self.accounts_mgr,
-            plugins=NS(),
-            settings=NS(),
-            limiter=self.limiter,
-            scheduler=NS(),
-            logs=NS(),
-            workspaces=self.service,
-        )
+        # The NS()/stub collaborators are inert duck-typed stand-ins; the
+        # facade types them nominally, so they ride the dynamic seam.
+        collaborators: dict[str, Any] = {
+            "accounts": self.accounts_mgr,
+            "plugins": NS(),
+            "settings": NS(),
+            "limiter": self.limiter,
+            "scheduler": NS(),
+            "logs": NS(),
+            "workspaces": self.service,
+        }
+        self.api = ControlAPI(**collaborators)
 
 
 class ControlApiWorkspacesTests(ControlApiWorkspacesTestBase):
     async def test_full_membership_flow(self) -> None:
         created = await self.api.workspaces_create(
-            {"name": "grinders", "description": "the grind"}, surface="cli")
+            {"name": "grinders", "description": "the grind"}, surface="cli"
+        )
         self.assertEqual(created["name"], "grinders")
         listed = await self.api.workspaces_list()
         self.assertEqual(listed[0]["member_count"], 0)
@@ -89,11 +94,11 @@ class ControlApiWorkspacesTests(ControlApiWorkspacesTestBase):
         out = await self.api.workspaces_add_account("alpha", "grinders")
         self.assertEqual(out["account"], "alpha")
         # the memory record follows (F3 pattern)
-        self.assertEqual(
-            self.accounts_mgr._accounts["alpha"].record.workspace, "grinders")
+        self.assertEqual(self.accounts_mgr._accounts["alpha"].record.workspace, "grinders")
         # the pointer + pacing followed
-        self.assertEqual(
-            (await self.db.accounts.get("alpha")).workspace, "grinders")
+        alpha = await self.db.accounts.get("alpha")
+        assert alpha is not None  # narrowing: added in asyncSetUp
+        self.assertEqual(alpha.workspace, "grinders")
         self.assertEqual(self.limiter.account_groups(), {"alpha": "grinders"})
 
         left = await self.api.workspaces_remove_account("alpha")
@@ -120,18 +125,19 @@ class ControlApiWorkspacesTests(ControlApiWorkspacesTestBase):
         await self.api.workspaces_add_account("alpha", "grinders")
         with self.assertRaises(ValueError):
             await self.api.workspaces_delete("grinders")
-        out = await self.api.workspaces_delete(
-            "grinders", detach_members=True, surface="cli")
+        out = await self.api.workspaces_delete("grinders", detach_members=True, surface="cli")
         self.assertEqual(out["detached"], ["alpha"])
-        self.assertIsNone((await self.db.accounts.get("alpha")).workspace)
+        detached = await self.db.accounts.get("alpha")
+        assert detached is not None  # narrowing: added in asyncSetUp
+        self.assertIsNone(detached.workspace)
 
     async def test_tasks_surface(self) -> None:
         await self.api.workspaces_create({"name": "grinders"})
         await self.api.workspaces_add_account("alpha", "grinders")
-        row_id = (await self.api.workspaces_op(
-            "create_task", workspace="grinders", task_id="grind"))["id"]
-        assigned = await self.api.workspaces_op(
-            "assign_task", id=row_id, account="alpha")
+        row_id = (
+            await self.api.workspaces_op("create_task", workspace="grinders", task_id="grind")
+        )["id"]
+        assigned = await self.api.workspaces_op("assign_task", id=row_id, account="alpha")
         self.assertEqual(assigned["status"], "assigned")
         rows = await self.api.workspaces_tasks(workspace="grinders")
         self.assertEqual(len(rows), 1)
@@ -140,8 +146,8 @@ class ControlApiWorkspacesTests(ControlApiWorkspacesTestBase):
     async def test_cooldown_surface(self) -> None:
         await self.api.workspaces_create({"name": "grinders"})
         rec = await self.api.workspaces_op(
-            "cooldown", scope_type="workspace", scope_id="grinders",
-            reason="hold", duration_s=60.0)
+            "cooldown", scope_type="workspace", scope_id="grinders", reason="hold", duration_s=60.0
+        )
         self.assertIsNotNone(rec["id"])
         cleared = await self.api.workspaces_op("cooldown_clear", id=rec["id"])
         self.assertIsNotNone(cleared["cleared_at"])
@@ -149,10 +155,15 @@ class ControlApiWorkspacesTests(ControlApiWorkspacesTestBase):
         self.assertEqual(active, [])
 
     async def test_unwired_api_is_honest(self) -> None:
-        api = ControlAPI(
-            accounts=NS(), plugins=NS(), settings=NS(), limiter=NS(),
-            scheduler=NS(), logs=NS(),
-        )
+        inert: dict[str, Any] = {
+            "accounts": NS(),
+            "plugins": NS(),
+            "settings": NS(),
+            "limiter": NS(),
+            "scheduler": NS(),
+            "logs": NS(),
+        }
+        api = ControlAPI(**inert)
         self.assertEqual(await api.workspaces_list(), [])  # reads degrade
         with self.assertRaises(RuntimeError):  # writes fail loudly
             await api.workspaces_create({"name": "x"})

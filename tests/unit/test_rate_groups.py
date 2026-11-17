@@ -7,9 +7,11 @@ Per-ACCOUNT/GROUP scope: accounts sharing a group serialize against ONE
 shared clock — A -> [limit] -> B -> [limit] -> A — while accounts in
 DIFFERENT groups (or ungrouped) stay independent. Both scopes compose (max).
 """
+
 from __future__ import annotations
 
 import asyncio
+import itertools
 import unittest
 
 from core.event_bus import EventBus
@@ -18,7 +20,7 @@ from tests.unit.test_rate_engine import SleepAdvanceManager, StubLogger
 ACTION = "poke"  # no learned default — floor semantics testable
 
 
-def make_group_manager():
+def make_group_manager() -> SleepAdvanceManager:
     from core.rate_limit_manager.engine import ManualClock
 
     manager = SleepAdvanceManager(
@@ -36,15 +38,15 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         manager.set_account_group("alpha", "grinders")
         manager.set_account_group("beta", "grinders")
 
-        times = []
+        times: list[tuple[str, float]] = []
 
-        async def send(account):
+        async def send(account: str) -> None:
             await manager.acquire(ACTION, account=account)
             times.append((account, manager._clock.now()))
 
-        await send("alpha")                       # t=0
-        await send("beta")                        # waits group clock -> t=2
-        await send("alpha")                       # waits again -> t=4
+        await send("alpha")  # t=0
+        await send("beta")  # waits group clock -> t=2
+        await send("alpha")  # waits again -> t=4
         self.assertEqual([t for _, t in times], [0.0, 2.0, 4.0])
 
     async def test_different_groups_independent(self) -> None:
@@ -52,8 +54,8 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         manager.set_policy_values(ACTION, 2.0)
         manager.set_account_group("alpha", "one")
         manager.set_account_group("beta", "two")
-        await manager.acquire(ACTION, account="alpha")   # t=0
-        await manager.acquire(ACTION, account="beta")    # different clock -> t=0
+        await manager.acquire(ACTION, account="alpha")  # t=0
+        await manager.acquire(ACTION, account="beta")  # different clock -> t=0
         self.assertEqual(manager._clock.now(), 0.0)
 
     async def test_grouped_and_ungrouped_compose(self) -> None:
@@ -62,8 +64,8 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         manager = make_group_manager()
         manager.set_policy_values(ACTION, 2.0)
         manager.set_account_group("alpha", "g")
-        await manager.acquire(ACTION, account="alpha")   # t=0 (both clocks)
-        await manager.acquire(ACTION, account="beta")    # beta joins group now
+        await manager.acquire(ACTION, account="alpha")  # t=0 (both clocks)
+        await manager.acquire(ACTION, account="beta")  # beta joins group now
         manager.set_account_group("beta", "g")
         # beta fires at t=2 (group clock); alpha's own clock ALSO reads t=0,
         # so alpha's next send must wait from the group stamp at t=2 -> t=4
@@ -77,9 +79,9 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         manager.set_policy_values(ACTION, 2.0)
         manager.set_account_group("alpha", "g")
         manager.set_account_group("beta", "g")
-        await manager.acquire(ACTION, account="alpha")   # t=0, stamps both
-        manager.set_account_group("beta", None)          # beta leaves
-        await manager.acquire(ACTION, account="beta")    # own clock empty -> t=0
+        await manager.acquire(ACTION, account="alpha")  # t=0, stamps both
+        manager.set_account_group("beta", None)  # beta leaves
+        await manager.acquire(ACTION, account="beta")  # own clock empty -> t=0
         self.assertEqual(manager._clock.now(), 0.0)
         self.assertEqual(manager.account_groups(), {"alpha": "g"})
 
@@ -107,16 +109,16 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         manager.set_policy_values(ACTION, 1.5)
         manager.set_account_group("alpha", "g")
         manager.set_account_group("beta", "g")
-        grant_times = []
+        grant_times: list[tuple[str, float]] = []
 
-        async def worker(account):
+        async def worker(account: str) -> None:
             for _ in range(2):
                 await manager.acquire(ACTION, account=account)
                 grant_times.append((account, manager._clock.now()))
 
         await asyncio.gather(worker("alpha"), worker("beta"))
         ordered = sorted(t for _, t in grant_times)
-        gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(ordered)]
         self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
         # both group members actually got to send
         senders = {account for account, _ in grant_times}
@@ -130,16 +132,17 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         from tests.unit.test_rate_engine import GatedSleepManager
 
         manager = GatedSleepManager(
-            EventBus(), StubLogger(), None, clock=ManualClock(0.0),
+            EventBus(),
+            StubLogger(),
+            None,
+            clock=ManualClock(0.0),
             jitter_seed=7,
         )
         manager.set_policy_values(ACTION, 2.0)
         manager.set_account_group("alpha", "g")
         manager.set_account_group("beta", "g")
         await manager.acquire(ACTION, account="alpha")  # stamps both at t=0
-        doomed = asyncio.ensure_future(
-            manager.acquire(ACTION, account="beta")
-        )
+        doomed = asyncio.ensure_future(manager.acquire(ACTION, account="beta"))
         for _ in range(50):
             if manager.gates:
                 break
@@ -148,9 +151,7 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await doomed
         self.assertEqual(manager._clock.now(), 0.0)  # clock untouched
-        grant_task = asyncio.ensure_future(
-            manager.acquire(ACTION, account="alpha")
-        )
+        grant_task = asyncio.ensure_future(manager.acquire(ACTION, account="alpha"))
         for _ in range(50):
             if len(manager.gates) >= 2:
                 break
@@ -168,30 +169,30 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
 
         interval = 1.5
         manager = GrantRecorderManager(
-            EventBus(), StubLogger(), None,
-            clock=ManualClock(0.0), jitter_seed=3,
+            EventBus(),
+            StubLogger(),
+            None,
+            clock=ManualClock(0.0),
+            jitter_seed=3,
         )
         manager.set_policy_values(ACTION, interval)
         for account in ("alpha", "beta", "gamma"):
             manager.set_account_group(account, "g")
 
-        async def worker(account):
+        async def worker(account: str) -> None:
             await manager.acquire(ACTION, account=account)
 
         tasks = [
-            asyncio.ensure_future(worker(a))
-            for a in ("alpha", "beta", "gamma", "alpha", "beta")
+            asyncio.ensure_future(worker(a)) for a in ("alpha", "beta", "gamma", "alpha", "beta")
         ]
         await asyncio.sleep(0)
         tasks[1].cancel()  # one member dies mid-wait
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
             self.assertNotIsInstance(result, Exception)
-        group_stamps = sorted(
-            ts for key, ts in manager.grant_log if key == ("group:g", ACTION)
-        )
+        group_stamps = sorted(ts for key, ts in manager.grant_log if key == ("group:g", ACTION))
         self.assertGreaterEqual(len(group_stamps), 4)
-        gaps = [b - a for a, b in zip(group_stamps, group_stamps[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(group_stamps)]
         self.assertTrue(all(g >= interval - 1e-9 for g in gaps), gaps)
 
 
@@ -209,16 +210,19 @@ class TestGroupWireGapsWithJitter(unittest.IsolatedAsyncioTestCase):
         # post-grant-only jitter the second wire left just 0.07s after the
         # first (configured spacing 1.5s)
         manager = SleepAdvanceManager(
-            EventBus(), StubLogger(), None, clock=ManualClock(0.0),
+            EventBus(),
+            StubLogger(),
+            None,
+            clock=ManualClock(0.0),
             jitter_seed=15,
         )
         manager.set_policy_values(ACTION, interval, 0.5, 2.0)
         manager.set_account_group("alpha", "grinders")
         manager.set_account_group("beta", "grinders")
 
-        wires = []
+        wires: list[tuple[str, float]] = []
 
-        async def send(account):
+        async def send(account: str) -> None:
             await manager.acquire(ACTION, account=account)
             wires.append((account, manager._clock.now()))
 

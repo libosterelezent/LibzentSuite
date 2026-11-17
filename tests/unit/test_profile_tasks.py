@@ -14,28 +14,31 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from core.account_manager import DiscordCache
 from core.account_manager.services import AccountPluginServices
-from core.task_scheduler.scheduler import TaskScheduler
+from core.event_bus import EventBus
+from core.task_scheduler import Task, TaskScheduler
 from database.db import Database
 
 
 class _SilentLogger:
-    def debug(self, *a, **k):
+    def debug(self, *a: Any, **k: Any) -> None:
         pass
 
-    def info(self, *a, **k):
+    def info(self, *a: Any, **k: Any) -> None:
         pass
 
-    def warning(self, *a, **k):
+    def warning(self, *a: Any, **k: Any) -> None:
         pass
 
-    def error(self, *a, **k):
+    def error(self, *a: Any, **k: Any) -> None:
         pass
 
-    def exception(self, *a, **k):
+    def exception(self, *a: Any, **k: Any) -> None:
         pass
 
 
@@ -43,7 +46,7 @@ class TaskAttribution(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         from core.event_bus import EventBus
 
-        async def parked_sender(task):  # never completes: tasks stay live
+        async def parked_sender(task: Task) -> None:  # never completes: tasks stay live
             await asyncio.Event().wait()
 
         self.sched = TaskScheduler(EventBus(), _SilentLogger(), None, parked_sender, audit=None)
@@ -81,13 +84,16 @@ class ResolutionSeam(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.db = Database(Path(self._tmp.name) / "r.db")
         await self.db.connect()
+        # bus/cache are non-Optional on the pinned constructor; inert
+        # real instances stand in — the profile-store paths under test
+        # never touch them.
         self.svc = AccountPluginServices(
             "alpha",
             "exporter",
-            bus=None,
+            bus=EventBus(),
             scheduler=None,
             credentials=None,
-            cache=None,
+            cache=DiscordCache("alpha"),
             profile_store=self.db.account_plugin_profiles,
         )
 

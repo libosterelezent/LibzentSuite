@@ -138,9 +138,7 @@ class ConcurrentIsolation(_Base):
             set_profile("third", 60.0),
         )
         for profile in ("main", "alt", "third"):
-            self.assertTrue(
-                await self.svc.is_active("alpha", "exporter", "roll", profile=profile)
-            )
+            self.assertTrue(await self.svc.is_active("alpha", "exporter", "roll", profile=profile))
 
     async def test_concurrent_account_deletion_and_profile_write(self) -> None:
         """A write racing the account's deletion cascade lands or dies —

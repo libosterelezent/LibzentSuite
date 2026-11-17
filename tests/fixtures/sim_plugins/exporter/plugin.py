@@ -36,6 +36,7 @@ Flow safety (unchanged contract):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from core.errors import CredentialsError, FlowBlocked, SchedulerError, flow_block_reason
 from core.event_bus import Event, MessageReceived
@@ -156,10 +157,8 @@ class ExporterPlugin(PluginBase):
             # the rest of the idle window (it would cross-collect the pages
             # of the NEXT flow — the K16 single-flow invariant)
             collect.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await collect
-            except (asyncio.CancelledError, Exception):
-                pass
             raise
         ctx.logger.info("collected %d soulmate page(s)", len(pages))
 
@@ -175,7 +174,9 @@ class ExporterPlugin(PluginBase):
         target = ctx.services.describe_channel(trigger_channel)
         ctx.logger.info("sent %d chunk(s) back to %s", len(chunks), target)
 
-    async def _collect_pages(self, ctx: PluginContext, bot_id: int, dm_channel: int):
+    async def _collect_pages(
+        self, ctx: PluginContext, bot_id: int, dm_channel: int
+    ) -> list[MessageReceived]:
         """Collect primary bot DM pages until the idle timeout expires."""
         return await ctx.services.collect_messages(
             check=lambda e: e.author_id == bot_id and e.channel_id == dm_channel,

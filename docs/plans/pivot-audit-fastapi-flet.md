@@ -244,11 +244,7 @@
 
 ### Phase 3: Flet UI (replaces SPA)
 1. Add `flet` to dependencies
-2. Create `interfaces/ui/` package:
-   - `app.py` — Flet application entry
-   - `pages/` — one page per module (accounts, fleet, orchestration, etc.)
-   - `components/` — shared Flet components
-   - `theme.py` — theme system (mapping the existing CSS custom properties to Flet theme)
+2. The full in-depth implementation contract is written in `flet_ui_design_contract.md`.
 3. **Plugin UI contract redesign:** `core/dashboard_ui/` → a Flet-composition contract
 4. Port pages incrementally; verify each
 

@@ -1,4 +1,5 @@
 """Ping plugin tests: discovery, self-command execution, UI action."""
+
 from __future__ import annotations
 
 import sys
@@ -10,7 +11,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.errors import TargetGone
-from core.plugin_base import PluginContext
 from plugins.ping.plugin import PingPlugin
 
 
@@ -19,10 +19,9 @@ class _FakeServices:
 
     def __init__(self, blocked: bool = False) -> None:
         self.blocked = blocked
-        self.sent: list[tuple] = []
+        self.sent: list[tuple[int, str]] = []
 
-    async def send_message(self, channel_id: int, content: str,
-                           **kw: Any) -> None:
+    async def send_message(self, channel_id: int, content: str, **kw: Any) -> None:
         if self.blocked:
             raise TargetGone("t", f"channel {channel_id} is gone")
         self.sent.append((channel_id, content))
@@ -35,12 +34,17 @@ class _FakeServices:
         return f"#{channel_id}"
 
 
-def _ctx(services: _FakeServices) -> SimpleNamespace:
+def _ctx(services: _FakeServices) -> Any:
+    """Duck-typed PluginContext double — ping only touches these fields."""
     import logging
 
-    return SimpleNamespace(account="t", plugin="ping",
-                           settings={}, services=services,
-                           logger=logging.getLogger("test.ping"))
+    return SimpleNamespace(
+        account="t",
+        plugin="ping",
+        settings={},
+        services=services,
+        logger=logging.getLogger("test.ping"),
+    )
 
 
 class PingPluginTests(unittest.IsolatedAsyncioTestCase):
@@ -49,9 +53,7 @@ class PingPluginTests(unittest.IsolatedAsyncioTestCase):
         self.services = _FakeServices()
         self.ctx = _ctx(self.services)
 
-
     async def test_ping_sends_through_services(self) -> None:
         reply = await self.plugin._ping(self.ctx, 555, "hello there")
         self.assertEqual(self.services.sent, [(555, "hello there")])
         self.assertIn("sent to", reply)
-

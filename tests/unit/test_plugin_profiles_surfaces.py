@@ -8,6 +8,7 @@ effective-settings merge order (defaults < profile < account overrides)
 with channels passthrough, accounts_channels offline->[] and
 wired->snapshot, in-memory record refresh, and audit rows.
 """
+
 from __future__ import annotations
 
 import logging
@@ -15,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.api import ControlAPI
 from core.errors import AccountError, SettingsValidationError
@@ -23,14 +24,23 @@ from core.plugin_scopes import validate as validate_scope
 from core.settings_manager import Setting
 from database.db import Database
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
 LOG = logging.getLogger("test.plugin_profiles_surfaces")
+
+
+def _api_with_stubs(**collaborators: Any) -> ControlAPI:
+    """Build a ControlAPI wired with duck-typed stubs — the constructor
+    pins the concrete collaborator classes these tests replace."""
+    return ControlAPI(**collaborators)
+
 
 #: a roll-like schema: every Setting type + bounds the validation paths hit
 SCHEMA = (
     Setting("trigger", "str", "roll", "trigger word"),
     Setting("command", "str", "$wa", "roulette command"),
-    Setting("roll_interval", "float", 2.0, "seconds between rolls",
-            min_value=1.5, max_value=120.0),
+    Setting("roll_interval", "float", 2.0, "seconds between rolls", min_value=1.5, max_value=120.0),
     Setting("userstack", "bool", True, "send $us 20"),
 )
 
@@ -43,10 +53,10 @@ class _StubAudit:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
 
-    def record(self, **kwargs) -> None:
+    def record(self, **kwargs: Any) -> None:
         self.rows.append(kwargs)
 
-    def actions(self) -> list[str]:
+    def actions(self) -> list[Any]:
         return [row.get("action") for row in self.rows]
 
 
@@ -91,7 +101,8 @@ class _StubAccountsManager:
         return sorted(self.get(name).assigned_plugins)
 
     async def channels_snapshot(self, name: str) -> list[dict[str, Any]]:
-        return self.get(name).runtime.client.channels_snapshot()
+        snapshot: list[dict[str, Any]] = self.get(name).runtime.client.channels_snapshot()
+        return snapshot
 
 
 class _StubPluginManager:
@@ -103,15 +114,18 @@ class _StubPluginManager:
     def names(self) -> list[str]:
         return list(self._names)
 
-    def _schema_for(self, plugin: str) -> tuple:
+    def _schema_for(self, plugin: str) -> tuple[Setting, ...]:
         if plugin not in self._names:
             raise ValueError(f"unknown plugin {plugin!r}")
         return SCHEMA
 
 
 SNAPSHOT = [
-    {"guild_id": "111", "guild_name": "Alpha Guild",
-     "channels": [{"id": "aaa", "name": "general", "type": "text"}]},
+    {
+        "guild_id": "111",
+        "guild_name": "Alpha Guild",
+        "channels": [{"id": "aaa", "name": "general", "type": "text"}],
+    },
 ]
 
 
@@ -132,7 +146,7 @@ class ProfileSurfaceTestBase(unittest.IsolatedAsyncioTestCase):
         self.alpha = self.accounts_mgr.add("alpha", _StubClient(SNAPSHOT))
         self.alpha.assigned_plugins = ["roll"]
         self.audit = _StubAudit()
-        self.api = ControlAPI(
+        self.api = _api_with_stubs(
             accounts=self.accounts_mgr,
             plugins=_StubPluginManager(["roll", "snipe"]),
             settings=SimpleNamespace(),
@@ -155,13 +169,12 @@ class ProfileSurfaceTestBase(unittest.IsolatedAsyncioTestCase):
 class ProfileCrudTests(ProfileSurfaceTestBase):
     async def test_create_and_list_roundtrip(self) -> None:
         created = await self.api.plugin_profile_create(
-            "roll", "grind", "fast", {"trigger": "go", "command": "$m"},
-            surface="cli")
+            "roll", "grind", "fast", {"trigger": "go", "command": "$m"}, surface="cli"
+        )
         self.assertEqual(created["plugin"], "roll")
         self.assertEqual(created["name"], "grind")
         self.assertEqual(created["description"], "fast")
-        self.assertEqual(created["settings"],
-                         {"trigger": "go", "command": "$m"})
+        self.assertEqual(created["settings"], {"trigger": "go", "command": "$m"})
         listed = await self.api.plugin_profiles_list()
         self.assertEqual([row["name"] for row in listed], ["grind"])
         self.assertEqual(listed[0]["settings"]["trigger"], "go")
@@ -171,8 +184,7 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
         await self.api.plugin_profile_create("roll", "b")
         rows = await self.api.plugin_profiles_list(plugin="roll")
         self.assertEqual([r["name"] for r in rows], ["a", "b"])
-        self.assertEqual(await self.api.plugin_profiles_list(plugin="snipe"),
-                         [])
+        self.assertEqual(await self.api.plugin_profiles_list(plugin="snipe"), [])
 
     async def test_create_unknown_plugin_lists_known(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -182,55 +194,54 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
 
     async def test_create_unknown_settings_key_rejected(self) -> None:
         with self.assertRaises(ValueError) as ctx:
-            await self.api.plugin_profile_create(
-                "roll", "grind", settings={"triger": "go"})
+            await self.api.plugin_profile_create("roll", "grind", settings={"triger": "go"})
         self.assertIn("triger", str(ctx.exception))
         self.assertIn("known", str(ctx.exception))
 
     async def test_create_bad_value_type_rejected(self) -> None:
         with self.assertRaises(SettingsValidationError):
             await self.api.plugin_profile_create(
-                "roll", "grind", settings={"roll_interval": "fast"})
+                "roll", "grind", settings={"roll_interval": "fast"}
+            )
         with self.assertRaises(SettingsValidationError):  # below min bound
-            await self.api.plugin_profile_create(
-                "roll", "grind", settings={"roll_interval": 0.5})
+            await self.api.plugin_profile_create("roll", "grind", settings={"roll_interval": 0.5})
 
     async def test_create_settings_validated_same_as_set_setting(self) -> None:
         # the set-setting path COERCES numeric strings; so does the profile
         created = await self.api.plugin_profile_create(
-            "roll", "grind", settings={"roll_interval": "3"})
+            "roll", "grind", settings={"roll_interval": "3"}
+        )
         self.assertEqual(created["settings"]["roll_interval"], 3.0)
 
     async def test_create_channels_scope_stored_normalized(self) -> None:
         created = await self.api.plugin_profile_create(
-            "roll", "grind",
-            settings={"channels": {"channels": [" aaa ", "bbb"]}})
-        self.assertEqual(created["settings"]["channels"],
-                         {"channels": ["aaa", "bbb"]})
+            "roll", "grind", settings={"channels": {"channels": [" aaa ", "bbb"]}}
+        )
+        self.assertEqual(created["settings"]["channels"], {"channels": ["aaa", "bbb"]})
 
     async def test_create_bad_channels_scope_rejected(self) -> None:
         # the mode/rules envelope is gone: 'mode' is just an unknown
         # key now, caught by the typo trap
         with self.assertRaises(ValueError) as ctx:
             await self.api.plugin_profile_create(
-                "roll", "grind",
-                settings={"channels": {"mode": "whitelist"}})
+                "roll", "grind", settings={"channels": {"mode": "whitelist"}}
+            )
         self.assertIn("unknown key", str(ctx.exception))
 
     async def test_create_duplicate_rejected(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
-        with self.assertRaises(Exception):
+        # intentionally blind: whatever integrity error the row raises
+        with self.assertRaises(Exception):  # noqa: B017
             await self.api.plugin_profile_create("roll", "grind")
 
     async def test_update_description_settings_and_rename(self) -> None:
         await self.api.plugin_profile_create("roll", "grind", "old")
         updated = await self.api.plugin_profile_update(
-            "roll", "grind", description="new",
-            settings={"trigger": "hi"}, surface="dashboard")
+            "roll", "grind", description="new", settings={"trigger": "hi"}, surface="dashboard"
+        )
         self.assertEqual(updated["description"], "new")
         self.assertEqual(updated["settings"]["trigger"], "hi")
-        renamed = await self.api.plugin_profile_update(
-            "roll", "grind", name_new="farm")
+        renamed = await self.api.plugin_profile_update("roll", "grind", name_new="farm")
         self.assertEqual(renamed["name"], "farm")
 
     async def test_update_requires_at_least_one_field(self) -> None:
@@ -242,8 +253,7 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
     async def test_update_unknown_profile_lists_known(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
         with self.assertRaises(ValueError) as ctx:
-            await self.api.plugin_profile_update("roll", "ghost",
-                                                 description="d")
+            await self.api.plugin_profile_update("roll", "ghost", description="d")
         self.assertIn("known", str(ctx.exception))
 
     async def test_rename_refuses_duplicate(self) -> None:
@@ -254,23 +264,23 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
 
     async def test_delete_and_idempotent_redelete(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
-        out = await self.api.plugin_profile_delete("roll", "grind",
-                                                   surface="cli")
-        self.assertEqual(out, {"plugin": "roll", "profile": "grind",
-                               "existed": True})
+        out = await self.api.plugin_profile_delete("roll", "grind", surface="cli")
+        self.assertEqual(out, {"plugin": "roll", "profile": "grind", "existed": True})
         out = await self.api.plugin_profile_delete("roll", "grind")
         self.assertFalse(out["existed"])
 
     async def test_audit_rows_written(self) -> None:
         await self.api.plugin_profile_create("roll", "grind", surface="cli")
-        await self.api.plugin_profile_update("roll", "grind",
-                                             description="d",
-                                             surface="dashboard")
+        await self.api.plugin_profile_update("roll", "grind", description="d", surface="dashboard")
         await self.api.plugin_profile_delete("roll", "grind", surface="cli")
         self.assertEqual(
             self.audit.actions(),
-            ["mgmt:plugin_profile.created", "mgmt:plugin_profile.updated",
-             "mgmt:plugin_profile.deleted"])
+            [
+                "mgmt:plugin_profile.created",
+                "mgmt:plugin_profile.updated",
+                "mgmt:plugin_profile.deleted",
+            ],
+        )
         note = self.audit.rows[0]["note"]
         self.assertIn("surface=cli", note)
         self.assertIn("plugin=roll", note)
@@ -280,17 +290,15 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
 class BindingTests(ProfileSurfaceTestBase):
     async def test_bind_and_read_back(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
-        out = await self.api.accounts_plugin_profile(
-            "alpha", "roll", "grind", surface="dashboard")
-        self.assertEqual(out, {"account": "alpha", "plugin": "roll",
-                               "profile": "grind"})
+        out = await self.api.accounts_plugin_profile("alpha", "roll", "grind", surface="dashboard")
+        self.assertEqual(out, {"account": "alpha", "plugin": "roll", "profile": "grind"})
         # memory record follows (status-poll mirror, F3 pattern)
         self.assertEqual(self.alpha.plugin_profiles, {"roll": "grind"})
         # every ASSIGNED plugin appears, unbound ones as None
         await self._assign("alpha", "snipe")
         self.assertEqual(
-            await self.api.accounts_plugin_profiles("alpha"),
-            {"roll": "grind", "snipe": None})
+            await self.api.accounts_plugin_profiles("alpha"), {"roll": "grind", "snipe": None}
+        )
 
     async def test_clear_binding_with_none(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
@@ -298,8 +306,7 @@ class BindingTests(ProfileSurfaceTestBase):
         out = await self.api.accounts_plugin_profile("alpha", "roll", None)
         self.assertIsNone(out["profile"])
         self.assertEqual(self.alpha.plugin_profiles, {"roll": None})
-        self.assertEqual(
-            await self.api.accounts_plugin_profiles("alpha"), {"roll": None})
+        self.assertEqual(await self.api.accounts_plugin_profiles("alpha"), {"roll": None})
 
     async def test_binding_requires_assignment(self) -> None:
         await self.api.plugin_profile_create("snipe", "quiet")
@@ -331,8 +338,7 @@ class BindingTests(ProfileSurfaceTestBase):
 
     async def test_binding_audit_row_written(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")
-        await self.api.accounts_plugin_profile("alpha", "roll", "grind",
-                                               surface="dashboard")
+        await self.api.accounts_plugin_profile("alpha", "roll", "grind", surface="dashboard")
         row = self.audit.rows[-1]
         self.assertEqual(row["action"], "mgmt:account.plugin_profile")
         self.assertEqual(row["account"], "alpha")
@@ -344,8 +350,7 @@ class BindingTests(ProfileSurfaceTestBase):
         await self.api.accounts_plugin_profile("alpha", "roll", "grind")
         await self.api.plugin_profile_delete("roll", "grind")
         # DB cascade + memory refresh: the binding reads back as None
-        self.assertEqual(
-            await self.api.accounts_plugin_profiles("alpha"), {"roll": None})
+        self.assertEqual(await self.api.accounts_plugin_profiles("alpha"), {"roll": None})
         self.assertEqual(self.alpha.plugin_profiles, {"roll": None})
 
     async def test_rename_refreshes_memory_binding(self) -> None:
@@ -353,41 +358,35 @@ class BindingTests(ProfileSurfaceTestBase):
         await self.api.accounts_plugin_profile("alpha", "roll", "grind")
         await self.api.plugin_profile_update("roll", "grind", name_new="farm")
         self.assertEqual(self.alpha.plugin_profiles, {"roll": "farm"})
-        self.assertEqual(
-            await self.api.accounts_plugin_profiles("alpha"),
-            {"roll": "farm"})
+        self.assertEqual(await self.api.accounts_plugin_profiles("alpha"), {"roll": "farm"})
 
 
 # --------------------------------------------------- effective settings
 class EffectiveSettingsTests(ProfileSurfaceTestBase):
     async def test_merge_order_defaults_profile_account(self) -> None:
         await self.api.plugin_profile_create(
-            "roll", "grind",
-            settings={"trigger": "go", "roll_interval": 5.0,
-                      "channels": SCOPE})
+            "roll", "grind", settings={"trigger": "go", "roll_interval": 5.0, "channels": SCOPE}
+        )
         await self.api.accounts_plugin_profile("alpha", "roll", "grind")
         # the account override wins over BOTH default and profile
         await self.db.plugins.set_setting("alpha", "roll", "trigger", "mine")
 
-        effective = await self.api.accounts_effective_settings("alpha",
-                                                               "roll")
-        self.assertEqual(effective["trigger"], "mine")     # account layer
+        effective = await self.api.accounts_effective_settings("alpha", "roll")
+        self.assertEqual(effective["trigger"], "mine")  # account layer
         self.assertEqual(effective["roll_interval"], 5.0)  # profile layer
-        self.assertEqual(effective["command"], "$wa")      # schema default
-        self.assertEqual(effective["userstack"], True)     # schema default
+        self.assertEqual(effective["command"], "$wa")  # schema default
+        self.assertEqual(effective["userstack"], True)  # schema default
         self.assertEqual(effective["channels"], validate_scope(SCOPE))
 
     async def test_no_profile_gives_defaults_and_null_scope(self) -> None:
-        effective = await self.api.accounts_effective_settings("alpha",
-                                                               "roll")
+        effective = await self.api.accounts_effective_settings("alpha", "roll")
         self.assertEqual(effective["trigger"], "roll")
         self.assertEqual(effective["command"], "$wa")
         self.assertIsNone(effective["channels"])
 
     async def test_account_override_alone_beats_default(self) -> None:
         await self.db.plugins.set_setting("alpha", "roll", "command", "$m")
-        effective = await self.api.accounts_effective_settings("alpha",
-                                                               "roll")
+        effective = await self.api.accounts_effective_settings("alpha", "roll")
         self.assertEqual(effective["command"], "$m")
 
     async def test_requires_assignment(self) -> None:
@@ -407,8 +406,7 @@ class EffectiveSettingsTests(ProfileSurfaceTestBase):
 # --------------------------------------------------------------- channels
 class ChannelsTests(ProfileSurfaceTestBase):
     async def test_wired_client_returns_snapshot(self) -> None:
-        self.assertEqual(
-            await self.api.accounts_channels("alpha"), SNAPSHOT)
+        self.assertEqual(await self.api.accounts_channels("alpha"), SNAPSHOT)
 
     async def test_offline_account_returns_empty(self) -> None:
         self.accounts_mgr.add("beta")  # no client at all
@@ -428,29 +426,32 @@ class UnwiredTests(unittest.IsolatedAsyncioTestCase):
     """Stacks built without a database: reads degrade, mutations fail."""
 
     async def test_reads_degrade(self) -> None:
-        api = ControlAPI(
+        api = _api_with_stubs(
             accounts=_StubAccountsManager(),
             plugins=_StubPluginManager(["roll"]),
             settings=SimpleNamespace(),
-            limiter=SimpleNamespace(), scheduler=SimpleNamespace(),
+            limiter=SimpleNamespace(),
+            scheduler=SimpleNamespace(),
             logs=SimpleNamespace(),
         )
         self.assertEqual(await api.plugin_profiles_list(), [])
 
     async def test_mutations_fail_loudly(self) -> None:
-        api = ControlAPI(
+        api = _api_with_stubs(
             accounts=_StubAccountsManager(),
             plugins=_StubPluginManager(["roll"]),
             settings=SimpleNamespace(),
-            limiter=SimpleNamespace(), scheduler=SimpleNamespace(),
+            limiter=SimpleNamespace(),
+            scheduler=SimpleNamespace(),
             logs=SimpleNamespace(),
         )
-        for call in (
+        calls: tuple[Callable[[], Awaitable[Any]], ...] = (
             lambda: api.plugin_profile_create("roll", "g"),
             lambda: api.plugin_profile_update("roll", "g", description="d"),
             lambda: api.plugin_profile_delete("roll", "g"),
             lambda: api.accounts_plugin_profile("alpha", "roll", "g"),
-        ):
+        )
+        for call in calls:
             with self.assertRaises(RuntimeError):
                 await call()
 

@@ -14,11 +14,24 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.errors import DatabaseError
 from database.db import Database
+
+if TYPE_CHECKING:
+    from core.api import ControlAPI
+
+
+def _api_with_stubs(**collaborators: Any) -> ControlAPI:
+    """Build a ControlAPI wired with placeholder collaborators — the
+    constructor pins the concrete collaborator classes these tests
+    replace (the placeholders are never touched on these paths)."""
+    from core.api import ControlAPI
+
+    return ControlAPI(**collaborators)
 
 
 class _Base(unittest.IsolatedAsyncioTestCase):
@@ -170,13 +183,11 @@ class FacadeSurface(unittest.IsolatedAsyncioTestCase):
     """ControlAPI over the store: fail-closed validation + pass-through."""
 
     async def asyncSetUp(self) -> None:
-        from core.api import ControlAPI
-
         self._tmp = tempfile.TemporaryDirectory()
         self.db = Database(Path(self._tmp.name) / "f.db")
         await self.db.connect()
         await self.db.accounts.add("alpha")
-        self.api = ControlAPI(
+        self.api = _api_with_stubs(
             accounts=type("M", (), {"get": staticmethod(lambda n: None)})(),
             plugins=object(),
             settings=object(),
@@ -185,14 +196,32 @@ class FacadeSurface(unittest.IsolatedAsyncioTestCase):
             logs=object(),
             database=self.db,
         )
-        # the facade's known-sets: one account, one plugin
-        self.api._validate_account_known = lambda a: (
-            None if a == "alpha" else (_ for _ in ()).throw(ValueError("unknown account"))
-        )
-        self.api._validate_plugins_known = lambda ps: (
-            None if ps == ["exporter"] else (_ for _ in ()).throw(ValueError("unknown plugin"))
-        )
-        self.api._audit_mgmt = lambda *a, **k: None
+
+        # the facade's known-sets: one account, one plugin. The
+        # value-or-raise lambdas become plain raisers (same contract);
+        # setattr parks them in the instance slots mypy will not let a
+        # method store be assigned to.
+        def _known_account(a: str) -> None:
+            if a != "alpha":
+                raise ValueError("unknown account")
+
+        def _known_plugins(ps: list[str]) -> None:
+            if ps != ["exporter"]:
+                raise ValueError("unknown plugin")
+
+        def _no_audit(*a: Any, **k: Any) -> None:
+            pass
+
+        # setattr through a VARIABLE name (ruff B010 only flags constant
+        # attribute names): parks each raiser in the instance slot mypy
+        # will not let a method store be assigned to
+        replacements = {
+            "_validate_account_known": _known_account,
+            "_validate_plugins_known": _known_plugins,
+            "_audit_mgmt": _no_audit,
+        }
+        for slot_name, replacement in replacements.items():
+            setattr(self.api, slot_name, replacement)
 
     async def asyncTearDown(self) -> None:
         await self.db.close()

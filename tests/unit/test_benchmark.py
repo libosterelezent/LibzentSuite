@@ -1,4 +1,5 @@
 """Benchmark subsystem unit tests: samplers, collector, report, scenarios."""
+
 from __future__ import annotations
 
 import asyncio
@@ -32,7 +33,7 @@ class TaskSamplerTests(unittest.IsolatedAsyncioTestCase):
     async def test_census_counts_live_tasks_only(self) -> None:
         done = asyncio.get_running_loop().create_future()
         done.set_result(None)
-        live = asyncio.get_running_loop().create_future()
+        _live = asyncio.get_running_loop().create_future()
         sampler = TaskSampler(interval_s=0.05)
         sampler.start()
         await asyncio.sleep(0.12)
@@ -47,11 +48,11 @@ class PerfCollectorTests(unittest.IsolatedAsyncioTestCase):
         perf = PerfCollector()
 
         @perf.timed("sync_fn")
-        def sync_fn():
+        def sync_fn() -> int:
             return 1
 
         @perf.timed("async_fn")
-        async def async_fn():
+        async def async_fn() -> int:
             await asyncio.sleep(0.01)
             return 2
 
@@ -75,13 +76,11 @@ class PerfCollectorTests(unittest.IsolatedAsyncioTestCase):
 
 class LeakVerdictTests(unittest.TestCase):
     def test_stable_series(self) -> None:
-        verdict = leak_verdict([100, 100.0, 100.0, 100.0, 100.0, 100.0],
-                               [5, 5, 5, 5, 5, 5])
+        verdict = leak_verdict([100, 100.0, 100.0, 100.0, 100.0, 100.0], [5, 5, 5, 5, 5, 5])
         self.assertEqual(verdict["verdict"], "stable")
 
     def test_monotone_growth_flagged(self) -> None:
-        verdict = leak_verdict(
-            [100, 100, 200, 300, 400, 500], [5, 5, 5, 5, 5, 5])
+        verdict = leak_verdict([100, 100, 200, 300, 400, 500], [5, 5, 5, 5, 5, 5])
         self.assertEqual(verdict["verdict"], "suspected-leak")
 
     def test_insufficient_cycles(self) -> None:
@@ -89,30 +88,47 @@ class LeakVerdictTests(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "insufficient-cycles")
 
     def test_returns_to_baseline_not_a_leak(self) -> None:
-        verdict = leak_verdict(
-            [100, 100, 500, 100, 100, 100], [5, 5, 5, 5, 5, 5])
+        verdict = leak_verdict([100, 100, 500, 100, 100, 100], [5, 5, 5, 5, 5, 5])
         self.assertEqual(verdict["verdict"], "stable")
 
 
 class ReportTests(unittest.TestCase):
     def test_render_and_compare(self) -> None:
-        report = {"scenarios": [{
-            "name": "x", "mode": "test", "cycles": 1, "passed": True,
-            "process": {"rss_base_kb": 1000, "rss_peak_kb": 2000,
-                        "cpu_pct": 5.0},
-            "loop_lag_ms": {"p50_ms": 1, "p95_ms": 2, "p99_ms": 3,
-                            "max_ms": 4, "samples": 10},
-            "tasks": {"end": 3}, "threads": {"end": 2},
-            "stages": {}, "custom": {}, "leak": {"verdict": "stable"},
-        }]}
+        report = {
+            "scenarios": [
+                {
+                    "name": "x",
+                    "mode": "test",
+                    "cycles": 1,
+                    "passed": True,
+                    "process": {"rss_base_kb": 1000, "rss_peak_kb": 2000, "cpu_pct": 5.0},
+                    "loop_lag_ms": {
+                        "p50_ms": 1,
+                        "p95_ms": 2,
+                        "p99_ms": 3,
+                        "max_ms": 4,
+                        "samples": 10,
+                    },
+                    "tasks": {"end": 3},
+                    "threads": {"end": 2},
+                    "stages": {},
+                    "custom": {},
+                    "leak": {"verdict": "stable"},
+                }
+            ]
+        }
         text = render_table(report)
         self.assertIn("Scenario: x", text)
         # compare against itself: everything unchanged
         self.assertIn("ok (within tolerances)", compare(report, report))
         worse = {"scenarios": [dict(report["scenarios"][0])]}
         worse["scenarios"][0]["loop_lag_ms"] = {
-            "p50_ms": 50, "p95_ms": 80, "p99_ms": 90, "max_ms": 100,
-            "samples": 10}
+            "p50_ms": 50,
+            "p95_ms": 80,
+            "p99_ms": 90,
+            "max_ms": 100,
+            "samples": 10,
+        }
         self.assertIn("REGRESSED", compare(report, worse))
 
 
@@ -124,8 +140,8 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         for name in ("cold_boot",):
             args = build_parser().parse_args(
-                ["--scenario", name, "--cycles", "1", "--duration", "0.1",
-                 "--quiet"])
+                ["--scenario", name, "--cycles", "1", "--duration", "0.1", "--quiet"]
+            )
             report = await run_suite(args)
             scen = report["scenarios"][0]
             self.assertTrue(scen["passed"], f"{name} failed")
@@ -135,13 +151,13 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
         from benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(
-            ["--scenario", "restart_churn", "--cycles", "4", "--quiet"])
+            ["--scenario", "restart_churn", "--cycles", "4", "--quiet"]
+        )
         report = await run_suite(args)
         scen = report["scenarios"][0]
         self.assertEqual(scen["custom"]["clients_built"], 4)
         self.assertEqual(scen["custom"]["restarts"], 4)
-        self.assertIn(scen["leak"]["verdict"],
-                      ("stable", "inconclusive", "insufficient-cycles"))
+        self.assertIn(scen["leak"]["verdict"], ("stable", "inconclusive", "insufficient-cycles"))
 
     async def test_bootstrap_key_isolation(self) -> None:
         """The bench workspace must never touch state/credentials.key."""

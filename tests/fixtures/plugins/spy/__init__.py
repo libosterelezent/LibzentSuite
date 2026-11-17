@@ -4,11 +4,12 @@ State is per-instance (each (account, plugin) pair gets a fresh object), so
 tests can assert routing/isolation precisely: alpha's spy and beta's spy are
 different instances with different `seen`/`calls` lists.
 """
+
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
-from core.event_bus import Event
+from core.event_bus import Event  # noqa: TC001 -- runtime event registration
 from core.plugin_base import PluginBase, PluginContext
 from core.settings_manager import Setting
 

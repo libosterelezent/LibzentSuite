@@ -1,9 +1,10 @@
 Completed Features
 =================
 
-This page records what has been built and verified, with pointers to
-the knowledgebase for full detail. It is the historical record
-AGENTS.md rule 8 requires — completed roadmap items migrate here.
+The user-facing historical record — what shipped, when, and where its
+detail lives. The full engineering detail is in the local
+``knowledgebase/`` archive (gitignored; on the machines that built
+it).
 
 Workspace Unification (2026-11-13 → 2026-11-14)
 -----------------------------------------------
@@ -25,37 +26,105 @@ Plugins declare their command face as a real library **Cog**
 (``COG = MyCog`` on PluginBase) — typed converter parameters,
 command groups, native help, cog hooks. The manual COMMANDS facade
 (CommandSpec/ArgSpec/tokenization/registration bridge) retired. All
-15 framework verbs ride the FrameworkVerbsCog.
+15 framework verbs ride the FrameworkVerbsCog. The hub's command
+machinery, the RemoteControl mention bridge, and the dashboard-era
+facade residue retired to the ``dump/`` wing (2026-11-15) — preserved
+verbatim with a full inventory.
 
 **Key files:** ``core/plugin_manager/cog_host.py``,
-``core/plugin_manager/framework_cog.py`` (the C1 intake mixin retired
-to ``dump/`` 2026-11-15 — the adapter wires its own event handlers)
+``core/plugin_manager/framework_cog.py``
 
 better.py-self Fork (fully adopted)
 -----------------------------------
 
-The user-account Discord client fork with memory-capped caches,
+The user-account Discord client fork: memory-capped caches,
 per-account cache persistence, dynamic callable prefixes, the
 authorization gate via ``bot.add_check()`` (evaluated before argument
-parsing), and the durable signal outbox.
+parsing), the durable signal outbox, and ``cache_stats()``.
 
 **Key files:** ``adapters/discord/client.py``,
 ``core/workspace/signals.py``
 
+The Two-Level Data Model (2026-11-15 → 2026-11-16)
+---------------------------------------------------
+
+The owner-locked architecture: **account plugin profiles** handle
+independent execution (plugin-defined schema, channels-in-profile,
+profile-scoped cooldowns and task attribution); **workspace presets**
+coordinate multiple accounts as a group (reference profiles, never
+copy; own workflow state and execution dependencies). All eight
+phases landed, migrations v12–v16:
+
+- The store: ``(account, plugin, name)`` identity, full-scope CRUD
+  predicates, opaque bodies (the core never interprets), cascade
+- The lifecycle: the facade's profile verbs carry **zero scope
+  parameters** — isolation by construction; the active-profile
+  pointer with atomic clear-on-delete
+- The runtime: ``profile_settings()`` resolution seam; profile-scoped
+  cooldowns (``''`` = the profile-less scope every existing caller
+  keeps) and task attribution with scoped cancel
+- The interfaces: REST routes + the CLI ``profiles`` group
+- The legacy fold (v15): template bindings became account-owned
+  instances, idempotent by construction
+- Reference-based presets + executions (v16): apply activates in
+  place; drift detected and fails closed; checkpoints resume without
+  replaying
+
+**Key files:** ``database/repositories/account_plugin_profiles.py``,
+``database/repositories/workspace_presets.py``,
+``core/workspace/service.py`` (the P8 surface)
+
+Quality Campaigns
+-----------------
+
+**mypy strict ZERO — both trees.** Production: 485 legacy errors
+fixed (2026-11-15), surfacing four latent runtime bugs along the way.
+Tests: 2,443 errors fixed by a six-batch annotation campaign
+(2026-11-16) — zero assertions weakened, zero tests deleted. Strict
+mode over all 216 source files is a hard floor; the CI ratchet
+requires the error count to equal the baseline exactly (grow fails,
+shrink without lowering the baseline also fails).
+
+**Coverage floor 76%** (production-only, measured 77.7%) — branch
+coverage over the eight production trees, per-leg in CI.
+
+**The 3.10–3.13 matrix** on the exact uv lock — the widened floor
+caught the parallel-first-boot WAL race and the 3.10-only
+``Task.cancelling`` assumption. ``scripts/local-ci.sh`` mirrors the
+entire CI gate locally (including the isolated 3.10 leg) — nothing
+reaches CI that the local gate did not see first.
+
 FastAPI Core API (2026-11-14)
 -----------------------------
 
-REST + WebSocket surface over the one ControlAPI facade: Pydantic
-models, token auth, the full workspace/account/plugin/task/log/audit
-surface. Zero business logic in the interface layer.
+``interfaces/api/`` — the REST surface over the one ControlAPI
+facade: Pydantic models, X-API-Token auth, the full account/workspace/
+plugin/task/log/audit surface including the profile routes. Honest
+dependency extras: ``[api]`` (uvicorn), ``[ui]`` (flet + httpx),
+``[all]``.
 
-**Key files:** ``interfaces/api/app.py``
+**Key files:** ``interfaces/api/app.py``, ``pyproject.toml``
 
 Flet UI Shell (2026-11-14)
 --------------------------
 
 The dashboard-replacement shell: page registry, API client, flet
 NavigationRail with Status/Accounts/Workspaces/Logs pages. Flet
-imports lazily (testable without the UI dependency).
+imports lazily (testable without the UI dependency). The full
+interface per the owner's design contract is the active queue's #1
+item.
 
-**Key files:** ``interfaces/ui/__init__.py``
+**Key files:** ``interfaces/ui/__init__.py``,
+``docs/plans/flet_ui_design_contract.md`` (the spec)
+
+Repository Health Stack (2026-11-15 → 2026-11-16)
+-------------------------------------------------
+
+Security workflow (gitleaks full-history, pip-audit against the exact
+lock, bandit), weekly health sweep (fresh-runner full gate, build
+sanity, action-pin validation, dependency-freshness probe), per-push
+build gate, the unarmed-but-ready release pipeline (CHANGELOG-driven
+notes), Dependabot (github-actions), native secret scanning + push
+protection, CodeQL, CODEOWNERS, SECURITY.md, branch/tag rulesets, and
+the CodeRabbit reviewer (V2-tuned: risk instructions, per-path
+contract instructions, regex base branches, ruff config).

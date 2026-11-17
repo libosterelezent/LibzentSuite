@@ -6,6 +6,7 @@ account_plugins.profile references to NULL, binding set/clear/no-op,
 bindings()/all_bindings() shapes, restart persistence, and migration
 idempotency via reopen.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -50,11 +51,14 @@ class CreateGetTests(PluginProfilesTestBase):
         self.assertAlmostEqual(record.created_at, record.updated_at)
 
     async def test_create_stores_settings_and_description(self) -> None:
-        record = await self.repo.create(
-            "roll", "grind", "fast rolls",
+        await self.repo.create(
+            "roll",
+            "grind",
+            "fast rolls",
             {"trigger": "go", "channels": {"channels": ["123"]}},
         )
         fetched = await self.repo.get("roll", "grind")
+        assert fetched is not None
         self.assertEqual(fetched.description, "fast rolls")
         # settings ride through verbatim (validation is the API's job)
         self.assertEqual(fetched.settings["trigger"], "go")
@@ -70,9 +74,7 @@ class CreateGetTests(PluginProfilesTestBase):
             await self.repo.create("roll", "grind")
         # the SAME name under a DIFFERENT plugin is a different profile
         await self.repo.create("snipe", "grind")
-        self.assertEqual(
-            sorted(r.name for r in await self.repo.list()),
-            ["grind", "grind"])
+        self.assertEqual(sorted(r.name for r in await self.repo.list()), ["grind", "grind"])
 
     async def test_empty_names_refused(self) -> None:
         with self.assertRaises(DatabaseError):
@@ -106,6 +108,7 @@ class UpdateTests(PluginProfilesTestBase):
     async def test_update_description_only(self) -> None:
         await self.repo.create("roll", "grind", "old")
         updated = await self.repo.update("roll", "grind", description="new")
+        assert updated is not None
         self.assertEqual(updated.description, "new")
         self.assertEqual(updated.name, "grind")  # untouched
         self.assertGreaterEqual(updated.updated_at, updated.created_at)
@@ -113,11 +116,13 @@ class UpdateTests(PluginProfilesTestBase):
     async def test_update_settings_replaces_wholesale(self) -> None:
         await self.repo.create("roll", "grind", settings={"a": 1})
         updated = await self.repo.update("roll", "grind", settings={"b": 2})
+        assert updated is not None
         self.assertEqual(updated.settings, {"b": 2})
 
     async def test_update_settings_none_keeps_current(self) -> None:
         await self.repo.create("roll", "grind", settings={"a": 1})
         updated = await self.repo.update("roll", "grind", description="d")
+        assert updated is not None
         self.assertEqual(updated.settings, {"a": 1})
 
     async def test_rename_refuses_duplicate(self) -> None:
@@ -131,15 +136,14 @@ class UpdateTests(PluginProfilesTestBase):
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.set_profile("alpha", "roll", "grind")
         updated = await self.repo.update("roll", "grind", name_new="farm")
+        assert updated is not None
         self.assertEqual(updated.name, "farm")
         self.assertIsNone(await self.repo.get("roll", "grind"))
         # the binding followed the rename, no dangling pointer
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "farm"})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "farm"})
 
     async def test_update_unknown_profile_is_none(self) -> None:
-        self.assertIsNone(
-            await self.repo.update("ghost", "g", description="d"))
+        self.assertIsNone(await self.repo.update("ghost", "g", description="d"))
 
 
 class DeleteTests(PluginProfilesTestBase):
@@ -161,48 +165,40 @@ class DeleteTests(PluginProfilesTestBase):
 
         self.assertTrue(await self.repo.delete("roll", "grind"))
         # the deleted profile's binding NULLs; the other account's stays
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": None})
-        self.assertEqual(await self.bindings.bindings("beta"),
-                         {"roll": "farm"})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": None})
+        self.assertEqual(await self.bindings.bindings("beta"), {"roll": "farm"})
 
 
 # -------------------------------------------------------------- bindings
 class BindingTests(PluginProfilesTestBase):
     async def test_set_profile_then_bindings(self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
-        self.assertTrue(
-            await self.bindings.set_profile("alpha", "roll", "grind"))
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "grind"})
+        self.assertTrue(await self.bindings.set_profile("alpha", "roll", "grind"))
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "grind"})
 
     async def test_set_profile_is_idempotent(self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.set_profile("alpha", "roll", "grind")
         await self.bindings.set_profile("alpha", "roll", "grind")
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "grind"})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "grind"})
 
     async def test_clear_profile_with_none(self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.set_profile("alpha", "roll", "grind")
         self.assertTrue(await self.bindings.set_profile("alpha", "roll", None))
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": None})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": None})
 
     async def test_set_profile_without_assignment_is_noop(self) -> None:
         # never creates an assignment implicitly (binding requires
         # assignment is the calling manager's rule)
-        self.assertFalse(
-            await self.bindings.set_profile("alpha", "roll", "grind"))
+        self.assertFalse(await self.bindings.set_profile("alpha", "roll", "grind"))
         self.assertEqual(await self.bindings.plugins_of("alpha"), [])
 
     async def test_bindings_marks_unbound_as_none(self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.assign_plugin("alpha", "snipe")
         await self.bindings.set_profile("alpha", "roll", "grind")
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "grind", "snipe": None})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "grind", "snipe": None})
 
     async def test_bindings_unknown_account_is_empty(self) -> None:
         self.assertEqual(await self.bindings.bindings("ghost"), {})
@@ -214,8 +210,7 @@ class BindingTests(PluginProfilesTestBase):
         await self.bindings.set_profile("beta", "roll", "grind")
         self.assertEqual(
             await self.bindings.all_bindings(),
-            {"alpha": {"roll": None},
-             "beta": {"roll": "grind", "snipe": None}},
+            {"alpha": {"roll": None}, "beta": {"roll": "grind", "snipe": None}},
         )
 
     async def test_assignment_shapes_unchanged(self) -> None:
@@ -224,17 +219,14 @@ class BindingTests(PluginProfilesTestBase):
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.set_profile("alpha", "roll", "grind")
         self.assertEqual(await self.bindings.plugins_of("alpha"), ["roll"])
-        self.assertEqual(await self.bindings.all_assignments(),
-                         {"alpha": ["roll"]})
+        self.assertEqual(await self.bindings.all_assignments(), {"alpha": ["roll"]})
 
-    async def test_set_plugins_replacement_keeps_bindings_of_kept_plugins(
-            self) -> None:
+    async def test_set_plugins_replacement_keeps_bindings_of_kept_plugins(self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
         await self.bindings.assign_plugin("alpha", "gone")
         await self.bindings.set_profile("alpha", "roll", "grind")
         await self.bindings.set_plugins("alpha", ["roll", "new"])
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "grind", "new": None})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "grind", "new": None})
         await self.bindings.set_plugins("alpha", [])
         self.assertEqual(await self.bindings.bindings("alpha"), {})
 
@@ -262,12 +254,11 @@ class RestartTests(PluginProfilesTestBase):
         self.assertEqual(applied, 0)  # migration guard: v7 never reapplies
 
         record = await self.repo.get("roll", "grind")
+        assert record is not None
         self.assertEqual(record.description, "desc")
         self.assertEqual(record.settings, {"a": 1})
-        self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": "grind"})
-        self.assertEqual(await self.bindings.all_bindings(),
-                         {"alpha": {"roll": "grind"}})
+        self.assertEqual(await self.bindings.bindings("alpha"), {"roll": "grind"})
+        self.assertEqual(await self.bindings.all_bindings(), {"alpha": {"roll": "grind"}})
 
 
 if __name__ == "__main__":

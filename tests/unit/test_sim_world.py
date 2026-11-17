@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
+from typing import TYPE_CHECKING, Any
 
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
@@ -13,17 +14,21 @@ from adapters.simulator.world import (
     SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_OWNER_ID,
     SimWorld,
+    WorldMessage,
 )
 from core.errors import ServerRateLimit
+
+if TYPE_CHECKING:
+    from adapters.model import DiscordMessage
 
 
 class _Recorder:
     """Minimal world subscriber standing in for a connected client."""
 
     def __init__(self) -> None:
-        self.received = []
+        self.received: list[WorldMessage] = []
 
-    def receive(self, message) -> None:
+    def receive(self, message: WorldMessage) -> None:
         self.received.append(message)
 
 
@@ -101,7 +106,7 @@ class _Boom:
 
     user_id = 0
 
-    def receive(self, message) -> None:
+    def receive(self, message: WorldMessage) -> None:
         raise RuntimeError("boom")
 
 
@@ -112,9 +117,9 @@ class _AsyncBlocker:
     user_id = 0
 
     def __init__(self) -> None:
-        self.parked = []
+        self.parked: list[asyncio.Task[None]] = []
 
-    def receive(self, message) -> None:
+    def receive(self, message: WorldMessage) -> None:
         self.parked.append(asyncio.get_running_loop().create_task(asyncio.sleep(999)))
 
 
@@ -339,7 +344,7 @@ class TestWaitForQuiet(unittest.IsolatedAsyncioTestCase):
 class TestServerLimits(unittest.IsolatedAsyncioTestCase):
     """One-shot 429 queue: fires once, matches channels, records evidence."""
 
-    def _armed(self, **kwargs) -> SimWorld:
+    def _armed(self, **kwargs: Any) -> SimWorld:
         world = _basic_world()
         world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5, global_=True)
         return world
@@ -348,10 +353,13 @@ class TestServerLimits(unittest.IsolatedAsyncioTestCase):
         world = self._armed()
         limit = world.take_server_limit(SYNTHETIC_ALPHA_ID, SYNTHETIC_GUILD_CHANNEL)
         self.assertIsInstance(limit, ServerRateLimit)
+        assert limit is not None  # narrowed for the field reads below
         self.assertEqual(limit.retry_after, 0.5)
         self.assertTrue(limit.global_)
         self.assertEqual(len(world.blocked_sends), 1)  # recorded with ts
-        self.assertGreater(world.blocked_sends[0]["ts"], 0.0)
+        ts = world.blocked_sends[0]["ts"]
+        assert ts is not None
+        self.assertGreater(ts, 0.0)
         # consumed: the next intake finds nothing
         self.assertIsNone(world.take_server_limit(SYNTHETIC_ALPHA_ID, SYNTHETIC_GUILD_CHANNEL))
 
@@ -363,6 +371,7 @@ class TestServerLimits(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(world.take_server_limit(SYNTHETIC_ALPHA_ID, SYNTHETIC_GUILD_CHANNEL))
         limit = world.take_server_limit(SYNTHETIC_ALPHA_ID, other)
         self.assertIsInstance(limit, ServerRateLimit)
+        assert limit is not None  # narrowed for the field reads below
         self.assertEqual(limit.retry_after, 0.3)
         self.assertFalse(limit.global_)
 
@@ -398,7 +407,7 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         """Edit parity: live edits carry the full convert_message shape;
         the sim used to push a minimal 5-field DTO (embeds dropped)."""
         world = self._rich_world()
-        seen = []
+        seen: list[DiscordMessage] = []
         subscriber = type(
             "Sub",
             (),
@@ -415,11 +424,12 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edited.content, "edited rich payload")
         self.assertEqual(edited.embeds[0].title, "roster")
         self.assertEqual(edited.components[0].components[0].custom_id, "roll-once")
+        assert edited.channel is not None
         self.assertEqual(edited.channel.name, "guild-channel")
 
     async def test_edit_event_filters_author_client(self) -> None:
         world = self._rich_world()
-        seen = []
+        seen: list[DiscordMessage] = []
         subscriber = type(
             "Sub",
             (),
@@ -453,7 +463,7 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         world.subscribers.append(subscriber)
         world.react(SYNTHETIC_OWNER_ID, 1, "👍")
         self.assertEqual(len(seen), 1)
-        kind, mid, cid, gid, uid, emoji, raw = seen[0]
+        kind, _mid, _cid, _gid, uid, emoji, raw = seen[0]
         self.assertEqual(kind, "add")
         self.assertEqual(uid, SYNTHETIC_OWNER_ID)
         self.assertEqual(emoji, "👍")
@@ -471,6 +481,8 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         world = self._rich_world()
         message = world.journal[-1]
         dto = to_discord_message(world, message)
+        assert dto.author is not None
+        assert dto.channel is not None
         self.assertEqual(dto.id, message.id)
         self.assertEqual(dto.author.name, "owner")
         self.assertEqual(dto.embeds, message.embeds)

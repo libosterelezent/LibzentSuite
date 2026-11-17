@@ -1,5 +1,6 @@
 """FINAL-PHASE regression tests: caches, memory-first status, lifecycle
 scheduling, burst dispatch integration, security hardening."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import os
 import stat
 import unittest
 from types import SimpleNamespace as NS
+from typing import TYPE_CHECKING, Any
 
 from core.account_manager import AccountStatus
 from core.account_manager.services import MessageWaiterRegistry
@@ -16,10 +18,20 @@ from core.rate_limit_manager.engine import RateLimitManager
 from tests.unit.helpers import make_manager
 from tests.unit.test_rate_engine import StubLogger
 
+if TYPE_CHECKING:
+    from database.models import AccountRecord
+
 
 def _msg(account: str, i: int) -> MessageReceived:
-    return MessageReceived(account=account, message_id=i, channel_id=500,
-                           author_id=1, content=f"m{i}")
+    return MessageReceived(
+        account=account, message_id=i, channel_id=500, author_id=1, content=f"m{i}"
+    )
+
+
+def _shadow_repo_get(repo: Any, getter: Any) -> None:
+    """Instance-attribute shadow of a repository method (mypy forbids
+    the method-slot store; the runtime behaviour is identical)."""
+    repo.get = getter
 
 
 class WaiterRegistryTests(unittest.IsolatedAsyncioTestCase):
@@ -29,8 +41,10 @@ class WaiterRegistryTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         registry = MessageWaiterRegistry(bus)
         calls = {"alpha": 0, "beta": 0}
-        def alpha_handler(event):
+
+        def alpha_handler(event: MessageReceived) -> None:
             calls["alpha"] += 1
+
         registry.add("alpha", alpha_handler)
         for i in range(100):
             bus.publish_nowait(_msg("alpha" if i % 2 else "beta", i))
@@ -42,7 +56,7 @@ class WaiterRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_forget_account_drops_only_that_account(self) -> None:
         bus = EventBus()
         registry = MessageWaiterRegistry(bus)
-        seen = []
+        seen: list[str] = []
         registry.add("alpha", lambda e: seen.append("a"))
         registry.add("beta", lambda e: seen.append("b"))
         registry.forget_account("alpha")
@@ -57,30 +71,37 @@ class WaiterRegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         bus = h.bus
         registry = MessageWaiterRegistry(bus)
+        from core.account_manager.cache import DiscordCache
         from core.account_manager.services import AccountPluginServices
 
+        # a fresh DiscordCache IS the empty channels/guilds view the NS
+        # double used to fake (both empty dicts at construction)
         facade = AccountPluginServices(
-            "alpha", "roll", bus=bus, scheduler=NS(submit=lambda *a, **k: None),
-            credentials=h.credentials, cache=NS(
-                channels={}, guilds={}), waiter_registry=registry)
+            "alpha",
+            "roll",
+            bus=bus,
+            scheduler=NS(submit=lambda *a, **k: None),
+            credentials=h.credentials,
+            cache=DiscordCache("alpha"),
+            waiter_registry=registry,
+        )
 
-        async def deliver():
+        async def deliver() -> None:
             await asyncio.sleep(0.05)
-            bus.publish_nowait(_msg("beta", 1))   # wrong account first
+            bus.publish_nowait(_msg("beta", 1))  # wrong account first
             bus.publish_nowait(_msg("alpha", 2))  # then the match
 
         task = asyncio.create_task(deliver())
-        result = await facade.wait_for_message(
-            lambda e: True, timeout=2.0)
+        result = await facade.wait_for_message(lambda e: True, timeout=2.0)
         await task
         self.assertIsNotNone(result)
+        assert result is not None
         self.assertEqual(result.account, "alpha")
         registry.close()
 
     async def test_manager_removal_forgets_waiters(self) -> None:
         h = make_manager()
-        h.manager._waiter_registry.add(
-            "alpha", lambda e: None)
+        h.manager._waiter_registry.add("alpha", lambda e: None)
         await h.manager.add_account("alpha")
         await h.manager.remove_account("alpha")
         self.assertEqual(h.manager._waiter_registry.pending(), {})
@@ -93,13 +114,12 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_hit_equivalence_and_fresh_dicts(self) -> None:
         m = self._engine()
         m.set_policy_values("message", 3.0, 0.1, 0.5)
-        m.set_policy_values("message", 2.0, 0.2, 0.6,
-                            "account", "alpha")
+        m.set_policy_values("message", 2.0, 0.2, 0.6, "account", "alpha")
         a = m.effective("message", "alpha", "roll")
         b = m.effective("message", "alpha", "roll")
         self.assertEqual(a, b)
-        self.assertIsNot(a, b)              # fresh dict per call
-        a["sources"].append("junk")          # caller mutation cannot
+        self.assertIsNot(a, b)  # fresh dict per call
+        a["sources"].append("junk")  # caller mutation cannot
         c = m.effective("message", "alpha", "roll")  # poison the cache
         self.assertNotIn("junk", c["sources"])
         # cache actually populated + version-consistent
@@ -130,14 +150,14 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_cap_bounds_the_cache(self) -> None:
         m = self._engine()
         import core.rate_limit_manager.engine as eng
+
         eng._EFFECTIVE_CACHE_CAP = 8
         try:
             for i in range(20):
                 m.effective(f"act{i}", "alpha", "roll")
             self.assertLessEqual(len(m._effective_cache), 8)
             # post-flush reads still correct
-            self.assertEqual(m.effective("act19", "alpha", "roll")["action"],
-                             "act19")
+            self.assertEqual(m.effective("act19", "alpha", "roll")["action"], "act19")
         finally:
             eng._EFFECTIVE_CACHE_CAP = 4096
 
@@ -157,12 +177,13 @@ class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):
         reads = {"n": 0}
         original_get = h.repo.get
 
-        async def counting_get(name):
+        async def counting_get(name: str) -> AccountRecord | None:
             reads["n"] += 1
             return await original_get(name)
 
-        h.repo.get = counting_get
-        out1 = await h.manager.accounts()   # memory-first: NO reads
+        # instance-attribute shadowing of the repo method
+        _shadow_repo_get(h.repo, counting_get)
+        out1 = await h.manager.accounts()  # memory-first: NO reads
         self.assertEqual(reads["n"], 0)
         out2 = await h.manager.accounts(refresh_records=True)  # explicit
         self.assertEqual(reads["n"], 1)
@@ -170,44 +191,73 @@ class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cooldown_tombstones_purged_on_expiry(self) -> None:
         now = {"t": 1000.0}
+
         class FakeRepo:
             # coherent double: rows stored by upsert are visible to get
             # (a repo that "forgets" rows it just wrote reads as a
             # concurrent delete to the set() race guard)
-            def __init__(self): self.rows = {}
-            async def upsert(self, **kw):
-                self.rows[(kw["account"], kw["plugin"],
-                           kw.get("profile", ""), kw["cooldown_key"])] = dict(kw)
-            async def get(self, *a, now=None, profile="", **k):
+            def __init__(self) -> None:
+                self.rows: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+            async def upsert(self, **kw: Any) -> None:
+                self.rows[
+                    (kw["account"], kw["plugin"], kw.get("profile", ""), kw["cooldown_key"])
+                ] = dict(kw)
+
+            async def get(
+                self, *a: Any, now: float | None = None, profile: str = "", **k: Any
+            ) -> dict[str, Any] | None:
                 row = self.rows.get((a[0], a[1], profile, a[2]))
-                if row is None or (now is not None
-                                   and row["expires_at"] <= now):
+                if row is None or (now is not None and row["expires_at"] <= now):
                     return None
                 return dict(row)
-            async def clear_expired_for(self, *a, **k): return 0
-            async def active_for(self, *a, **k): return []
-            async def active_all(self, now=None): return []
+
+            async def clear_expired_for(self, *a: Any, **k: Any) -> int:
+                return 0
+
+            async def active_for(self, *a: Any, **k: Any) -> list[Any]:
+                return []
+
+            async def active_all(self, now: float | None = None) -> list[Any]:
+                return []
+
         service = CooldownService(FakeRepo(), time_fn=lambda: now["t"])
         for i in range(50):
             await service.set("acct", "plug", f"k{i}", 10.0)
         self.assertEqual(len(service._active), 50)
-        now["t"] += 11.0                       # everything expires
+        now["t"] += 11.0  # everything expires
         for i in range(50):
             await service.get("acct", "plug", f"k{i}")
         self.assertEqual(len(service._active), 0)  # tombstones purged
 
     async def test_resync_replaces_mirror_from_db(self) -> None:
         class FakeRepo:
-            async def upsert(self, **kw): pass
-            async def get(self, *a, **k): return None
-            async def clear_expired_for(self, *a, **k): return 0
-            async def active_for(self, *a, **k): return []
-            async def active_all(self, now=None):
-                return [{"account": "alpha", "plugin": "roll",
-                         "cooldown_key": "roulette",
-                         "started_at": 1.0, "expires_at": 9e9,
-                         "source": "", "reason": "",
-                         "metadata": {}}]
+            async def upsert(self, **kw: Any) -> None:
+                pass
+
+            async def get(self, *a: Any, **k: Any) -> None:
+                return None
+
+            async def clear_expired_for(self, *a: Any, **k: Any) -> int:
+                return 0
+
+            async def active_for(self, *a: Any, **k: Any) -> list[Any]:
+                return []
+
+            async def active_all(self, now: float | None = None) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "account": "alpha",
+                        "plugin": "roll",
+                        "cooldown_key": "roulette",
+                        "started_at": 1.0,
+                        "expires_at": 9e9,
+                        "source": "",
+                        "reason": "",
+                        "metadata": {},
+                    }
+                ]
+
         service = CooldownService(FakeRepo(), time_fn=lambda: 1000.0)
         await service.set("alpha", "roll", "old", 10.0)
         count = await service.resync()
@@ -222,31 +272,28 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
         for name in ("alpha", "beta", "gamma"):
             await h.manager.add_account(name)
         park = asyncio.Event()
-        alpha_client = None
         original_factory = h.manager._client_factory
 
-        def parking_factory(name, token):
+        def parking_factory(name: str, token: str) -> Any:
             client = original_factory(name, token)
             if name == "alpha":
                 orig_connect = client.connect
 
-                async def parked_connect():
+                async def parked_connect() -> None:
                     await park.wait()
                     await orig_connect()
+
                 client.connect = parked_connect
             return client
 
         h.manager._client_factory = parking_factory
         task = asyncio.create_task(h.manager.start_all(stagger=0))
         await asyncio.sleep(0.3)  # beta/gamma must complete while alpha parks
-        self.assertEqual(
-            h.manager.get("beta").runtime.status, AccountStatus.RUNNING)
-        self.assertEqual(
-            h.manager.get("gamma").runtime.status, AccountStatus.RUNNING)
+        self.assertEqual(h.manager.get("beta").runtime.status, AccountStatus.RUNNING)
+        self.assertEqual(h.manager.get("gamma").runtime.status, AccountStatus.RUNNING)
         park.set()
         out = await asyncio.wait_for(task, timeout=10)
-        self.assertEqual(sorted(out["started"]),
-                         ["alpha", "beta", "gamma"])
+        self.assertEqual(sorted(out["started"]), ["alpha", "beta", "gamma"])
         await h.manager.stop_all()
 
     async def test_second_start_all_joins(self) -> None:
@@ -256,13 +303,14 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
         park = asyncio.Event()
         original_factory = h.manager._client_factory
 
-        def parking_factory(name, token):
+        def parking_factory(name: str, token: str) -> Any:
             client = original_factory(name, token)
             orig_connect = client.connect
 
-            async def parked_connect():
+            async def parked_connect() -> None:
                 await park.wait()
                 await orig_connect()
+
             client.connect = parked_connect
             return client
 
@@ -293,8 +341,7 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)  # alpha admitted; beta/gamma queued
         h.manager.emergency_stop("gamma")  # synchronous generation bump
         out = await asyncio.wait_for(task, timeout=15)
-        self.assertNotEqual(
-            h.manager.get("gamma").runtime.status, AccountStatus.RUNNING)
+        self.assertNotEqual(h.manager.get("gamma").runtime.status, AccountStatus.RUNNING)
         self.assertIn("gamma", out["overtaken"])
         await h.manager.stop_all()
 
@@ -302,24 +349,28 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
 class GateDepthTests(unittest.IsolatedAsyncioTestCase):
     async def test_projected_depth_fast_fail(self) -> None:
         from adapters.discord.client import IdentifyGate
+
         gate = IdentifyGate(interval=0.05, max_wait=0.45)
         # 12 waiters queue: those projected beyond 0.45s fast-fail
         results = []
-        async def attempt(n):
+
+        async def attempt(n: int) -> None:
             try:
                 await gate.acquire()
                 results.append(("ok", n))
             except ConnectionError:
                 results.append(("fail", n))
+
         await asyncio.gather(*[attempt(n) for n in range(12)])
         ok = [n for status, n in results if status == "ok"]
         failed = [n for status, n in results if status == "fail"]
         self.assertEqual(len(ok) + len(failed), 12)
-        self.assertGreater(len(failed), 0)   # depth projection fired
+        self.assertGreater(len(failed), 0)  # depth projection fired
         self.assertLess(len(ok), 12)
 
     async def test_spacing_still_honored(self) -> None:
         from adapters.discord.client import IdentifyGate
+
         gate = IdentifyGate(interval=0.05, max_wait=45.0)
         loop = asyncio.get_running_loop()
         t0 = loop.time()
@@ -343,6 +394,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             key = Path(tmp) / "k.key"
             from cryptography.fernet import Fernet
+
             key.write_text(Fernet.generate_key().decode())
             os.chmod(key, 0o644)  # deliberately loose
             service = CredentialService(_MemRepo(), key_path=key)
@@ -352,31 +404,40 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_audit_content_capped(self) -> None:
         from core.audit import AuditRecorder
+
         recorder = AuditRecorder(db_repo=None)
-        entry = recorder.record("alpha", "out", "message",
-                                content="x" * 50_000)
+        entry = recorder.record("alpha", "out", "message", content="x" * 50_000)
         self.assertLess(len(entry["content"]), 2_100)
 
 
 class RealClientShim:
     """Uses the real repr against a real instance shape."""
-    def __init__(self, token):
+
+    def __init__(self, token: str) -> None:
         from adapters.discord.client import RealDiscordClient
+
         self._inner = RealDiscordClient.__new__(RealDiscordClient)
         self._inner._token = token
         self._inner._account = "alpha"
         self._inner.user_id = None
         self._inner._client = None
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self._inner)
 
 
 class _MemRepo:
-    async def store(self, account, ciphertext): pass
-    async def load(self, account): return None
-    async def delete(self, account): return True
-    async def accounts_with_credential(self): return []
+    async def store(self, account: str, ciphertext: str) -> None:
+        pass
+
+    async def load(self, account: str) -> None:
+        return None
+
+    async def delete(self, account: str) -> bool:
+        return True
+
+    async def accounts_with_credential(self) -> list[str]:
+        return []
 
 
 class BurstIntegrationTests(unittest.IsolatedAsyncioTestCase):

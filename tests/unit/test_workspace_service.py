@@ -16,21 +16,25 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from core.workspace.service import WorkspaceService
 from database.db import Database
+
+if TYPE_CHECKING:
+    from database.models import PresetTemplateRecord, WorkspaceMemberRecord
 
 
 class StubSettings:
     """SettingsWriter double: an in-memory map with set/map."""
 
     def __init__(self) -> None:
-        self.values: dict[tuple[str, str], dict] = {}
+        self.values: dict[tuple[str, str], dict[str, Any]] = {}
 
-    async def set_setting(self, account: str, plugin: str, key: str, value) -> None:
+    async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> None:
         self.values.setdefault((account, plugin), {})[key] = value
 
-    async def settings(self, account: str, plugin: str) -> dict:
+    async def settings(self, account: str, plugin: str) -> dict[str, Any]:
         return dict(self.values.get((account, plugin), {}))
 
 
@@ -50,7 +54,7 @@ class StubLimiter:
     def __init__(self) -> None:
         self.mapping: dict[str, str | None] = {}
 
-    def set_account_group(self, account: str, group) -> None:
+    def set_account_group(self, account: str, group: str | None) -> None:
         self.mapping[account] = group
 
 
@@ -79,7 +83,7 @@ class WorkspaceServiceTestBase(unittest.IsolatedAsyncioTestCase):
         await self.db.accounts.add("A")
         await self.db.accounts.add("B")
 
-    async def member(self, account: str):
+    async def member(self, account: str) -> WorkspaceMemberRecord | None:
         return await self.db.workspaces.member(account)
 
     async def pointer(self, account: str) -> str | None:
@@ -108,7 +112,9 @@ class MembershipTests(WorkspaceServiceTestBase):
         await self.service.join("A", "alpha")
         task = await self.service.create_task("alpha", "grind")
         await self.service.assign_task(task, "A")
-        old_gen = (await self.db.workspaces.workspace_state("alpha")).generation
+        alpha_state = await self.db.workspaces.workspace_state("alpha")
+        assert alpha_state is not None
+        old_gen = alpha_state.generation
 
         await self.service.join("A", "beta")
 
@@ -137,8 +143,7 @@ class MembershipTests(WorkspaceServiceTestBase):
         self.assertIsNone(await self.member("A"))
         self.assertIsNone(self.limiter.mapping.get("A"))
         # rules 3-7: settings, channel assignments survive the leave
-        self.assertEqual(
-            (await self.settings.settings("A", "cleaner"))["trigger"], "$x")
+        self.assertEqual((await self.settings.settings("A", "cleaner"))["trigger"], "$x")
         self.assertEqual(len(await self.service.account_channels("A")), 1)
 
     async def test_concurrent_moves_always_agree(self) -> None:
@@ -204,8 +209,7 @@ class TaskTests(WorkspaceServiceTestBase):
         with self.assertRaises(ValueError) as ctx:
             await self.service.report_task_status(task, "queued")
         self.assertIn("retry allowance", str(ctx.exception))
-        requeued = await self.service.report_task_status(
-            task, "queued", retry_allowed=True)
+        requeued = await self.service.report_task_status(task, "queued", retry_allowed=True)
         self.assertEqual(requeued["status"], "queued")
 
     async def test_assignment_carries_live_generation(self) -> None:
@@ -220,10 +224,10 @@ class TaskTests(WorkspaceServiceTestBase):
 
 class CooldownTests(WorkspaceServiceTestBase):
     async def test_manual_clear_and_observed_rides(self) -> None:
-        manual = await self.service.start_cooldown(
-            "member", "A", "operator hold", 60.0)
+        manual = await self.service.start_cooldown("member", "A", "operator hold", 60.0)
         observed = await self.service.start_cooldown(
-            "member", "A", "limit seen", 60.0, source="observed")
+            "member", "A", "limit seen", 60.0, source="observed"
+        )
         cleared = await self.service.clear_cooldown(manual["id"])
         self.assertIsNotNone(cleared["cleared_at"])
         with self.assertRaises(ValueError) as ctx:
@@ -251,10 +255,10 @@ class ChannelTests(WorkspaceServiceTestBase):
 
 
 class PresetTests(WorkspaceServiceTestBase):
-    async def _preset(self):
+    async def _preset(self) -> PresetTemplateRecord:
         template = await self.db.presets.create(
-            "global", "", "cleaner", "standard",
-            {"trigger": "$clean", "auto_clean": True})
+            "global", "", "cleaner", "standard", {"trigger": "$clean", "auto_clean": True}
+        )
         await self.db.account_plugins.assign_plugin("A", "cleaner")
         await self.settings.set_setting("A", "cleaner", "unrelated", "keep")
         return template
@@ -262,21 +266,21 @@ class PresetTests(WorkspaceServiceTestBase):
     async def test_apply_writes_preset_keys_only_with_provenance(self) -> None:
         template = await self._preset()
         preview = await self.service.preset_preview("A", "cleaner", template.preset_id)
-        self.assertEqual(
-            preview["diff"],
-            {"trigger": [None, "$clean"], "auto_clean": [None, True]})
+        self.assertEqual(preview["diff"], {"trigger": [None, "$clean"], "auto_clean": [None, True]})
 
         result = await self.service.preset_apply(
-            "A", "cleaner", template.preset_id,
-            preview_revision=preview["revision"])
+            "A", "cleaner", template.preset_id, preview_revision=preview["revision"]
+        )
 
         self.assertTrue(result["applied"])
         final = await self.settings.settings("A", "cleaner")
-        self.assertEqual(final, {"trigger": "$clean", "auto_clean": True,
-                                 "unrelated": "keep"})  # keys-only, rest kept
+        self.assertEqual(
+            final, {"trigger": "$clean", "auto_clean": True, "unrelated": "keep"}
+        )  # keys-only, rest kept
         row = await self.db.connection.fetch_one(
             "SELECT source_preset_id, source_version FROM account_plugins"
-            " WHERE account='A' AND plugin='cleaner'")
+            " WHERE account='A' AND plugin='cleaner'"
+        )
         assert row is not None
         self.assertEqual(row["source_preset_id"], str(template.preset_id))
         self.assertEqual(row["source_version"], 1)
@@ -287,27 +291,28 @@ class PresetTests(WorkspaceServiceTestBase):
         # an intervening account edit between preview and apply
         await self.settings.set_setting("A", "cleaner", "trigger", "$user")
         result = await self.service.preset_apply(
-            "A", "cleaner", template.preset_id,
-            preview_revision=preview["revision"])
+            "A", "cleaner", template.preset_id, preview_revision=preview["revision"]
+        )
         self.assertFalse(result["applied"])
         self.assertIn("stale preview", result["conflict"])
         # the user's edit survived the refused apply
-        self.assertEqual(
-            (await self.settings.settings("A", "cleaner"))["trigger"], "$user")
+        self.assertEqual((await self.settings.settings("A", "cleaner"))["trigger"], "$user")
 
     async def test_detach_keeps_values(self) -> None:
         template = await self._preset()
         preview = await self.service.preset_preview("A", "cleaner", template.preset_id)
         await self.service.preset_apply(
-            "A", "cleaner", template.preset_id, preview_revision=preview["revision"])
+            "A", "cleaner", template.preset_id, preview_revision=preview["revision"]
+        )
         await self.service.preset_detach("A", "cleaner")
         row = await self.db.connection.fetch_one(
-            "SELECT source_preset_id FROM account_plugins"
-            " WHERE account='A' AND plugin='cleaner'")
+            "SELECT source_preset_id FROM account_plugins WHERE account='A' AND plugin='cleaner'"
+        )
         assert row is not None
         self.assertIsNone(row["source_preset_id"])
         self.assertEqual(  # values stay
-            (await self.settings.settings("A", "cleaner"))["trigger"], "$clean")
+            (await self.settings.settings("A", "cleaner"))["trigger"], "$clean"
+        )
 
 
 class ForgetAccountTests(WorkspaceServiceTestBase):
@@ -327,8 +332,7 @@ class ForgetAccountTests(WorkspaceServiceTestBase):
         self.assertEqual(self.plugin_data.dropped, ["A"])  # the separate store
         job = await self.db.workspaces.deletion_job("A")
         assert job is not None
-        self.assertEqual((job.state, job.completed_at is not None),
-                         ("complete", True))
+        self.assertEqual((job.state, job.completed_at is not None), ("complete", True))
         # idempotent re-run: another complete, no error
         again = await self.service.forget_account("A")
         self.assertEqual(again["state"], "complete")

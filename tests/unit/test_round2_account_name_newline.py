@@ -15,6 +15,7 @@ manager.py is outside this agent's edit scope, so the bypass is pinned
 as ``expectedFailure``: the suite stays green today, and the moment the
 regex is fixed this test flags itself (unexpected success) for cleanup.
 """
+
 from __future__ import annotations
 
 import unittest

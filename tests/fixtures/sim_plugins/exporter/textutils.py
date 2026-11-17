@@ -12,7 +12,10 @@ Semantics ported verbatim from the audited original (Soulcopy/autocopy.py):
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
 
 DEFAULT_PREFIX = "$exporter "
 HEADER_MARKER = "Soulmates"

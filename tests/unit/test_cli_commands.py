@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import unittest
-from typing import Any
+from typing import Any, ClassVar
 
 from interfaces.cli.commands import (
     HELP,
@@ -31,13 +31,13 @@ class FakeApi:
     """Duck-typed ControlAPI recording every call; canned payloads."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple, dict]] = []
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
 
     # ---- status
-    async def status(self):
+    async def status(self) -> dict[str, Any]:
         self._record("status")
         return {
             "uptime_s": 12.5,
@@ -66,7 +66,7 @@ class FakeApi:
         }
 
     # ---- accounts
-    async def accounts_list(self):
+    async def accounts_list(self) -> list[dict[str, Any]]:
         self._record("accounts_list")
         return [
             {
@@ -80,7 +80,7 @@ class FakeApi:
             }
         ]
 
-    async def accounts_add(self, payload, surface="api"):
+    async def accounts_add(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
         self._record("accounts_add", payload, surface=surface)
         return {
             "added": payload["name"],
@@ -89,35 +89,43 @@ class FakeApi:
         }
 
     # ---- account plugin assignments (direct account→plugin capabilities)
-    async def accounts_plugins_list(self, account):
+    async def accounts_plugins_list(self, account: str) -> list[str]:
         self._record("accounts_plugins_list", account)
         return ["exporter", "roll"]
 
-    async def accounts_plugin_assign(self, account, plugin, surface="api"):
+    async def accounts_plugin_assign(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> dict[str, Any]:
         self._record("accounts_plugin_assign", account, plugin, surface=surface)
         return {"account": account, "plugin": plugin}
 
-    async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+    async def accounts_plugin_unassign(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> dict[str, Any]:
         self._record("accounts_plugin_unassign", account, plugin, surface=surface)
         return {"account": account, "plugin": plugin, "existed": True}
 
-    async def accounts_remove(self, name, surface="api"):
+    async def accounts_remove(self, name: str, surface: str = "api") -> dict[str, Any]:
         self._record("accounts_remove", name, surface=surface)
         return {"removed": name}
 
-    async def accounts_set_credential(self, name, credential, surface="api"):
+    async def accounts_set_credential(
+        self, name: str, credential: str, surface: str = "api"
+    ) -> dict[str, Any]:
         self._record("accounts_set_credential", name, surface=surface)
         return {"account": name, "credential": "db"}
 
-    async def accounts_credential_status(self):
+    async def accounts_credential_status(self) -> list[dict[str, Any]]:
         self._record("accounts_credential_status")
         return [{"name": "alpha", "credential": "db"}, {"name": "beta", "credential": "missing"}]
 
-    async def credentials_import_env(self, overwrite=False, surface="api"):
+    async def credentials_import_env(
+        self, overwrite: bool = False, surface: str = "api"
+    ) -> dict[str, Any]:
         self._record("credentials_import_env", overwrite=overwrite, surface=surface)
         return {"imported": ["alpha"], "skipped": ["beta"], "failed": {}}
 
-    async def cooldowns_list(self, account=None):
+    async def cooldowns_list(self, account: str | None = None) -> list[dict[str, Any]]:
         self._record("cooldowns_list", account)
         return [
             {
@@ -130,11 +138,13 @@ class FakeApi:
             }
         ]
 
-    async def cooldowns_clear(self, account, plugin, cooldown_key=None, surface="api"):
+    async def cooldowns_clear(
+        self, account: str, plugin: str, cooldown_key: str | None = None, surface: str = "api"
+    ) -> dict[str, Any]:
         self._record("cooldowns_clear", account, plugin, cooldown_key, surface=surface)
         return {"account": account, "plugin": plugin, "cooldown_key": cooldown_key, "cleared": 1}
 
-    async def accounts_info(self, name):
+    async def accounts_info(self, name: str) -> dict[str, Any]:
         self._record("accounts_info", name)
         return {
             "name": name,
@@ -161,24 +171,24 @@ class FakeApi:
             },
         }
 
-    async def accounts_enable(self, name, enabled):
+    async def accounts_enable(self, name: str, enabled: bool) -> dict[str, Any]:
         self._record("accounts_enable", name, enabled)
         return {"name": name, "enabled": enabled}
 
-    async def accounts_start(self, name=None, surface="api"):
+    async def accounts_start(self, name: str | None = None, surface: str = "api") -> dict[str, Any]:
         self._record("accounts_start", name, surface=surface)
         return {"started": name or "all"}
 
-    async def accounts_stop(self, name=None, surface="api"):
+    async def accounts_stop(self, name: str | None = None, surface: str = "api") -> dict[str, Any]:
         self._record("accounts_stop", name, surface=surface)
         return {"stopped": name or "all"}
 
-    async def accounts_emergency_stop(self, name, surface="api"):
+    async def accounts_emergency_stop(self, name: str, surface: str = "api") -> dict[str, Any]:
         self._record("accounts_emergency_stop", name, surface=surface)
         return {"account": name, "cancelled_tasks": 2}
 
     # ---- plugins
-    async def plugins_manifests(self):
+    async def plugins_manifests(self) -> list[dict[str, Any]]:
         self._record("plugins_manifests")
         return [
             {
@@ -198,7 +208,7 @@ class FakeApi:
             }
         ]
 
-    async def plugins_state(self, account):
+    async def plugins_state(self, account: str) -> list[dict[str, Any]]:
         self._record("plugins_state", account)
         return [
             {
@@ -211,20 +221,22 @@ class FakeApi:
             }
         ]
 
-    async def plugins_set_enabled(self, account, plugin, enabled):
+    async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> dict[str, Any]:
         self._record("plugins_set_enabled", account, plugin, enabled)
         return {"account": account, "plugin": plugin, "enabled": enabled}
 
-    async def plugins_settings(self, account):
+    async def plugins_settings(self, account: str) -> list[dict[str, Any]]:
         self._record("plugins_settings", account)
         return [{"name": "exporter", "settings": {"trigger": "export"}}]
 
-    async def plugins_set_setting(self, account, plugin, key, value):
+    async def plugins_set_setting(
+        self, account: str, plugin: str, key: str, value: Any
+    ) -> dict[str, Any]:
         self._record("plugins_set_setting", account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": value}
 
     # ---- ratelimit
-    async def ratelimit_policies(self):
+    async def ratelimit_policies(self) -> list[dict[str, Any]]:
         self._record("ratelimit_policies")
         return [
             {
@@ -237,16 +249,24 @@ class FakeApi:
         ]
 
     async def ratelimit_set(
-        self, action, interval, jitter_min=0.0, jitter_max=0.0, level="global", owner=None
-    ):
+        self,
+        action: str,
+        interval: float,
+        jitter_min: float = 0.0,
+        jitter_max: float = 0.0,
+        level: str = "global",
+        owner: str | None = None,
+    ) -> dict[str, Any]:
         self._record("ratelimit_set", action, interval, jitter_min, jitter_max, level, owner)
         return {"action": action, "level": level, "owner": owner, "policy": "2.00s"}
 
-    async def ratelimit_clear(self, level, owner, action):
+    async def ratelimit_clear(self, level: str, owner: str | None, action: str) -> dict[str, Any]:
         self._record("ratelimit_clear", level, owner, action)
         return {"cleared": True, "level": level, "owner": owner, "action": action}
 
-    async def ratelimit_effective(self, action, account=None, plugin=None):
+    async def ratelimit_effective(
+        self, action: str, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         self._record("ratelimit_effective", action, account, plugin)
         return {
             "action": action,
@@ -255,19 +275,19 @@ class FakeApi:
             "sources": [{"level": "account", "owner": "alpha", "interval": 3.0}],
         }
 
-    async def ratelimit_stats(self):
+    async def ratelimit_stats(self) -> dict[str, Any]:
         self._record("ratelimit_stats")
         return {"floor": 1.5, "grants": 10}
 
-    async def ratelimit_warnings(self):
+    async def ratelimit_warnings(self) -> list[dict[str, Any]]:
         self._record("ratelimit_warnings")
         return [{"level": "warn", "code": "aggressive", "message": "fast policy"}]
 
-    async def ratelimit_set_floor(self, seconds):
+    async def ratelimit_set_floor(self, seconds: float) -> dict[str, Any]:
         self._record("ratelimit_set_floor", seconds)
         return {"floor": seconds}
 
-    async def ratelimit_lane(self):
+    async def ratelimit_lane(self) -> dict[str, Any]:
         self._record("ratelimit_lane")
         return {
             "enabled": True,
@@ -279,7 +299,9 @@ class FakeApi:
             "held_off_seconds": 0.0,
         }
 
-    async def ratelimit_set_lane(self, enabled=None, prefixrate=None):
+    async def ratelimit_set_lane(
+        self, enabled: bool | None = None, prefixrate: float | None = None
+    ) -> dict[str, Any]:
         self._record("ratelimit_set_lane", enabled, prefixrate)
         return {
             "enabled": bool(enabled) if enabled is not None else True,
@@ -292,7 +314,9 @@ class FakeApi:
         }
 
     # ---- tasks
-    async def tasks_list(self, status=None, account=None):
+    async def tasks_list(
+        self, status: str | None = None, account: str | None = None
+    ) -> list[dict[str, Any]]:
         self._record("tasks_list", status=status, account=account)
         return [
             {
@@ -306,15 +330,19 @@ class FakeApi:
             }
         ]
 
-    async def tasks_cancel(self, task_id):
+    async def tasks_cancel(self, task_id: int) -> dict[str, Any]:
         self._record("tasks_cancel", task_id)
         return {"cancelled": True, "task_id": task_id}
 
-    async def tasks_cancel_matching(self, account=None, plugin=None):
+    async def tasks_cancel_matching(
+        self, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         self._record("tasks_cancel_matching", account, plugin)
         return {"cancelled": 3}
 
-    async def tasks_history(self, limit=50, account=None):
+    async def tasks_history(
+        self, limit: int = 50, account: str | None = None
+    ) -> list[dict[str, Any]]:
         self._record("tasks_history", limit, account)
         return [
             {
@@ -327,11 +355,11 @@ class FakeApi:
         ]
 
     # ---- simulation
-    async def simulation_list(self):
+    async def simulation_list(self) -> list[dict[str, Any]]:
         self._record("simulation_list")
         return [{"name": "export_basic", "description": "two pages"}]
 
-    async def simulation_run(self, name):
+    async def simulation_run(self, name: str) -> dict[str, Any]:
         self._record("simulation_run", name)
         return {
             "name": name,
@@ -344,7 +372,9 @@ class FakeApi:
         }
 
     # ---- logs/audit
-    async def logs_tail(self, n=100, account=None, severity=None):
+    async def logs_tail(
+        self, n: int = 100, account: str | None = None, severity: str | None = None
+    ) -> list[dict[str, Any]]:
         self._record("logs_tail", n, account, severity)
         return [
             {
@@ -359,7 +389,7 @@ class FakeApi:
             }
         ]
 
-    async def audit_tail(self, n=100, account=None):
+    async def audit_tail(self, n: int = 100, account: str | None = None) -> list[dict[str, Any]]:
         self._record("audit_tail", n, account)
         return [
             {
@@ -376,21 +406,21 @@ class FakeApi:
         ]
 
     # ---- system
-    async def emergency_stop_all(self, surface="api"):
+    async def emergency_stop_all(self, surface: str = "api") -> dict[str, Any]:
         self._record("emergency_stop_all", surface=surface)
         return {"cancelled_tasks": 5, "halted": True}
 
-    async def system_resume(self):
+    async def system_resume(self) -> dict[str, Any]:
         self._record("system_resume")
         return {"resumed": True}
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         self._record("shutdown")
 
 
-def called(api: FakeApi, name: str) -> tuple[tuple, dict] | None:
+def called(api: FakeApi, name: str) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
     """Args/kwargs of the MOST RECENT call with this method name."""
-    result: tuple[tuple, dict] | None = None
+    result: tuple[tuple[Any, ...], dict[str, Any]] | None = None
     for cname, args, kwargs in api.calls:
         if cname == name:
             result = (args, kwargs)
@@ -400,6 +430,7 @@ def called(api: FakeApi, name: str) -> tuple[tuple, dict] | None:
 class TestBasics(unittest.IsolatedAsyncioTestCase):
     async def test_help(self) -> None:
         text = await run_command(FakeApi(), "help")
+        assert text is not None
         self.assertIn("accounts", text)
         self.assertIn("usage: accounts", text)
 
@@ -427,6 +458,7 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts list")
+        assert text is not None
         self.assertIn("alpha", text)
         self.assertIn("42", text)
         # capabilities render from assigned_plugins (not legacy profiles)
@@ -437,14 +469,18 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_add_with_plugins(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts add bob roll exporter")
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         # the CLI preserves the caller's order (sorted on display only)
         self.assertEqual(args[0], {"name": "bob", "plugins": ["roll", "exporter"]})
 
     async def test_add_bare(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts add bob")
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args[0], {"name": "bob"})
 
     async def test_add_never_sends_profiles(self) -> None:
@@ -452,13 +488,16 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         # ValueError) — the CLI must never build one
         api = FakeApi()
         await run_command(api, "accounts add bob roller")
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertNotIn("profiles", args[0])
         self.assertEqual(args[0]["plugins"], ["roller"])
 
     async def test_info_renders_sections(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts info alpha")
+        assert text is not None
         self.assertTrue(called(api, "accounts_info"))
         for needle in (
             "Status",
@@ -474,10 +513,14 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_enable_on_off(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts enable alpha on")
-        args, _ = called(api, "accounts_enable")
+        recorded = called(api, "accounts_enable")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args, ("alpha", True))
         await run_command(api, "accounts enable alpha off")
-        args, _ = called(api, "accounts_enable")
+        recorded = called(api, "accounts_enable")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args, ("alpha", False))
         with self.assertRaises(UsageError):
             await run_command(api, "accounts enable alpha maybe")
@@ -485,16 +528,24 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_start_stop_all_and_named(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts start all")
-        self.assertEqual(called(api, "accounts_start")[0], (None,))
+        recorded = called(api, "accounts_start")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (None,))
         await run_command(api, "accounts start alpha")
-        self.assertEqual(called(api, "accounts_start")[0], ("alpha",))
+        recorded = called(api, "accounts_start")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha",))
         await run_command(api, "accounts stop")
-        self.assertEqual(called(api, "accounts_stop")[0], (None,))
+        recorded = called(api, "accounts_stop")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (None,))
 
     async def test_estop_account(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts estop alpha")
-        self.assertEqual(called(api, "accounts_emergency_stop")[0], ("alpha",))
+        recorded = called(api, "accounts_emergency_stop")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha",))
 
     async def test_wrong_arg_count(self) -> None:
         with self.assertRaises(UsageError):
@@ -513,7 +564,10 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     async def test_plugins_list_happy(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts plugins alpha")
-        self.assertEqual(called(api, "accounts_plugins_list")[0], ("alpha",))
+        assert text is not None
+        recorded = called(api, "accounts_plugins_list")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha",))
         self.assertIn("roll", text)
         self.assertIn("exporter", text)
         # sorted rendering
@@ -521,11 +575,12 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_plugins_list_empty(self) -> None:
         class EmptyApi(FakeApi):
-            async def accounts_plugins_list(self, account):
+            async def accounts_plugins_list(self, account: str) -> list[str]:
                 self._record("accounts_plugins_list", account)
                 return []
 
         text = await run_command(EmptyApi(), "accounts plugins alpha")
+        assert text is not None
         self.assertIn("no plugins assigned", text)
         self.assertIn("plugin-add", text)
 
@@ -533,7 +588,7 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         from core.errors import AccountError
 
         class GhostApi(FakeApi):
-            async def accounts_plugins_list(self, account):
+            async def accounts_plugins_list(self, account: str) -> list[str]:
                 raise AccountError(f"unknown account {account!r}")
 
         # the engine bubbles domain errors; the surface renders one line
@@ -548,7 +603,10 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_add_happy(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts plugin-add alpha roll")
-        args, kwargs = called(api, "accounts_plugin_assign")
+        assert text is not None
+        recorded = called(api, "accounts_plugin_assign")
+        assert recorded is not None
+        args, kwargs = recorded
         self.assertEqual(args, ("alpha", "roll"))
         self.assertEqual(kwargs.get("surface"), "cli")
         self.assertIn("plugin added", text)
@@ -556,7 +614,9 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_plugin_add_unknown_plugin_error(self) -> None:
         class TypoApi(FakeApi):
-            async def accounts_plugin_assign(self, account, plugin, surface="api"):
+            async def accounts_plugin_assign(
+                self, account: str, plugin: str, surface: str = "api"
+            ) -> dict[str, Any]:
                 raise ValueError(f"unknown plugin(s) [{plugin!r}] (known plugins: ['roll'])")
 
         with self.assertRaises(ValueError) as ctx:
@@ -570,7 +630,10 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_remove_happy(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts plugin-remove alpha roll")
-        args, kwargs = called(api, "accounts_plugin_unassign")
+        assert text is not None
+        recorded = called(api, "accounts_plugin_unassign")
+        assert recorded is not None
+        args, kwargs = recorded
         self.assertEqual(args, ("alpha", "roll"))
         self.assertEqual(kwargs.get("surface"), "cli")
         self.assertIn("plugin removed", text)
@@ -578,12 +641,15 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
 
     async def test_plugin_remove_idempotent_message(self) -> None:
         class GoneApi(FakeApi):
-            async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+            async def accounts_plugin_unassign(
+                self, account: str, plugin: str, surface: str = "api"
+            ) -> dict[str, Any]:
                 self._record("accounts_plugin_unassign", account, plugin, surface=surface)
                 return {"account": account, "plugin": plugin, "existed": False}
 
         api = GoneApi()
         text = await run_command(api, "accounts plugin-remove alpha roll")
+        assert text is not None
         self.assertTrue(called(api, "accounts_plugin_unassign"))
         self.assertIn("was not assigned to alpha", text)
         self.assertIn("nothing to do", text)
@@ -610,6 +676,7 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plugin-add <account> <plugin>", text)
         self.assertIn("plugin-remove <account> <plugin>", text)
         focused = await run_command(FakeApi(), "help accounts")
+        assert focused is not None
         self.assertIn("plugin-add", focused)
 
 
@@ -617,38 +684,43 @@ class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
         text = await run_command(api, "plugins list")
+        assert text is not None
         self.assertIn("exporter", text)
         self.assertIn("trigger", text)
 
     async def test_enable_disable(self) -> None:
         api = FakeApi()
         await run_command(api, "plugins enable alpha exporter")
-        self.assertEqual(called(api, "plugins_set_enabled")[0], ("alpha", "exporter", True))
+        recorded = called(api, "plugins_set_enabled")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "exporter", True))
         await run_command(api, "plugins disable alpha exporter")
-        self.assertEqual(called(api, "plugins_set_enabled")[0], ("alpha", "exporter", False))
+        recorded = called(api, "plugins_set_enabled")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "exporter", False))
 
     async def test_set(self) -> None:
         api = FakeApi()
         await run_command(api, "plugins set alpha exporter trigger go")
-        self.assertEqual(
-            called(api, "plugins_set_setting")[0], ("alpha", "exporter", "trigger", "go")
-        )
+        recorded = called(api, "plugins_set_setting")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "exporter", "trigger", "go"))
 
 
 class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_set_global(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit set message 2.5")
-        self.assertEqual(
-            called(api, "ratelimit_set")[0], ("message", 2.5, 0.0, 0.0, "global", None)
-        )
+        recorded = called(api, "ratelimit_set")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("message", 2.5, 0.0, 0.0, "global", None))
 
     async def test_set_jitter_and_level(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit set message 2.5 0.2 0.8 account alpha")
-        self.assertEqual(
-            called(api, "ratelimit_set")[0], ("message", 2.5, 0.2, 0.8, "account", "alpha")
-        )
+        recorded = called(api, "ratelimit_set")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("message", 2.5, 0.2, 0.8, "account", "alpha"))
 
     async def test_set_bad_number(self) -> None:
         with self.assertRaises(UsageError) as ctx:
@@ -666,20 +738,29 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_set_account_plugin_owner(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit set dm 4 0 0 account_plugin alpha/exporter")
-        self.assertEqual(called(api, "ratelimit_set")[0][4], "account_plugin")
-        self.assertEqual(called(api, "ratelimit_set")[0][5], "alpha/exporter")
+        recorded = called(api, "ratelimit_set")
+        assert recorded is not None
+        self.assertEqual(recorded[0][4], "account_plugin")
+        recorded = called(api, "ratelimit_set")
+        assert recorded is not None
+        self.assertEqual(recorded[0][5], "alpha/exporter")
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "ratelimit set dm 4 0 0 account_plugin alpha")
 
     async def test_clear_global_dash_owner(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit clear global - message")
-        self.assertEqual(called(api, "ratelimit_clear")[0], ("global", None, "message"))
+        recorded = called(api, "ratelimit_clear")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("global", None, "message"))
 
     async def test_effective_and_warnings(self) -> None:
         api = FakeApi()
         text = await run_command(api, "ratelimit effective message alpha exporter")
-        self.assertEqual(called(api, "ratelimit_effective")[0], ("message", "alpha", "exporter"))
+        assert text is not None
+        recorded = called(api, "ratelimit_effective")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("message", "alpha", "exporter"))
         self.assertIn("account", text)
         await run_command(api, "ratelimit warnings")
         self.assertTrue(called(api, "ratelimit_warnings"))
@@ -687,11 +768,14 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_floor(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit floor 2.0")
-        self.assertEqual(called(api, "ratelimit_set_floor")[0], (2.0,))
+        recorded = called(api, "ratelimit_set_floor")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (2.0,))
 
     async def test_lane_show(self) -> None:
         api = FakeApi()
         text = await run_command(api, "ratelimit lane")
+        assert text is not None
         self.assertTrue(called(api, "ratelimit_lane"))
         self.assertIn("sequential sends", text)
         self.assertIn("active", text)
@@ -699,19 +783,27 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_lane_on_with_rate(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit lane on 2.5")
-        self.assertEqual(called(api, "ratelimit_set_lane")[0], (True, 2.5))
+        recorded = called(api, "ratelimit_set_lane")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (True, 2.5))
 
     async def test_lane_on_bare_and_off(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit lane on")
-        self.assertEqual(called(api, "ratelimit_set_lane")[0], (True, None))
+        recorded = called(api, "ratelimit_set_lane")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (True, None))
         await run_command(api, "ratelimit lane off")
-        self.assertEqual(called(api, "ratelimit_set_lane")[0], (False, None))
+        recorded = called(api, "ratelimit_set_lane")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (False, None))
 
     async def test_lane_rate_zero_pauses(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit lane rate 0")
-        self.assertEqual(called(api, "ratelimit_set_lane")[0], (None, 0.0))
+        recorded = called(api, "ratelimit_set_lane")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (None, 0.0))
 
     async def test_lane_bad_inputs(self) -> None:
         with self.assertRaises(UsageError):
@@ -726,31 +818,40 @@ class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
         text = await run_command(api, "tasks list")
+        assert text is not None
         self.assertTrue(called(api, "tasks_list"))
         self.assertIn("exporter", text)
 
     async def test_cancel(self) -> None:
         api = FakeApi()
         await run_command(api, "tasks cancel 7")
-        self.assertEqual(called(api, "tasks_cancel")[0], (7,))
+        recorded = called(api, "tasks_cancel")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (7,))
 
     async def test_history(self) -> None:
         api = FakeApi()
         await run_command(api, "tasks history 5")
-        self.assertEqual(called(api, "tasks_history")[0], (5, None))
+        recorded = called(api, "tasks_history")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (5, None))
 
     async def test_cancel_matching(self) -> None:
         api = FakeApi()
         await run_command(api, "tasks cancel-matching alpha exporter")
-        self.assertEqual(called(api, "tasks_cancel_matching")[0], ("alpha", "exporter"))
+        recorded = called(api, "tasks_cancel_matching")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "exporter"))
 
 
 class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
     async def test_simulation_list_and_run(self) -> None:
         api = FakeApi()
         text = await run_command(api, "simulation list")
+        assert text is not None
         self.assertIn("export_basic", text)
         text = await run_command(api, "simulation run export_basic")
+        assert text is not None
         self.assertTrue(called(api, "simulation_run"))
         self.assertIn("PASS", text.upper())
 
@@ -762,10 +863,16 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
     async def test_logs_and_audit(self) -> None:
         api = FakeApi()
         text = await run_command(api, "logs 5 alpha")
-        self.assertEqual(called(api, "logs_tail")[0], (5, "alpha", None))
+        assert text is not None
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (5, "alpha", None))
         self.assertIn("core", text)
         text = await run_command(api, "audit 5 alpha")
-        self.assertEqual(called(api, "audit_tail")[0], (5, "alpha"))
+        assert text is not None
+        recorded = called(api, "audit_tail")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (5, "alpha"))
         self.assertIn("$dump", text)
         self.assertIn("wait", text)
 
@@ -788,8 +895,11 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_accounts_credential_roundtrip(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts credential alpha tok-1234")
+        assert text is not None
         # the fake deliberately records ONLY the name — never the secret
-        args, kwargs = called(api, "accounts_set_credential")
+        recorded = called(api, "accounts_set_credential")
+        assert recorded is not None
+        args, kwargs = recorded
         self.assertEqual(args, ("alpha",))
         self.assertEqual(kwargs.get("surface"), "cli")
         self.assertIn("credential stored", text)
@@ -811,6 +921,7 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_credentials_status(self) -> None:
         api = FakeApi()
         text = await run_command(api, "credentials status")
+        assert text is not None
         self.assertTrue(called(api, "accounts_credential_status"))
         self.assertIn("alpha", text)
         self.assertIn("db (encrypted)", text)
@@ -821,12 +932,20 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_credentials_import_env(self) -> None:
         api = FakeApi()
         text = await run_command(api, "credentials import-env")
-        self.assertEqual(called(api, "credentials_import_env")[0], ())
-        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), False)
+        assert text is not None
+        recorded = called(api, "credentials_import_env")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ())
+        recorded = called(api, "credentials_import_env")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("overwrite"), False)
         self.assertIn("imported: alpha", text)
         self.assertIn("skipped : beta", text)
         text = await run_command(api, "credentials import-env --overwrite")
-        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), True)
+        assert text is not None
+        recorded = called(api, "credentials_import_env")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("overwrite"), True)
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "credentials import-env --force")
         with self.assertRaises(UsageError):
@@ -837,22 +956,33 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_cooldowns_list_all_and_one(self) -> None:
         api = FakeApi()
         text = await run_command(api, "cooldowns")
-        self.assertEqual(called(api, "cooldowns_list")[0], (None,))
+        assert text is not None
+        recorded = called(api, "cooldowns_list")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (None,))
         self.assertIn("alpha", text)
         self.assertIn("roll", text)
         self.assertIn("1m 30s", text)
         await run_command(api, "cooldowns alpha")
-        self.assertEqual(called(api, "cooldowns_list")[0], ("alpha",))
+        recorded = called(api, "cooldowns_list")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha",))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "cooldowns alpha beta")
 
     async def test_cooldowns_clear_one_and_all(self) -> None:
         api = FakeApi()
         await run_command(api, "cooldowns clear alpha roll vote")
-        self.assertEqual(called(api, "cooldowns_clear")[0], ("alpha", "roll", "vote"))
-        self.assertEqual(called(api, "cooldowns_clear")[1].get("surface"), "cli")
+        recorded = called(api, "cooldowns_clear")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "roll", "vote"))
+        recorded = called(api, "cooldowns_clear")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("surface"), "cli")
         await run_command(api, "cooldowns clear alpha roll")
-        self.assertEqual(called(api, "cooldowns_clear")[0], ("alpha", "roll", None))
+        recorded = called(api, "cooldowns_clear")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("alpha", "roll", None))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "cooldowns clear alpha")
         with self.assertRaises(UsageError):
@@ -861,13 +991,21 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_accounts_mutation_surfaces_are_clipped(self) -> None:
         api = FakeApi()
         await run_command(api, "accounts add bob")
-        self.assertEqual(called(api, "accounts_add")[1].get("surface"), "cli")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("surface"), "cli")
         await run_command(api, "accounts remove bob")
-        self.assertEqual(called(api, "accounts_remove")[1].get("surface"), "cli")
+        recorded = called(api, "accounts_remove")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("surface"), "cli")
         await run_command(api, "accounts start bob")
-        self.assertEqual(called(api, "accounts_start")[1].get("surface"), "cli")
+        recorded = called(api, "accounts_start")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("surface"), "cli")
         await run_command(api, "estop")
-        self.assertEqual(called(api, "emergency_stop_all")[1].get("surface"), "cli")
+        recorded = called(api, "emergency_stop_all")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("surface"), "cli")
 
 
 class TestFormatters(unittest.TestCase):
@@ -899,9 +1037,7 @@ class TestFormatters(unittest.TestCase):
 
     def test_format_account_info_marks_runtime_cache(self) -> None:
         text = format_account_info(
-            FakeApi().accounts_info.__wrapped__
-            if False
-            else {
+            {
                 "name": "alpha",
                 "status": {
                     "connected": True,
@@ -966,7 +1102,7 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
 
     async def test_error_renders_one_line(self) -> None:
         class ExplodingApi(FakeApi):
-            async def status(self):
+            async def status(self) -> dict[str, Any]:
                 raise RuntimeError("boom\nwith newline")
 
         out = io.StringIO()
@@ -1001,7 +1137,9 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         code = await run_once(api, ["accounts", "add", "bob two"], stdout=io.StringIO())
         self.assertEqual(code, 0)
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args[0], {"name": "bob two"})
 
     async def test_stop_event_ends_repl_at_prompt(self) -> None:
@@ -1036,7 +1174,9 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         out = io.StringIO()
 
         class BombsOnReadline(io.StringIO):
-            def readline(self):  # simulates undecodable input bytes
+            # text-mode readline returns str at runtime, but typeshed's
+            # _IOBase base declares bytes — unresolvable at the type level
+            def readline(self, size: int | None = -1) -> str:  # type: ignore[override]  # simulates undecodable input bytes
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
 
         repl = Repl(api, stdin=BombsOnReadline(), stdout=out)
@@ -1050,17 +1190,20 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_help_bare_is_full_text(self) -> None:
         text = await run_command(FakeApi(), "help")
+        assert text is not None
         self.assertIn("commands:", text)
         self.assertIn("usage: accounts", text)
 
     async def test_help_focus_for_every_command(self) -> None:
         for name in sorted(HELP):
             text = await run_command(FakeApi(), f"help {name}")
+            assert text is not None
             self.assertIn(name, text)
             self.assertIn(HELP[name][1], text)
 
     async def test_help_focus_shows_usage(self) -> None:
         text = await run_command(FakeApi(), "help ratelimit")
+        assert text is not None
         self.assertIn("usage: ratelimit", text)
         self.assertIn("floor", text)
         with self.assertRaises(UsageError) as ctx:
@@ -1069,6 +1212,7 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_help_exit_alias(self) -> None:
         text = await run_command(FakeApi(), "help exit")
+        assert text is not None
         self.assertIn("graceful shutdown", text)
 
     async def test_help_unknown_and_extra(self) -> None:
@@ -1080,19 +1224,25 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_profiles_group(self) -> None:
         class ProfilesApi(FakeApi):
-            async def account_plugin_profiles(self, account, plugin):
+            async def account_plugin_profiles(
+                self, account: str, plugin: str
+            ) -> list[dict[str, Any]]:
                 return [
                     {"name": "main", "schema_version": 2, "description": "primary"},
                     {"name": "alt", "schema_version": 1, "description": ""},
                 ]
 
-            async def account_plugin_profile_active(self, account, plugin):
+            async def account_plugin_profile_active(
+                self, account: str, plugin: str
+            ) -> dict[str, Any]:
                 return {"account": account, "plugin": plugin, "active": "main"}
 
         out = await run_command(ProfilesApi(), "profiles alpha exporter list")
+        assert out is not None
         self.assertIn("main", out)
         self.assertIn("alt", out)
         out = await run_command(ProfilesApi(), "profiles alpha exporter active")
+        assert out is not None
         self.assertEqual(out, "active profile: main")
         with self.assertRaises(UsageError):
             await run_command(ProfilesApi(), "profiles alpha exporter frobnicate")
@@ -1128,7 +1278,7 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
     QuitRequested or UsageError — never another exception, never a
     traceback at the REPL."""
 
-    HOSTILE: list[str] = [
+    HOSTILE: ClassVar[list[str]] = [
         "accounts add",
         "accounts add '' extra",
         'accounts add "my acc"',
@@ -1243,16 +1393,23 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
     async def test_quoting_round_trip(self) -> None:
         api = FakeApi()
         await run_command(api, 'accounts add "my acc" roller')
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args[0], {"name": "my acc", "plugins": ["roller"]})
         await run_command(api, "accounts add 'bob two'")
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args[0], {"name": "bob two"})
 
     async def test_unicode_account_name_round_trip(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts info 泥棒")
-        args, _ = called(api, "accounts_info")
+        assert text is not None
+        recorded = called(api, "accounts_info")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args, ("泥棒",))
         self.assertIn("泥棒", text)
 
@@ -1265,7 +1422,9 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
             await run_command(FakeApi(), "tasks history -1")
         api = FakeApi()
         await run_command(api, "logs 0")
-        self.assertEqual(called(api, "logs_tail")[0], (0, None, None))
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        self.assertEqual(recorded[0], (0, None, None))
 
 
 class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
@@ -1273,7 +1432,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_event_during_long_command(self) -> None:
         class SlowStatusApi(FakeApi):
-            async def status(self):
+            async def status(self) -> dict[str, Any]:
                 await asyncio.sleep(0.05)
                 return await super().status()
 
@@ -1309,7 +1468,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
                 super().__init__()
                 self.stop: asyncio.Event | None = None
 
-            async def status(self):
+            async def status(self) -> dict[str, Any]:
                 result = await super().status()
                 if self.stop is not None:
                     self.stop.set()
@@ -1328,7 +1487,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
 
     async def test_keyboard_interrupt_mid_command_exits_cleanly(self) -> None:
         class InterruptingApi(FakeApi):
-            async def status(self):
+            async def status(self) -> dict[str, Any]:
                 raise KeyboardInterrupt
 
         api = InterruptingApi()
@@ -1367,7 +1526,7 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
 
     async def test_runtime_error_exit_one(self) -> None:
         class BoomApi(FakeApi):
-            async def status(self):
+            async def status(self) -> dict[str, Any]:
                 raise RuntimeError("boom")
 
         out = io.StringIO()
@@ -1381,7 +1540,7 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
         from core.errors import AccountError
 
         class HaltApi(FakeApi):
-            async def emergency_stop_all(self, surface="api"):
+            async def emergency_stop_all(self, surface: str = "api") -> dict[str, Any]:
                 raise AccountError("already halted")
 
         out = io.StringIO()
@@ -1397,18 +1556,22 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
             stdout=out,
         )
         self.assertEqual(code, 0)
-        self.assertEqual(
-            called(api, "ratelimit_set")[0], ("message", 2.5, 0.2, 0.8, "account", "alpha")
-        )
+        recorded = called(api, "ratelimit_set")
+        assert recorded is not None
+        self.assertEqual(recorded[0], ("message", 2.5, 0.2, 0.8, "account", "alpha"))
         code = await run_once(api, ["credentials", "import-env", "--overwrite"], stdout=out)
         self.assertEqual(code, 0)
-        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), True)
+        recorded = called(api, "credentials_import_env")
+        assert recorded is not None
+        self.assertEqual(recorded[1].get("overwrite"), True)
 
     async def test_shell_metachar_tokens_survive(self) -> None:
         api = FakeApi()
         code = await run_once(api, ["accounts", "add", "bob;rm -rf /"], stdout=io.StringIO())
         self.assertEqual(code, 0)
-        args, _ = called(api, "accounts_add")
+        recorded = called(api, "accounts_add")
+        assert recorded is not None
+        args, _ = recorded
         self.assertEqual(args[0], {"name": "bob;rm -rf /"})
 
     async def test_output_is_deterministic_and_ansi_free(self) -> None:
@@ -1424,7 +1587,7 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
 class TestOutputVolumeAndFormatting(unittest.TestCase):
     """Huge payloads render bounded, deterministic, ANSI-free text."""
 
-    def _history_rows(self, count: int) -> list[dict]:
+    def _history_rows(self, count: int) -> list[dict[str, Any]]:
         return [
             {
                 "id": i,
@@ -1512,16 +1675,18 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
         from core.errors import RatePolicyError
 
         class CappedFloorApi(FakeApi):
-            async def ratelimit_set_floor(self, seconds):
+            async def ratelimit_set_floor(self, seconds: float) -> dict[str, Any]:
                 if seconds > 86400.0:
                     raise RatePolicyError("safety floor exceeds the one-day cap (86400s)")
                 return {"floor": min(float(seconds), 86400.0)}
 
         api = CappedFloorApi()
         text = await run_command(api, "ratelimit floor 86400")
+        assert text is not None
         self.assertIn("floor=86400", text)
         self.assertNotIn("86400.0", text)
         text = await run_command(api, "ratelimit floor 3600")
+        assert text is not None
         self.assertIn("floor=3600", text)
         with self.assertRaises(RatePolicyError):
             await run_command(api, "ratelimit floor 90000")
@@ -1534,7 +1699,7 @@ if __name__ == "__main__":
 
 
 class ColumnSeparationTests(unittest.TestCase):
-    def test_overlong_cell_never_runs_into_the_next_column(self):
+    def test_overlong_cell_never_runs_into_the_next_column(self) -> None:
         from interfaces.cli.commands import _col
 
         self.assertEqual(_col("ab", 5), "ab   ")

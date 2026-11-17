@@ -12,8 +12,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
-from core.workspace.models import InvalidDefinition
+from core.workspace.models import InvalidDefinition, SignalIdentity
 from core.workspace.signals import DEAD_LETTER_MAX_ATTEMPTS, SignalOutbox
 from database.db import Database
 
@@ -29,7 +30,7 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.fail_next = 0
         self.outbox = SignalOutbox(self.db.signals, deliver=self._deliver)
 
-    async def _deliver(self, signal) -> None:
+    async def _deliver(self, signal: SignalIdentity) -> None:
         if self.fail_next > 0:
             self.fail_next -= 1
             raise RuntimeError("consumer down")
@@ -65,8 +66,8 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
         # OBSERVES attempts >= max dead-letters immediately: the final
         # failing sweep above already classified it
         row = await self.db.connection.fetch_one(
-            "SELECT delivery_state, last_error FROM signals WHERE signal_id=?",
-            (signal_id,))
+            "SELECT delivery_state, last_error FROM signals WHERE signal_id=?", (signal_id,)
+        )
         assert row is not None
         self.assertEqual(row["delivery_state"], "dead")
         self.assertIn("consumer down", row["last_error"])
@@ -104,7 +105,11 @@ class EmitSignalFacadeTests(unittest.IsolatedAsyncioTestCase):
         from core.event_bus import EventBus
 
         services = AccountPluginServices(
-            "A", "cleaner", bus=EventBus(), scheduler=None, credentials=None,
+            "A",
+            "cleaner",
+            bus=EventBus(),
+            scheduler=None,
+            credentials=None,
             cache=DiscordCache("A"),
         )
         with self.assertRaises(RuntimeError) as ctx:
@@ -118,16 +123,31 @@ class EmitSignalFacadeTests(unittest.IsolatedAsyncioTestCase):
 
         class StubOutbox:
             def __init__(self) -> None:
-                self.calls: list[tuple] = []
+                self.calls: list[tuple[str, str, str, dict[str, Any]]] = []
 
-            async def accept(self, account, plugin, name, payload, **_):
-                self.calls.append((account, plugin, name, payload))
+            async def accept(
+                self,
+                account: str,
+                plugin: str,
+                name: str,
+                payload: dict[str, Any] | None = None,
+                **_: Any,
+            ) -> str:
+                self.calls.append((account, plugin, name, payload or {}))
                 return "sig-1"
 
         stub = StubOutbox()
+        # AccountPluginServices types the collaborator nominally
+        # (SignalOutbox); the stub implements the same accept contract.
+        signals_seam: Any = stub
         services = AccountPluginServices(
-            "A", "cleaner", bus=EventBus(), scheduler=None, credentials=None,
-            cache=DiscordCache("A"), signals=stub,
+            "A",
+            "cleaner",
+            bus=EventBus(),
+            scheduler=None,
+            credentials=None,
+            cache=DiscordCache("A"),
+            signals=signals_seam,
         )
         out = await services.emit_signal("claim_done", {"n": 1})
         self.assertEqual(out, "sig-1")

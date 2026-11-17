@@ -57,11 +57,11 @@ class CarriedVocabularyTests(unittest.TestCase):
     def test_task_status_states_pinned(self) -> None:
         self.assertEqual(
             TaskStatus.ALL,
-            frozenset({"queued", "assigned", "running", "completed",
-                       "suspended", "failed", "cancelled"}),
+            frozenset(
+                {"queued", "assigned", "running", "completed", "suspended", "failed", "cancelled"}
+            ),
         )
-        self.assertEqual(TaskStatus.ALWAYS_TERMINAL,
-                         frozenset({"completed", "cancelled"}))
+        self.assertEqual(TaskStatus.ALWAYS_TERMINAL, frozenset({"completed", "cancelled"}))
 
     def test_execution_mode_renames_group_managed(self) -> None:
         # v10 migrates fleet "group_managed" -> workspace "managed"
@@ -125,9 +125,10 @@ class ChainModelTests(unittest.TestCase):
     def _steps(self) -> tuple[ChainStep, ...]:
         return (
             ChainStep(
-                position=1, plugin="grinder",
-                on={"plugin": "grinder", "task_action": "message",
-                    "event": "task_completed"}),
+                position=1,
+                plugin="grinder",
+                on={"plugin": "grinder", "task_action": "message", "event": "task_completed"},
+            ),
             ChainStep(
                 position=2,
                 plugin="cleaner",
@@ -164,8 +165,10 @@ class ChainModelTests(unittest.TestCase):
             ChainStep(position=1, plugin="p")
         with self.assertRaises(InvalidDefinition):  # both
             ChainStep(
-                position=1, plugin="p",
-                on={"signal": "a:b", "task_action": "message", "plugin": "p"})
+                position=1,
+                plugin="p",
+                on={"signal": "a:b", "task_action": "message", "plugin": "p"},
+            )
         with self.assertRaises(InvalidDefinition):  # action without plugin
             ChainStep(position=1, plugin="p", on={"task_action": "message"})
 
@@ -189,7 +192,13 @@ class ChainModelTests(unittest.TestCase):
         self.assertEqual(run.status, ChainRunStatus.RUNNING)
         self.assertEqual(run.definition, chain)
         with self.assertRaises(InvalidDefinition):
-            ChainRun(id="r1", chain_id="c1", workspace="alpha", definition="not-a-snapshot")
+            # deliberately wrong runtime type: the model must reject it
+            ChainRun(
+                id="r1",
+                chain_id="c1",
+                workspace="alpha",
+                definition="not-a-snapshot",  # type: ignore[arg-type]
+            )
 
     def test_step_execution_identity(self) -> None:
         ex = StepExecution(run_id="r1", position=1, attempt=2, target="acct")
@@ -211,7 +220,13 @@ class SignalTests(unittest.TestCase):
 
     def test_payload_must_be_dict(self) -> None:
         with self.assertRaises(InvalidDefinition):
-            SignalIdentity(account="a", plugin="p", name="n", payload=["not", "a", "dict"])
+            # deliberately wrong runtime type: the model must reject it
+            SignalIdentity(
+                account="a",
+                plugin="p",
+                name="n",
+                payload=["not", "a", "dict"],  # type: ignore[arg-type]
+            )
 
 
 class PresetModelTests(unittest.TestCase):
@@ -287,7 +302,7 @@ class DeclarationTests(unittest.TestCase):
             EMITS = ("claim_done",)
             FOLLOWS = (FollowSpec(handler="on_claim", signal="grinder:claim_done"),)
 
-            def on_claim(self): ...
+            def on_claim(self) -> None: ...
 
         self.assertEqual(validate_plugin_declarations(Clean), [])
 

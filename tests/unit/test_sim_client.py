@@ -1,7 +1,9 @@
 """Unit tests for adapters.simulator.client.SimClient (offline, synthetic)."""
+
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from adapters.base import DiscordMessage
 from adapters.simulator import client as client_module
@@ -31,7 +33,7 @@ def _world() -> SimWorld:
     return world
 
 
-async def _connected(world: SimWorld, user_id: int, **kwargs) -> SimClient:
+async def _connected(world: SimWorld, user_id: int, **kwargs: Any) -> SimClient:
     """A client that already joined the world."""
     client = SimClient(world, user_id, **kwargs)
     await client.connect()
@@ -58,7 +60,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     async def test_drop_fires_on_disconnect_once(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        reasons = []
+        reasons: list[str] = []
         client.on_disconnect = reasons.append
         client.drop("simulated network drop")
         self.assertEqual(reasons, ["simulated network drop"])
@@ -69,7 +71,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     async def test_receive_skips_own_messages(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        seen = []
+        seen: list[DiscordMessage] = []
         client.on_message = seen.append
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "mine")
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "theirs")
@@ -115,9 +117,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
     async def test_offline_send_does_not_consume_one_shot_limit(self) -> None:
         world = _world()
         client = SimClient(world, SYNTHETIC_ALPHA_ID)  # never connected
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5
-        )
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5)
         with self.assertRaises(ConnectionError):
             await client.send_message(SYNTHETIC_GUILD_CHANNEL, "offline")
         self.assertEqual(world.blocked_sends, [])  # 429 armed for a live send
@@ -128,9 +128,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
     async def test_pending_server_limit_raises_then_consumed(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.7, global_=True
-        )
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.7, global_=True)
         with self.assertRaises(ServerRateLimit) as caught:
             await client.send_message(SYNTHETIC_GUILD_CHANNEL, "blocked")
         self.assertEqual(caught.exception.retry_after, 0.7)
@@ -138,9 +136,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         # one-shot: the same send now goes through
         sent = await client.send_message(SYNTHETIC_GUILD_CHANNEL, "through")
         self.assertEqual(sent.content, "through")
-        self.assertEqual(
-            world.messages_of(SYNTHETIC_GUILD_CHANNEL)[-1], "through"
-        )
+        self.assertEqual(world.messages_of(SYNTHETIC_GUILD_CHANNEL)[-1], "through")
 
     async def test_send_to_vanished_channel_raises_target_gone(self) -> None:
         world = _world()
@@ -192,9 +188,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
     async def test_armed_limit_with_live_channel_fires_on_send_message(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5
-        )
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5)
         with self.assertRaises(ServerRateLimit):
             await client.send_message(SYNTHETIC_GUILD_CHANNEL, "blocked")
         self.assertEqual(len(world.blocked_sends), 1)
@@ -215,9 +209,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         sent = await client.send_dm(SYNTHETIC_BOT_ID, "psst")
         self.assertTrue(sent.dm)
-        expected_channel = world.dm_channel_for(
-            SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID
-        )
+        expected_channel = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         self.assertEqual(sent.channel_id, expected_channel)
         self.assertIn("psst", world.messages_of(expected_channel))
 
@@ -260,6 +252,7 @@ class TestDmAndUsers(unittest.IsolatedAsyncioTestCase):
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         user = await client.fetch_user(SYNTHETIC_OWNER_ID)
+        assert user is not None
         self.assertEqual(user.id, SYNTHETIC_OWNER_ID)
         self.assertEqual(user.name, "owner")
         self.assertIsNone(await client.fetch_user(123456789))
@@ -284,19 +277,15 @@ class TestSnapshotAndLatency(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot["available"])
         self.assertEqual(snapshot["user"]["id"], SYNTHETIC_ALPHA_ID)
         dm_ids = [entry["id"] for entry in snapshot["dm_channels"]]
-        self.assertIn(alpha_dm, dm_ids)      # own DM visible...
-        self.assertNotIn(beta_dm, dm_ids)    # ...foreign DM filtered out
+        self.assertIn(alpha_dm, dm_ids)  # own DM visible...
+        self.assertNotIn(beta_dm, dm_ids)  # ...foreign DM filtered out
         guild_channel_ids = [
-            channel["id"]
-            for guild in snapshot["guilds"]
-            for channel in guild["channels"]
+            channel["id"] for guild in snapshot["guilds"] for channel in guild["channels"]
         ]
         self.assertIn(SYNTHETIC_GUILD_CHANNEL, guild_channel_ids)
         self.assertNotIn(alpha_dm, guild_channel_ids)
         recipient = next(
-            entry["recipient"]
-            for entry in snapshot["dm_channels"]
-            if entry["id"] == alpha_dm
+            entry["recipient"] for entry in snapshot["dm_channels"] if entry["id"] == alpha_dm
         )
         self.assertEqual(recipient, SYNTHETIC_BOT_ID)
 
@@ -314,29 +303,19 @@ class TestSnapshotAndLatency(unittest.IsolatedAsyncioTestCase):
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         self.assertTrue(client.delete_channel(SYNTHETIC_GUILD_CHANNEL))
         snapshot = client.cached_snapshot()
-        listed = [
-            channel["id"]
-            for guild in snapshot["guilds"]
-            for channel in guild["channels"]
-        ]
+        listed = [channel["id"] for guild in snapshot["guilds"] for channel in guild["channels"]]
         self.assertNotIn(SYNTHETIC_GUILD_CHANNEL, listed)
 
     async def test_latency_deterministic_and_in_band(self) -> None:
         world = _world()
         pinned = SimClient(world, SYNTHETIC_ALPHA_ID, seed=42)
         first, second = pinned.latency_ms, pinned.latency_ms
-        self.assertTrue(
-            LATENCY_MIN_MS <= first <= LATENCY_MAX_MS, first
-        )
-        self.assertTrue(
-            LATENCY_MIN_MS <= second <= LATENCY_MAX_MS, second
-        )
+        self.assertTrue(LATENCY_MIN_MS <= first <= LATENCY_MAX_MS, first)
+        self.assertTrue(LATENCY_MIN_MS <= second <= LATENCY_MAX_MS, second)
         replay = SimClient(world, SYNTHETIC_ALPHA_ID, seed=42)
         self.assertEqual(replay.latency_ms, first)  # same seed, same sequence
         snapshot = (await _connected(world, SYNTHETIC_ALPHA_ID)).cached_snapshot()
-        self.assertTrue(
-            LATENCY_MIN_MS <= snapshot["latency_ms"] <= LATENCY_MAX_MS
-        )
+        self.assertTrue(LATENCY_MIN_MS <= snapshot["latency_ms"] <= LATENCY_MAX_MS)
 
     async def test_latency_band_constants_sane(self) -> None:
         self.assertLess(client_module.LATENCY_MIN_MS, client_module.LATENCY_MAX_MS)

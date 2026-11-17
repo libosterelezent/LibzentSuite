@@ -68,9 +68,7 @@ class CarriedMemberTransitionTests(unittest.TestCase):
                 "retired": [],
             },
         )
-        self.assertEqual(
-            TASK_TRANSITIONS[TaskStatus.FAILED], frozenset({TaskStatus.QUEUED})
-        )
+        self.assertEqual(TASK_TRANSITIONS[TaskStatus.FAILED], frozenset({TaskStatus.QUEUED}))
 
     def test_happy_path(self) -> None:
         validate_task_transition(TaskStatus.QUEUED, TaskStatus.ASSIGNED)

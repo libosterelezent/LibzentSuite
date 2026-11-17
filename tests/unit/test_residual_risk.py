@@ -1,5 +1,6 @@
 """FINAL-PHASE regression tests: G1 telemetry, G2 pressure, G5 repeat/
 spikes, G6 dispatch cache equivalence, G7 artifact security, G8 chaos."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import TYPE_CHECKING
 
 from core.event_bus import Event, EventBus, MessageReceived
 from core.task_scheduler import TaskScheduler
@@ -19,6 +21,9 @@ from tests.unit.test_task_scheduler import (
     FakeLogger,
     FakeSender,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
@@ -57,16 +62,12 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
                     await db.kv.set(f"k{i}", {"n": i})
                 await db.kv.get("k0")
                 snap = TELEMETRY.snapshot()
-                self.assertGreaterEqual(
-                    snap["requests"]["by_kind"]["transaction"], 5)
-                self.assertGreaterEqual(
-                    snap["requests"]["by_kind"]["commit"], 5)
+                self.assertGreaterEqual(snap["requests"]["by_kind"]["transaction"], 5)
+                self.assertGreaterEqual(snap["requests"]["by_kind"]["commit"], 5)
                 self.assertGreaterEqual(snap["requests"]["by_kind"]["read"], 1)
                 self.assertIn("transaction_ms", snap)
                 self.assertIn("commit_ms", snap)
-                self.assertLessEqual(
-                    snap["commit_ms"]["max"],
-                    snap["transaction_ms"]["max"])
+                self.assertLessEqual(snap["commit_ms"]["max"], snap["transaction_ms"]["max"])
         finally:
             TELEMETRY.enabled = was
 
@@ -85,8 +86,7 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 # assertNoLogs on the ROOT logger flags ANY debug record;
                 # scope to the framework tree (aiosqlite's own debug lines
                 # are third-party and not ours to police)
-                with self.assertNoLogs(logger="libzent",
-                                       level="DEBUG"):
+                with self.assertNoLogs(logger="libzent", level="DEBUG"):
                     for i in range(50):
                         await db.kv.set(f"x{i}", i)
         finally:
@@ -96,8 +96,14 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
 class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self) -> TaskScheduler:
         return TaskScheduler(
-            EventBus(), FakeLogger(), FakeLimiter(), FakeSender(), FakeAudit(),
-            default_timeout=5.0, history_repo=FakeHistoryRepo())
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            FakeSender(),
+            FakeAudit(),
+            default_timeout=5.0,
+            history_repo=FakeHistoryRepo(),
+        )
 
     async def test_pressure_transitions_and_hwm(self) -> None:
         scheduler = self._scheduler()
@@ -105,14 +111,12 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
         try:
             gate = scheduler._limiter.block_acquires()
             for i in range(10):
-                scheduler.submit(f"acct{i % 3}", "roll", "message",
-                                 channel_id=100, content="x")
+                scheduler.submit(f"acct{i % 3}", "roll", "message", channel_id=100, content="x")
             await asyncio.sleep(0.05)
             pressure = scheduler.pressure()
             self.assertEqual(pressure["depth"], 10)
             self.assertGreaterEqual(scheduler.stats()["queued_depth_hwm"], 10)
-            self.assertIn(pressure["level"],
-                          ("ELEVATED", "PRESSURED", "CRITICAL"))
+            self.assertIn(pressure["level"], ("ELEVATED", "PRESSURED", "CRITICAL"))
             self.assertEqual(pressure["accounts"], 3)
             gate.set()
             await asyncio.sleep(0.3)
@@ -125,12 +129,12 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pressure_age_axis(self) -> None:
         import time as _time
+
         scheduler = self._scheduler()
         scheduler.start()
         try:
             gate = scheduler._limiter.block_acquires()
-            task = scheduler.submit("alpha", "roll", "message",
-                                    channel_id=1, content="x")
+            task = scheduler.submit("alpha", "roll", "message", channel_id=1, content="x")
             # backdate: age axis — BOTH clocks (age math reads the
             # monotonic twin; the wall stamp is display/history only and
             # an NTP step must not latch the level high)
@@ -145,18 +149,18 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stats_survives_pressure_warning_and_reads_floor_property(self) -> None:
         import time as _time
+
         scheduler = self._scheduler()
-        scheduler._limiter.floor_value = 10.0       # property, not a method
+        scheduler._limiter.floor_value = 10.0  # property, not a method
         scheduler.start()
         try:
             gate = scheduler._limiter.block_acquires()
-            task = scheduler.submit("alpha", "roll", "message",
-                                    channel_id=1, content="x")
+            task = scheduler.submit("alpha", "roll", "message", channel_id=1, content="x")
             task.submitted_mono = _time.monotonic() - 25.0
             await asyncio.sleep(0.05)
             self.assertEqual(scheduler.pressure()["pacing_floor_s"], 10.0)
             scheduler._last_pressure_warn = 0.0
-            scheduler.stats()                       # used to raise TypeError
+            scheduler.stats()  # used to raise TypeError
             gate.set()
             await asyncio.sleep(0.2)
         finally:
@@ -166,8 +170,7 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
         scheduler = self._scheduler()
         scheduler.start()
         try:
-            scheduler.submit("alpha", "roll", "message",
-                             channel_id=1, content="x")
+            scheduler.submit("alpha", "roll", "message", channel_id=1, content="x")
             await asyncio.sleep(0.1)
             before = scheduler.stats()
             for _ in range(3):
@@ -185,52 +188,48 @@ class DispatchCacheEquivalenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invocation_order_insertion_not_mro(self) -> None:
         bus = EventBus()
-        order: list = []
+        order: list[str] = []
         bus.subscribe(Event, lambda e: order.append("E"))
         bus.subscribe(MessageReceived, lambda e: order.append("M1"))
         bus.subscribe(MessageReceived, lambda e: order.append("M2"))
-        await bus.publish(MessageReceived(account="a", message_id=0,
-                                          channel_id=1))
-        await bus.publish(MessageReceived(account="a", message_id=1,
-                                          channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=0, channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=1, channel_id=1))
         self.assertEqual(order, ["E", "M1", "M2"] * 2)
 
     async def test_subscribe_between_publishes_visible(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[Event] = []
         bus.subscribe(Event, seen.append)
-        await bus.publish(MessageReceived(account="a", message_id=0,
-                                          channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=0, channel_id=1))
         bus.subscribe(MessageReceived, seen.append)
-        await bus.publish(MessageReceived(account="a", message_id=1,
-                                          channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=1, channel_id=1))
         self.assertEqual(len(seen), 3)
 
     async def test_self_unsubscribe_runs_this_event_only(self) -> None:
         bus = EventBus()
-        seen: list = []
-        holder: dict = {}
+        seen: list[int] = []
+        holder: dict[str, Callable[[], None]] = {}
 
         def selfremoving(event: Event) -> None:
             seen.append(1)
             holder["un"]()
 
         holder["un"] = bus.subscribe(MessageReceived, selfremoving)
-        await bus.publish(MessageReceived(account="a", message_id=0,
-                                          channel_id=1))
-        await bus.publish(MessageReceived(account="a", message_id=1,
-                                          channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=0, channel_id=1))
+        await bus.publish(MessageReceived(account="a", message_id=1, channel_id=1))
         self.assertEqual(seen, [1])
 
     async def test_cache_hit_equals_uncached_dispatch(self) -> None:
         bus = EventBus()
-        hits: list = []
+        hits: list[str] = []
         bus.subscribe(Event, lambda e: hits.append("base"))
         bus.subscribe(MessageReceived, lambda e: hits.append("mr"))
-        first = await bus.publish(MessageReceived(
-            account="a", message_id=0, channel_id=1))  # cache build
-        second = await bus.publish(MessageReceived(
-            account="a", message_id=1, channel_id=1))  # cache hit
+        first = await bus.publish(
+            MessageReceived(account="a", message_id=0, channel_id=1)
+        )  # cache build
+        second = await bus.publish(
+            MessageReceived(account="a", message_id=1, channel_id=1)
+        )  # cache hit
         self.assertEqual(len(first), len(second))
         self.assertEqual(hits, ["base", "mr"] * 2)
 
@@ -240,8 +239,8 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         from benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(
-            ["--scenario", "log_burst", "--records", "100", "--repeat", "3",
-             "--quiet"])
+            ["--scenario", "log_burst", "--records", "100", "--repeat", "3", "--quiet"]
+        )
         report = await run_suite(args)
         scen = report["scenarios"][0]
         self.assertEqual(scen["repeat"]["n"], 3)
@@ -252,11 +251,30 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         from benchmark.cli import run_bench_cli
 
         with self.assertRaises(SystemExit):
-            run_bench_cli(["--scenario", "log_burst", "--records", "10",
-                           "--repeat", "3", "--profile", "--quiet"])
+            run_bench_cli(
+                [
+                    "--scenario",
+                    "log_burst",
+                    "--records",
+                    "10",
+                    "--repeat",
+                    "3",
+                    "--profile",
+                    "--quiet",
+                ]
+            )
         with self.assertRaises(SystemExit):
-            run_bench_cli(["--scenario", "log_burst", "--records", "10",
-                           "--capture-spikes", "--save-baseline", "--quiet"])
+            run_bench_cli(
+                [
+                    "--scenario",
+                    "log_burst",
+                    "--records",
+                    "10",
+                    "--capture-spikes",
+                    "--save-baseline",
+                    "--quiet",
+                ]
+            )
 
     async def test_run_mode_labels(self) -> None:
         from benchmark.cli import _run_mode, build_parser
@@ -275,12 +293,13 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
         capture = SpikeCapture(floor_ms=5.0, k_lag=1.0)
         session = SamplerSession(loop_interval_ms=5, spike_capture=capture)
-        session.spike_capture.capture_ctx["fake"] = NS(
-            stats=lambda: {"depth": 1})
+        assert session.spike_capture is not None  # just constructed with it
+        session.spike_capture.capture_ctx["fake"] = NS(stats=lambda: {"depth": 1})
         session.start()
         await asyncio.sleep(0.05)
         time_module_sleep = 0.08
         import time as _t
+
         _t.sleep(time_module_sleep)  # a real blocking stall > floor
         await asyncio.sleep(0.05)
         await session.stop()
@@ -316,8 +335,18 @@ class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
         from benchmark.report import to_json
 
         args = build_parser().parse_args(
-            ["--scenario", "accounts_startstop", "--accounts", "2",
-             "--cycles", "1", "--duration", "0.1", "--quiet"])
+            [
+                "--scenario",
+                "accounts_startstop",
+                "--accounts",
+                "2",
+                "--cycles",
+                "1",
+                "--duration",
+                "0.1",
+                "--quiet",
+            ]
+        )
         report = await run_suite(args)
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "scan.json")

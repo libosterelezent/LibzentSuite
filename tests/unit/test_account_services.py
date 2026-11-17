@@ -1,5 +1,6 @@
 """Unit tests for core.account_manager.services: task-ack sends, waits,
 collect idle-timeout semantics, cache-first DMs and passthrough helpers."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from core.account_manager import DiscordCache
 from core.account_manager.services import AccountPluginServices, TaskAckRegistry
@@ -17,6 +19,14 @@ from core.priority import Priority
 from core.task_scheduler import TaskScheduler
 from tests.unit.helpers import FakeClient, FakeScheduler, default_snapshot, make_manager
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from core.cooldowns import CooldownService
+    from core.credential_service import CredentialService
+    from core.plugin_state import PluginStateService
+    from core.task_scheduler import Task
+
 _TEST_LOG = logging.getLogger("tests.account_services")
 
 
@@ -24,23 +34,32 @@ class _InstantLimiter:
     """Duck-typed limiter for the real-scheduler tests (instant grants)."""
 
     class _Grant:
-        wait_s = 0.0
-        jitter_s = 0.0
+        wait_s: float = 0.0
+        jitter_s: float = 0.0
 
-    async def acquire(self, action, account, plugin, priority):
+    async def acquire(
+        self, action: str, account: str | None, plugin: str | None, priority: int
+    ) -> _InstantLimiter._Grant:
         return self._Grant()
 
-    def report_server_limit(self, *args, **kwargs):
+    def report_server_limit(self, *args: Any, **kwargs: Any) -> None:
         pass
 
 
-def make_services(*, bus=None, scheduler=None, client=None, settings_dict=None,
-                  ack_registry=None):
+def make_services(
+    *,
+    bus: EventBus | None = None,
+    scheduler: Any = None,
+    client: FakeClient | None = None,
+    settings_dict: dict[str, Any] | None = None,
+    ack_registry: TaskAckRegistry | None = None,
+) -> AccountPluginServices:
     """Direct AccountPluginServices construction with sensible defaults."""
     cache = DiscordCache("alpha")
     cache.ingest_snapshot(default_snapshot())
     return AccountPluginServices(
-        "alpha", "exporter",
+        "alpha",
+        "exporter",
         bus=bus or EventBus(),
         scheduler=scheduler or FakeScheduler(),
         credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
@@ -63,9 +82,14 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
             ("alpha", "exporter", "message", 100, "hi"),
         )
         self.assertEqual(task.priority, Priority.LOW)
-        await bus.publish(TaskCompleted(
-            account="alpha", task_id=task.id, duration_s=0.2, summary="sent",
-        ))
+        await bus.publish(
+            TaskCompleted(
+                account="alpha",
+                task_id=task.id,
+                duration_s=0.2,
+                summary="sent",
+            )
+        )
         self.assertIsNone(await asyncio.wait_for(pending, 1.0))  # ack-only return
 
     async def test_send_dm_submits_dm_action(self) -> None:
@@ -74,11 +98,10 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.create_task(services.send_dm(777, "psst"))
         await asyncio.sleep(0.02)
         task = scheduler.submitted[0]
-        self.assertEqual(
-            (task.action, task.user_id, task.content), ("dm", 777, "psst")
+        self.assertEqual((task.action, task.user_id, task.content), ("dm", 777, "psst"))
+        await bus.publish(
+            TaskCompleted(account="alpha", task_id=task.id, duration_s=0.1, summary="dm sent")
         )
-        await bus.publish(TaskCompleted(account="alpha", task_id=task.id,
-                                        duration_s=0.1, summary="dm sent"))
         self.assertIsNone(await asyncio.wait_for(pending, 1.0))
 
     async def test_send_message_raises_on_task_failed(self) -> None:
@@ -87,8 +110,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.create_task(services.send_message(100, "hi"))
         await asyncio.sleep(0.02)
         task_id = scheduler.submitted[0].id
-        await bus.publish(TaskFailed(account="alpha", task_id=task_id,
-                                     error="channel gone"))
+        await bus.publish(TaskFailed(account="alpha", task_id=task_id, error="channel gone"))
         with self.assertRaises(SchedulerError) as ctx:
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("channel gone", str(ctx.exception))
@@ -105,11 +127,14 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.create_task(services.send_message(100, "hi"))
         await asyncio.sleep(0.02)
         task_id = scheduler.submitted[0].id
-        await bus.publish(TaskFailed(
-            account="alpha", task_id=task_id,
-            error="TargetGone: [] flow blocked: channel 500 vanished",
-            error_kind="TargetGone",
-        ))
+        await bus.publish(
+            TaskFailed(
+                account="alpha",
+                task_id=task_id,
+                error="TargetGone: [] flow blocked: channel 500 vanished",
+                error_kind="TargetGone",
+            )
+        )
         with self.assertRaises(TargetGone) as ctx:
             await asyncio.wait_for(pending, 1.0)
         self.assertEqual(ctx.exception.account, "alpha")
@@ -120,9 +145,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(bus=bus, scheduler=scheduler)
         pending = asyncio.create_task(services.send_message(100, "hi"))
         await asyncio.sleep(0.02)
-        await bus.publish(TaskCancelled(
-            account="alpha", task_id=scheduler.submitted[0].id
-        ))
+        await bus.publish(TaskCancelled(account="alpha", task_id=scheduler.submitted[0].id))
         with self.assertRaises(SchedulerError) as ctx:
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("cancelled", str(ctx.exception))
@@ -131,7 +154,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         bus, scheduler = EventBus(), FakeScheduler()
         services = make_services(bus=bus, scheduler=scheduler)
         services.task_ack_timeout = 0.05  # configurable attribute
-        registry = services._ack_registry if services._ack_registry else None
+        _registry = services._ack_registry if services._ack_registry else None
         with self.assertRaises(SchedulerError) as ctx:
             await services.send_message(100, "hi")
         self.assertIn("did not complete", str(ctx.exception))
@@ -156,8 +179,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SchedulerError) as ctx:
             await registry.wait_for_task(9, timeout=1.0)
         self.assertIn("already being awaited", str(ctx.exception))
-        await bus.publish(TaskCompleted(
-            account="alpha", task_id=9, summary="ok"))
+        await bus.publish(TaskCompleted(account="alpha", task_id=9, summary="ok"))
         self.assertEqual(await asyncio.wait_for(first, 1.0), "ok")
         self.assertEqual(registry.pending(), [])
 
@@ -167,10 +189,13 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         registry = TaskAckRegistry(bus)
 
-        async def never_finishes():
+        async def never_finishes() -> None:
             await asyncio.sleep(10)
 
-        _ = asyncio.create_task(never_finishes())
+        # kept referenced for the life of the test: a live in-flight task
+        # while the registry times out and re-waits
+        parked: list[asyncio.Task[None]] = []
+        parked.append(asyncio.create_task(never_finishes()))
         with self.assertRaises(SchedulerError):
             await registry.wait_for_task(4, timeout=0.02)
         self.assertEqual(registry.pending(), [])
@@ -187,10 +212,12 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         p1 = asyncio.create_task(one.send_message(100, "a"))
         p2 = asyncio.create_task(two.send_message(101, "b"))
         await asyncio.sleep(0.02)
-        await bus.publish(TaskCompleted(
-            account="alpha", task_id=scheduler.submitted[0].id, summary="ok"))
-        await bus.publish(TaskCompleted(
-            account="alpha", task_id=scheduler.submitted[1].id, summary="ok"))
+        await bus.publish(
+            TaskCompleted(account="alpha", task_id=scheduler.submitted[0].id, summary="ok")
+        )
+        await bus.publish(
+            TaskCompleted(account="alpha", task_id=scheduler.submitted[1].id, summary="ok")
+        )
         await asyncio.wait_for(asyncio.gather(p1, p2), 1.0)
         self.assertEqual(registry.pending(), [])
 
@@ -198,16 +225,22 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {"k": 9},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {"k": 9},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         services = h.manager.services_for("alpha", "exporter")
         self.assertIs(h.manager.services_for("alpha", "exporter"), services)
         self.assertEqual(services.settings, {"k": 9})  # seeded from states()
         pending = asyncio.create_task(services.send_message(100, "hi"))
         await asyncio.sleep(0.02)
-        await h.bus.publish(TaskCompleted(
-            account="alpha", task_id=h.scheduler.submitted[0].id, summary="ok"))
+        await h.bus.publish(
+            TaskCompleted(account="alpha", task_id=h.scheduler.submitted[0].id, summary="ok")
+        )
         self.assertIsNone(await asyncio.wait_for(pending, 1.0))
 
 
@@ -219,10 +252,11 @@ class LiveSettingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_live_view_shared_with_context(self) -> None:
         from tests.unit.test_plugin_manager import make_manager as make_pm
 
-        manager, bus, _ = make_pm()
+        manager, _bus, _ = make_pm()
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", lambda _name: None)
         live = manager.live_settings("alpha", "spy")
+        assert live is not None
         self.assertIsInstance(live, dict)
         # a runtime change through the manager mutates the LIVE dict...
         await manager.set_setting("alpha", "spy", "greeting", "changed")
@@ -236,17 +270,25 @@ class WaitForMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_match_wins_and_filters_account(self) -> None:
         bus = EventBus()
         services = make_services(bus=bus)
-        pending = asyncio.create_task(
-            services.wait_for_message(lambda e: e.content == "yes", 1.0)
-        )
+        pending = asyncio.create_task(services.wait_for_message(lambda e: e.content == "yes", 1.0))
         await asyncio.sleep(0.02)
-        await bus.publish(MessageReceived(account="alpha", message_id=1,
-                                          channel_id=100, author_id=42, content="no"))
-        await bus.publish(MessageReceived(account="beta", message_id=2,
-                                          channel_id=100, author_id=42, content="yes"))
-        await bus.publish(MessageReceived(account="alpha", message_id=3,
-                                          channel_id=100, author_id=42, content="yes"))
+        await bus.publish(
+            MessageReceived(
+                account="alpha", message_id=1, channel_id=100, author_id=42, content="no"
+            )
+        )
+        await bus.publish(
+            MessageReceived(
+                account="beta", message_id=2, channel_id=100, author_id=42, content="yes"
+            )
+        )
+        await bus.publish(
+            MessageReceived(
+                account="alpha", message_id=3, channel_id=100, author_id=42, content="yes"
+            )
+        )
         event = await asyncio.wait_for(pending, 1.0)
+        assert event is not None
         self.assertEqual(event.message_id, 3)  # fast return, right account
 
     async def test_timeout_returns_none(self) -> None:
@@ -255,7 +297,9 @@ class WaitForMessageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nonpositive_timeout_rejected(self) -> None:
         services = make_services()
-        for bad in (0, -1, None):
+        # Any-typed: the None entry is a deliberately invalid timeout
+        bad_timeouts: tuple[Any, ...] = (0, -1, None)
+        for bad in bad_timeouts:
             with self.assertRaises(AccountError):
                 await services.wait_for_message(lambda e: True, bad)
 
@@ -263,13 +307,14 @@ class WaitForMessageTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         services = make_services(bus=bus)
 
-        def bad_check(_event):
+        def bad_check(_event: MessageReceived) -> NoReturn:
             raise ValueError("check exploded")
 
         pending = asyncio.create_task(services.wait_for_message(bad_check, 0.5))
         await asyncio.sleep(0.02)
-        await bus.publish(MessageReceived(account="alpha", message_id=1,
-                                          channel_id=100, author_id=1, content="x"))
+        await bus.publish(
+            MessageReceived(account="alpha", message_id=1, channel_id=100, author_id=1, content="x")
+        )
         with self.assertRaises(AccountError) as ctx:
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("check exploded", str(ctx.exception))
@@ -279,37 +324,46 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
     async def test_idle_window_resets_on_each_match(self) -> None:
         bus = EventBus()
         services = make_services(bus=bus)
-        box: list = []
+        box: list[Any] = []
         pending = asyncio.create_task(
             services.collect_messages(lambda e: "page" in e.content, 0.15)
         )
 
-        def done(future):
+        def done(future: asyncio.Future[Any]) -> None:
             box.extend(future.result() if not future.exception() else [])
 
         pending.add_done_callback(done)
         for index in range(3):
             await asyncio.sleep(0.07)  # under the idle window
-            await bus.publish(MessageReceived(
-                account="alpha", message_id=index, channel_id=9001,
-                author_id=777, content=f"page {index}", dm=True,
-            ))
+            await bus.publish(
+                MessageReceived(
+                    account="alpha",
+                    message_id=index,
+                    channel_id=9001,
+                    author_id=777,
+                    content=f"page {index}",
+                    dm=True,
+                )
+            )
         collected = await asyncio.wait_for(pending, 2.0)
-        self.assertEqual([e.content for e in collected],
-                         ["page 0", "page 1", "page 2"])
+        self.assertEqual([e.content for e in collected], ["page 0", "page 1", "page 2"])
 
     async def test_quiet_sender_ends_collection(self) -> None:
         bus = EventBus()
         services = make_services(bus=bus)
-        await bus.publish(MessageReceived(account="alpha", message_id=1,
-                                          channel_id=100, author_id=1, content="hit"))
-        # subscribe-late: publish again AFTER the collector starts
-        pending = asyncio.create_task(
-            services.collect_messages(lambda e: e.content == "hit", 0.05)
+        await bus.publish(
+            MessageReceived(
+                account="alpha", message_id=1, channel_id=100, author_id=1, content="hit"
+            )
         )
+        # subscribe-late: publish again AFTER the collector starts
+        pending = asyncio.create_task(services.collect_messages(lambda e: e.content == "hit", 0.05))
         await asyncio.sleep(0.02)
-        await bus.publish(MessageReceived(account="alpha", message_id=2,
-                                          channel_id=100, author_id=1, content="hit"))
+        await bus.publish(
+            MessageReceived(
+                account="alpha", message_id=2, channel_id=100, author_id=1, content="hit"
+            )
+        )
         collected = await asyncio.wait_for(pending, 1.0)
         self.assertEqual(len(collected), 1)
 
@@ -322,15 +376,14 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         services = make_services(bus=bus)
 
-        def bad_check(_event):
+        def bad_check(_event: MessageReceived) -> NoReturn:
             raise KeyError("missing field")
 
-        pending = asyncio.create_task(
-            services.collect_messages(bad_check, 0.05)
-        )
+        pending = asyncio.create_task(services.collect_messages(bad_check, 0.05))
         await asyncio.sleep(0.02)
-        await bus.publish(MessageReceived(account="alpha", message_id=1,
-                                          channel_id=100, author_id=1, content="x"))
+        await bus.publish(
+            MessageReceived(account="alpha", message_id=1, channel_id=100, author_id=1, content="x")
+        )
         with self.assertRaises(AccountError) as ctx:
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("missing field", str(ctx.exception))
@@ -349,7 +402,7 @@ class OpenDmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await services.open_dm(888), 9888)
         self.assertEqual(client.open_dm_calls, [888])
         self.assertEqual(await services.open_dm(888), 9888)  # cached now
-        self.assertEqual(client.open_dm_calls, [888])        # opened exactly once
+        self.assertEqual(client.open_dm_calls, [888])  # opened exactly once
 
     async def test_no_client_raises_account_error(self) -> None:
         services = make_services(client=None)
@@ -362,11 +415,16 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
     facade: persistence, scoping, and the clear-error degradation when the
     services are not wired."""
 
-    def _services(self, cooldowns=None, plugin_state=None):
+    def _services(
+        self,
+        cooldowns: CooldownService | None = None,
+        plugin_state: PluginStateService | None = None,
+    ) -> AccountPluginServices:
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
         return AccountPluginServices(
-            "alpha", "exporter",
+            "alpha",
+            "exporter",
             bus=EventBus(),
             scheduler=FakeScheduler(),
             credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
@@ -417,25 +475,29 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_pair_scoping_isolation(self) -> None:
         from core.plugin_state import PluginStateService
 
-        written: dict = {}
+        written: dict[str, Any] = {}
 
         class KvSpy:
-            async def get(self, key):
+            async def get(self, key: str) -> Any:
                 return written.get(key)
 
-            async def set(self, key, value):
+            async def set(self, key: str, value: Any) -> None:
                 written[key] = value
 
-            async def delete(self, key):
+            async def delete(self, key: str) -> bool:
                 return written.pop(key, None) is not None
 
-        plugin_state = PluginStateService(KvSpy())
+        kv: Any = KvSpy()  # duck-typed KvRepository double
+        plugin_state = PluginStateService(kv)
         alpha = self._services(plugin_state=plugin_state)
         beta = AccountPluginServices(
-            "beta", "exporter",
-            bus=EventBus(), scheduler=FakeScheduler(),
+            "beta",
+            "exporter",
+            bus=EventBus(),
+            scheduler=FakeScheduler(),
             credentials=Credentials.from_values({}),
-            cache=DiscordCache("beta"), settings_dict={},
+            cache=DiscordCache("beta"),
+            settings_dict={},
             plugin_state=plugin_state,
         )
         await alpha.state_set("k", "alpha-value")
@@ -470,10 +532,11 @@ class PassthroughTests(unittest.IsolatedAsyncioTestCase):
     async def test_publish_reaches_bus_subscribers(self) -> None:
         bus = EventBus()
         services = make_services(bus=bus)
-        seen = []
+        seen: list[MessageReceived] = []
         bus.subscribe(MessageReceived, seen.append)
-        services.publish(MessageReceived(account="alpha", message_id=9,
-                                         channel_id=1, author_id=2, content="x"))
+        services.publish(
+            MessageReceived(account="alpha", message_id=9, channel_id=1, author_id=2, content="x")
+        )
         await asyncio.sleep(0.02)  # fire-and-forget dispatch
         self.assertEqual(len(seen), 1)
 
@@ -495,25 +558,26 @@ class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
     substring-match English error text against."""
 
     @staticmethod
-    def _scheduler(sender, **kwargs) -> TaskScheduler:
-        scheduler = TaskScheduler(
-            EventBus(), _TEST_LOG, _InstantLimiter(), sender, **kwargs)
+    def _scheduler(
+        sender: Callable[[Task], Coroutine[Any, Any, None]], **kwargs: Any
+    ) -> TaskScheduler:
+        scheduler = TaskScheduler(EventBus(), _TEST_LOG, _InstantLimiter(), sender, **kwargs)
         scheduler.start()
         return scheduler
 
     async def test_real_connection_error_raises_connection_error(self) -> None:
-        async def sender(task):
+        async def sender(task: Task) -> None:
             raise ConnectionError("discord unreachable")
 
         scheduler = self._scheduler(sender)
         try:
             bus = scheduler._bus
             registry = TaskAckRegistry(bus, scheduler)
-            task = scheduler.submit("alpha", "roll", "message",
-                                    channel_id=1, content="x", retries=0)
+            task = scheduler.submit(
+                "alpha", "roll", "message", channel_id=1, content="x", retries=0
+            )
             with self.assertRaises(ConnectionError) as ctx:
-                await asyncio.wait_for(
-                    registry.wait_for_task(task.id, timeout=2.0), 2.5)
+                await asyncio.wait_for(registry.wait_for_task(task.id, timeout=2.0), 2.5)
             self.assertIs(type(ctx.exception), ConnectionError)
             self.assertNotIsInstance(ctx.exception, SchedulerError)
             self.assertIn("discord unreachable", str(ctx.exception))
@@ -527,9 +591,14 @@ class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         registry = TaskAckRegistry(bus)
         future = registry.register(31)
-        await bus.publish(TaskFailed(account="alpha", task_id=31,
-                                     error="TimeoutError: gateway hung",
-                                     error_kind="TimeoutError"))
+        await bus.publish(
+            TaskFailed(
+                account="alpha",
+                task_id=31,
+                error="TimeoutError: gateway hung",
+                error_kind="TimeoutError",
+            )
+        )
         with self.assertRaises(TimeoutError) as ctx:
             await asyncio.wait_for(future, 1.0)
         self.assertIn("gateway hung", str(ctx.exception))
@@ -540,20 +609,19 @@ class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
         (unchanged contract — plugins never see transport 429 churn)."""
         attempts = []
 
-        async def sender(task):
+        async def sender(task: Task) -> None:
             attempts.append(task.id)
             raise ServerRateLimit(0.01)
 
-        scheduler = self._scheduler(sender, retry_backoff=0.0,
-                                    max_backoff=0.0)
+        scheduler = self._scheduler(sender, retry_backoff=0.0, max_backoff=0.0)
         try:
             bus = scheduler._bus
             registry = TaskAckRegistry(bus, scheduler)
-            task = scheduler.submit("alpha", "roll", "message",
-                                    channel_id=1, content="x", retries=0)
+            task = scheduler.submit(
+                "alpha", "roll", "message", channel_id=1, content="x", retries=0
+            )
             with self.assertRaises(SchedulerError) as ctx:
-                await asyncio.wait_for(
-                    registry.wait_for_task(task.id, timeout=2.0), 2.5)
+                await asyncio.wait_for(registry.wait_for_task(task.id, timeout=2.0), 2.5)
             self.assertIn("server rate limit", str(ctx.exception))
             self.assertNotIsInstance(ctx.exception, ServerRateLimit)
             self.assertEqual(len(attempts), 2)  # retried once, then terminal
@@ -565,8 +633,7 @@ class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
         ConnectionError raised by the real pipeline (here: send_hook's
         not-running gate through the manager harness)."""
         h = make_manager()
-        scheduler = TaskScheduler(h.bus, _TEST_LOG, _InstantLimiter(),
-                                  h.manager.send_hook)
+        scheduler = TaskScheduler(h.bus, _TEST_LOG, _InstantLimiter(), h.manager.send_hook)
         scheduler.start()
         h.manager._scheduler = scheduler
         try:
@@ -617,7 +684,6 @@ if __name__ == "__main__":  # pragma: no cover
     unittest.main()
 
 
-
 class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
     """Review #4: deletion generations are PER-ACCOUNT — deleting one
     account must not trigger another account's in-flight store
@@ -630,18 +696,19 @@ class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
         from pathlib import Path
 
         from core.credential_service import CredentialService
+
         tmp = tempfile.mkdtemp(prefix="sm-cred-")
         self.addCleanup(shutil.rmtree, tmp, True)
         self.repo = _PausingRepo()
         return CredentialService(self.repo, key_path=Path(tmp) / "k.key")
 
-    async def test_unrelated_delete_does_not_tombstone_inflight_store(self):
+    async def test_unrelated_delete_does_not_tombstone_inflight_store(self) -> None:
         svc = self._service()
         await svc.store("alpha", "tok-alpha")
         self.repo.pause()
         store_task = asyncio.create_task(svc.store("beta", "tok-beta"))
-        await self.repo.wait_paused()      # beta's store parked mid-write
-        await svc.delete("alpha")          # UNRELATED account deleted
+        await self.repo.wait_paused()  # beta's store parked mid-write
+        await svc.delete("alpha")  # UNRELATED account deleted
         self.repo.resume()
         await store_task
         # beta's ciphertext must SURVIVE (the old service-wide generation
@@ -649,12 +716,12 @@ class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await svc.resolve("beta"), "tok-beta")
         self.assertIsNone(await svc.resolve("alpha"))
 
-    async def test_own_account_delete_still_tombstones(self):
+    async def test_own_account_delete_still_tombstones(self) -> None:
         svc = self._service()
         self.repo.pause()
         store_task = asyncio.create_task(svc.store("alpha", "tok-alpha"))
         await self.repo.wait_paused()
-        await svc.delete("alpha")          # the SAME account deleted
+        await svc.delete("alpha")  # the SAME account deleted
         self.repo.resume()
         await store_task
         self.assertIsNone(await svc.resolve("alpha"))
@@ -664,38 +731,38 @@ class _PausingRepo:
     """Repo double with a gate inside store(): a test parks an in-flight
     store while a delete commits, then resumes."""
 
-    def __init__(self):
-        self._rows: dict = {}
+    def __init__(self) -> None:
+        self._rows: dict[str, bytes] = {}
         self._gate = asyncio.Event()
-        self._gate.set()                  # unpaused by default
+        self._gate.set()  # unpaused by default
         self._paused = asyncio.Event()
 
-    def pause(self):
+    def pause(self) -> None:
         self._gate.clear()
         self._paused.clear()
 
-    async def wait_paused(self):
+    async def wait_paused(self) -> None:
         await self._paused.wait()
 
-    def resume(self):
+    def resume(self) -> None:
         self._gate.set()
 
-    async def store(self, account, ciphertext):
+    async def store(self, account: str, ciphertext: bytes) -> None:
         if not self._gate.is_set():
-            self._paused.set()          # signal parked WHILE still parked
-            await self._gate.wait()     # release
+            self._paused.set()  # signal parked WHILE still parked
+            await self._gate.wait()  # release
         self._rows[account] = ciphertext
 
-    async def load(self, account):
+    async def load(self, account: str) -> bytes | None:
         if not self._gate.is_set():
             self._paused.set()
             await self._gate.wait()
         return self._rows.get(account)
 
-    async def delete(self, account):
+    async def delete(self, account: str) -> bool:
         # deliberately NOT gated: the delete commits while a store is
         # parked — that interleaving is exactly what these tests probe
         return self._rows.pop(account, None) is not None
 
-    async def accounts(self):
+    async def accounts(self) -> list[str]:
         return sorted(self._rows)

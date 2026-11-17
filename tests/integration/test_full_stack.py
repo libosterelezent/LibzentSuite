@@ -5,14 +5,17 @@ only the Discord boundary replaced by the in-memory simulator (spec §9's
 Testing adapter). Everything else (managers, scheduler, limiter, database,
 audit, logging) is the real production code.
 """
+
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from adapters.simulator.client import SimClient
 from adapters.simulator.world import SimWorld
@@ -60,14 +63,20 @@ class Stack:
     """A fully wired production framework over one simulated world
     (``stack = await Stack(...).boot()`` — build is async now)."""
 
-    def __init__(self, db_path: str | None = None, extra_accounts: list = (),
-                 plugin_dir: Path = FIXTURE_PLUGINS) -> None:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        extra_accounts: list[str] | None = None,
+        plugin_dir: Path = FIXTURE_PLUGINS,
+    ) -> None:
         self.world = SimWorld(
             responder_id=PRIMARY_BOT_ID,
-            responses={"$dump": [
-                "Soulmates\n---------\nAlice\nBob\nCharlie",
-                "Dana\nEve\nFinn",
-            ]},
+            responses={
+                "$dump": [
+                    "Soulmates\n---------\nAlice\nBob\nCharlie",
+                    "Dana\nEve\nFinn",
+                ]
+            },
             reply_delay=0.01,
         )
         self.world.add_user(OWNER_ID, "owner")
@@ -77,14 +86,16 @@ class Stack:
         self.world.add_channel(GUILD_CHANNEL, "grind-channel")
         self.user_ids = {"alpha": ALPHA_ID, "beta": 2002}
         self.config_dir = make_config_dir()
-        self.credentials = Credentials.from_values({
-            "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
-            "OWNER_USER_IDS": str(OWNER_ID),
-            "DISCORD_TOKEN_ALPHA": "sim-alpha",
-            "DISCORD_TOKEN_BETA": "sim-beta",
-        })
+        self.credentials = Credentials.from_values(
+            {
+                "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
+                "OWNER_USER_IDS": str(OWNER_ID),
+                "DISCORD_TOKEN_ALPHA": "sim-alpha",
+                "DISCORD_TOKEN_BETA": "sim-beta",
+            }
+        )
         self.db = Database(db_path if db_path is not None else ":memory:")
-        self.framework = None
+        self.framework: Any = None  # set by boot() (build is async)
         self._extra = extra_accounts
         self._plugin_dir = plugin_dir
 
@@ -121,8 +132,7 @@ class Stack:
         # means zero plugins, so these whole-stack flow tests spell it out)
         names = [m["name"] for m in await self.framework.api.plugins_manifests()]
         for name in self._extra or ["alpha"]:
-            await self.framework.api.accounts_add(
-                {"name": name, "plugins": names})
+            await self.framework.api.accounts_add({"name": name, "plugins": names})
         await self.framework.api.accounts_start()
 
     async def stop(self) -> None:
@@ -158,11 +168,13 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
                 audit = await stack.framework.api.audit_tail(n=20)
                 if any(e.get("direction") == "out" for e in audit):
                     break
-            outs = [e for e in audit if e.get("direction") == "out"
-                    and e.get("action") in ("message", "dm")]
+            outs = [
+                e
+                for e in audit
+                if e.get("direction") == "out" and e.get("action") in ("message", "dm")
+            ]
             self.assertGreaterEqual(len(outs), 2)
-            self.assertTrue(all("plugin=exporter" in (e.get("note") or "")
-                                for e in outs))
+            self.assertTrue(all("plugin=exporter" in (e.get("note") or "") for e in outs))
             # task history persisted with statuses
             hist = await stack.framework.api.tasks_history(limit=10)
             self.assertTrue(hist)
@@ -170,7 +182,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
 
             # structured logging saw the lifecycle
             logs = await stack.framework.api.logs_tail(n=50)
-            events = [l.get("event") for l in logs if l.get("event")]
+            events = [entry.get("event") for entry in logs if entry.get("event")]
             self.assertIn("TaskCompleted", events)
             self.assertIn("AccountConnected", events)
         finally:
@@ -187,11 +199,12 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
             # the world journal (the source of truth for what actually hit
             # the wire) — the audit trail's ts view is equivalent.
             outs = sorted(
-                m.ts for m in stack.world.history.get(GUILD_CHANNEL, [])
+                m.ts
+                for m in stack.world.history.get(GUILD_CHANNEL, [])
                 if m.author_id == stack.user_ids["alpha"]
             )
             self.assertGreaterEqual(len(outs), 2)
-            gaps = [b - a for a, b in zip(outs, outs[1:])]
+            gaps = [b - a for a, b in itertools.pairwise(outs)]
             self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
         finally:
             await stack.stop()
@@ -216,6 +229,7 @@ class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
         finally:
             await stack.stop()
 
+
 class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
     async def test_state_survives_reboot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-state-") as tmp:
@@ -238,12 +252,13 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([a["name"] for a in accounts], ["alpha"])
                 self.assertEqual(accounts[0]["assigned_plugins"], [PROBE])
                 policies = await api2.ratelimit_policies()
-                override = [p for p in policies
-                            if p["level"] == "account" and p["owner"] == "alpha"]
+                override = [
+                    p for p in policies if p["level"] == "account" and p["owner"] == "alpha"
+                ]
                 self.assertEqual(len(override), 1)
                 self.assertEqual(override[0]["interval"], 4.0)
                 states = {p["name"]: p for p in await api2.plugins_state("alpha")}
-                self.assertFalse(states[PROBE]["enabled"])   # plugin state
+                self.assertFalse(states[PROBE]["enabled"])  # plugin state
                 self.assertEqual(states[PROBE]["settings"]["trigger"], "go")
             finally:
                 await stack2.stop()
@@ -310,14 +325,18 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             settings = stack.framework.settings
             # default: typing_probability 0.0 -> zero typing calls, zero extra API
             await stack.framework.accounts.send_hook(
-                SimpleNamespace(account="alpha", action="message",
-                                channel_id=GUILD_CHANNEL, content="x"))
+                SimpleNamespace(
+                    account="alpha", action="message", channel_id=GUILD_CHANNEL, content="x"
+                )
+            )
             self.assertEqual(client.typing_calls, [])
             # opted in at 1.0 -> every guild send fires typing first
             await settings.set_account_setting("alpha", "typing_probability", 1.0)
             await stack.framework.accounts.send_hook(
-                SimpleNamespace(account="alpha", action="message",
-                                channel_id=GUILD_CHANNEL, content="y"))
+                SimpleNamespace(
+                    account="alpha", action="message", channel_id=GUILD_CHANNEL, content="y"
+                )
+            )
             self.assertEqual(len(client.typing_calls), 1)
         finally:
             await stack.stop()
@@ -338,16 +357,17 @@ class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(out["halted"])
             # halted: every submit is rejected
             from core.errors import SchedulerError
+
             with self.assertRaises(SchedulerError):
-                stack.framework.scheduler.submit("alpha", PROBE, "message",
-                                                 channel_id=GUILD_CHANNEL, content="x")
+                stack.framework.scheduler.submit(
+                    "alpha", PROBE, "message", channel_id=GUILD_CHANNEL, content="x"
+                )
             # resume: scheduler re-armed, sends flow again
             resumed = await api.system_resume()
             self.assertTrue(resumed["resumed"])
             await api.accounts_start()  # accounts restart is explicit
             scheduler = stack.framework.scheduler
-            scheduler.submit("alpha", PROBE, "message",
-                             channel_id=GUILD_CHANNEL, content="back")
+            scheduler.submit("alpha", PROBE, "message", channel_id=GUILD_CHANNEL, content="back")
             for _ in range(100):
                 await asyncio.sleep(0.05)
                 if "back" in stack.world.messages_of(GUILD_CHANNEL):
@@ -375,25 +395,28 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
             scheduler = stack.framework.scheduler
             for account in ("alpha", "beta", "alpha", "beta"):
                 scheduler.submit(
-                    account, PROBE, "message",
-                    channel_id=GUILD_CHANNEL, content=f"hi-{account}",
+                    account,
+                    PROBE,
+                    "message",
+                    channel_id=GUILD_CHANNEL,
+                    content=f"hi-{account}",
                 )
             for _ in range(200):  # 4 sends on a 2.0s group clock land ~t=6s
                 await asyncio.sleep(0.05)
                 if len(stack.world.messages_of(GUILD_CHANNEL)) >= 4:
                     break
             await asyncio.sleep(0.3)
-            history = [m for m in stack.world.messages_of(GUILD_CHANNEL)
-                       if m.startswith("hi-")]
+            history = [m for m in stack.world.messages_of(GUILD_CHANNEL) if m.startswith("hi-")]
             self.assertEqual(len(history), 4)
             # every gap between GROUP members (and each account's own calls)
             # respects the 1.5s config interval across the shared clock —
             # measured on the world journal (what actually hit the wire)
             outs = sorted(
-                m.ts for m in stack.world.history.get(GUILD_CHANNEL, [])
+                m.ts
+                for m in stack.world.history.get(GUILD_CHANNEL, [])
                 if m.author_id in stack.user_ids.values()
             )
-            gaps = [b - a for a, b in zip(outs, outs[1:])]
+            gaps = [b - a for a, b in itertools.pairwise(outs)]
             self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
         finally:
             await stack.stop()

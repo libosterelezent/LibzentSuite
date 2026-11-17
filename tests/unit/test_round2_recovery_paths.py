@@ -16,11 +16,13 @@ the three riskiest untested ones (plus the rate-engine logger swallow):
 4. rate_limit_manager/engine.py:1020-1029 — a logger whose methods
    raise must never break policy edits or acquire (pacing fast path).
 """
+
 from __future__ import annotations
 
 import logging
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from core.account_manager.services import TaskAckRegistry
 from core.credential_service import CredentialService
@@ -30,6 +32,9 @@ from core.plugin_manager import PluginManager
 from core.rate_limit_manager.engine import ManualClock, RateLimitManager
 from core.settings_manager import SettingsManager
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
 LOG = logging.getLogger("tests.round2.recovery")
 
@@ -38,28 +43,25 @@ class ExplodingListCredentialRepo:
     """accounts_with_credential() always explodes; load/store work."""
 
     def __init__(self) -> None:
-        self.rows: dict = {}
+        self.rows: dict[str, bytes] = {}
 
-    async def accounts_with_credential(self):
+    async def accounts_with_credential(self) -> None:
         raise RuntimeError("credentials listing exploded")
 
-    async def load(self, account):
+    async def load(self, account: str) -> bytes | None:
         return self.rows.get(account)
 
-    async def store(self, account, ciphertext):
+    async def store(self, account: str, ciphertext: bytes) -> None:
         self.rows[account] = ciphertext
 
-    async def delete(self, account):
+    async def delete(self, account: str) -> bool:
         return self.rows.pop(account, None) is not None
 
 
-class TestCredentialResolveSurvivesRefreshExplosion(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestCredentialResolveSurvivesRefreshExplosion(unittest.IsolatedAsyncioTestCase):
     async def test_resolve_loads_token_despite_broken_listing(self) -> None:
         repo = ExplodingListCredentialRepo()
-        svc = CredentialService(
-            repo, key_path="/tmp/opencode/test-round2-cred.key")
+        svc = CredentialService(repo, key_path="/tmp/opencode/test-round2-cred.key")
         await repo.store("alpha", svc.fernet.encrypt(b"tok-alpha"))
 
         self.assertEqual(await svc.resolve("alpha"), "tok-alpha")
@@ -67,8 +69,7 @@ class TestCredentialResolveSurvivesRefreshExplosion(
 
     async def test_resolve_of_truly_missing_account_stays_none(self) -> None:
         repo = ExplodingListCredentialRepo()
-        svc = CredentialService(
-            repo, key_path="/tmp/opencode/test-round2-cred.key")
+        svc = CredentialService(repo, key_path="/tmp/opencode/test-round2-cred.key")
         self.assertIsNone(await svc.resolve("ghost"))
 
 
@@ -76,16 +77,14 @@ class CancelBoomScheduler:
     """Duck-typed scheduler whose cancel() always raises."""
 
     def __init__(self) -> None:
-        self.cancelled: list = []
+        self.cancelled: list[int] = []
 
-    def cancel(self, task_id):
+    def cancel(self, task_id: int) -> NoReturn:
         self.cancelled.append(task_id)
         raise RuntimeError("cancel exploded")
 
 
-class TestTaskAckTimeoutSurvivesCancelExplosion(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestTaskAckTimeoutSurvivesCancelExplosion(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_raises_scheduler_error_not_cancel_boom(self) -> None:
         scheduler = CancelBoomScheduler()
         registry = TaskAckRegistry(EventBus(), scheduler=scheduler)
@@ -93,35 +92,35 @@ class TestTaskAckTimeoutSurvivesCancelExplosion(
             await registry.wait_for_task(7, timeout=0.02)
         self.assertIn("did not complete", str(caught.exception))
         self.assertEqual(scheduler.cancelled, [7])  # cancel was attempted
-        self.assertEqual(registry.pending(), [])    # no future leaked
+        self.assertEqual(registry.pending(), [])  # no future leaked
 
 
-def make_plugin_manager():
+def make_plugin_manager() -> tuple[PluginManager, EventBus]:
     bus = EventBus()
     settings = SettingsManager(bus, LOG)
-    manager = PluginManager(
-        bus, LOG, settings, plugin_dir=str(FIXTURES))
+    manager = PluginManager(bus, LOG, settings, plugin_dir=str(FIXTURES))
     return manager, bus
 
 
-def raising_on_disable(fired):
-    async def _boom(ctx):
+def raising_on_disable(
+    fired: list[str],
+) -> Callable[[Any], Coroutine[Any, Any, None]]:
+    async def _boom(ctx: Any) -> None:
         fired.append("on_disable")
         raise RuntimeError("on_disable exploded")
+
     return _boom
 
 
-class TestDeactivateSurvivesRaisingOnDisable(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestDeactivateSurvivesRaisingOnDisable(unittest.IsolatedAsyncioTestCase):
     async def test_raising_on_disable_still_unloads_and_publishes(self) -> None:
         manager, bus = make_plugin_manager()
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", lambda name: None)
         spy = manager._accounts["alpha"]["spy"]
-        fired: list = []
+        fired: list[str] = []
         spy.instance.on_disable = raising_on_disable(fired)
-        unloaded: list = []
+        unloaded: list[PluginUnloaded] = []
         bus.subscribe(PluginUnloaded, unloaded.append)
 
         await manager.deactivate_account("alpha")
@@ -141,9 +140,9 @@ class TestDeactivateSurvivesRaisingOnDisable(
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", lambda name: None)
         spy = manager._accounts["alpha"]["spy"]
-        fired: list = []
+        fired: list[str] = []
         spy.instance.on_disable = raising_on_disable(fired)
-        events: list = []
+        events: list[PluginEnabledChanged] = []
         bus.subscribe(PluginEnabledChanged, events.append)
 
         await manager.set_enabled("alpha", "spy", False)
@@ -151,34 +150,33 @@ class TestDeactivateSurvivesRaisingOnDisable(
 
         self.assertEqual(fired, ["on_disable"])
         self.assertFalse(spy.enabled)
-        self.assertTrue(
-            any(e.plugin == "spy" and e.enabled is False for e in events)
-        )
+        self.assertTrue(any(e.plugin == "spy" and e.enabled is False for e in events))
 
 
 class HostileLogger:
     """Every method raises — logging must never break pacing."""
 
-    def info(self, *args, **kwargs):
+    def info(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("log info exploded")
 
-    def warning(self, *args, **kwargs):
+    def warning(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("log warning exploded")
 
-    def error(self, *args, **kwargs):
+    def error(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("log error exploded")
 
-    def debug(self, *args, **kwargs):
+    def debug(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("log debug exploded")
 
 
-class TestRateEngineSurvivesHostileLogger(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestRateEngineSurvivesHostileLogger(unittest.IsolatedAsyncioTestCase):
     async def test_policy_edit_and_acquire_with_raising_logger(self) -> None:
         manager = RateLimitManager(
-            EventBus(), HostileLogger(), None,
-            clock=ManualClock(0.0), jitter_seed=7,
+            EventBus(),
+            HostileLogger(),
+            None,
+            clock=ManualClock(0.0),
+            jitter_seed=7,
         )
         policy = manager.set_policy_values("message", 1.5, 0.0, 0.0)
         self.assertEqual(policy.interval, 1.5)

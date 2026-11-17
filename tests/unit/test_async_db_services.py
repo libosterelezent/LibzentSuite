@@ -6,6 +6,7 @@ credential encrypt->persist->restart->decrypt cycle + no-leak checks,
 cooldown restart math (absolute expiry), account isolation, and the
 scoped plugin-state API.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,11 +41,10 @@ class TestAsyncDatabase(AsyncTestCase):
         await db.kv.set("keep", "1")
         with self.assertRaises(RuntimeError):
             async with db.connection.write() as conn:
-                await conn.execute(
-                    "INSERT INTO kv (key, value) VALUES ('both','x')")
+                await conn.execute("INSERT INTO kv (key, value) VALUES ('both','x')")
                 raise RuntimeError("boom")
-        self.assertIsNone(await db.kv.get("both"))          # rolled back
-        self.assertEqual(await db.kv.get("keep"), "1")      # untouched
+        self.assertIsNone(await db.kv.get("both"))  # rolled back
+        self.assertEqual(await db.kv.get("keep"), "1")  # untouched
         await db.close()
 
     async def test_constraint_failure_is_clean(self) -> None:
@@ -52,6 +52,7 @@ class TestAsyncDatabase(AsyncTestCase):
         await db.connect()
         await db.accounts.add("alpha")
         from database.connection import DatabaseError
+
         with self.assertRaises(DatabaseError):
             await db.accounts.add("alpha")  # PK violation -> wrapped error
         self.assertEqual(len(await db.accounts.list()), 1)
@@ -76,7 +77,7 @@ class TestAsyncDatabase(AsyncTestCase):
         self.assertEqual(await db.kv.get("k19"), "19")
         await db.close()
 
-    async def _keep_ticking(self, loop) -> None:
+    async def _keep_ticking(self, loop: asyncio.AbstractEventLoop) -> None:
         try:
             while True:
                 await asyncio.sleep(0)
@@ -93,6 +94,7 @@ class TestAsyncDatabase(AsyncTestCase):
     async def test_connect_required_before_use(self) -> None:
         db = self.tmp_db()
         from database.connection import DatabaseError
+
         with self.assertRaises(DatabaseError):
             await db.kv.set("x", "1")
 
@@ -109,14 +111,12 @@ class TestAsyncDatabase(AsyncTestCase):
         db = self.tmp_db()
         await db.connect()
         loop = asyncio.get_running_loop()
-        failures: list = []
+        failures: list[str | BaseException] = []
 
         def worker() -> None:
             try:
-                asyncio.run_coroutine_threadsafe(
-                    db.kv.set("t", "bridge"), loop).result(5)
-                got = asyncio.run_coroutine_threadsafe(
-                    db.kv.get("t"), loop).result(5)
+                asyncio.run_coroutine_threadsafe(db.kv.set("t", "bridge"), loop).result(5)
+                got = asyncio.run_coroutine_threadsafe(db.kv.get("t"), loop).result(5)
                 if got != "bridge":
                     failures.append(f"readback {got!r}")
             except BaseException as exc:
@@ -136,13 +136,14 @@ class TestAsyncDatabase(AsyncTestCase):
         await db.kv.set("k", "v1")
         await db.close()
 
-        readback: list = []
+        readback: list[str] = []
 
         def second_loop() -> None:
             async def go() -> None:
                 await db.connect()
                 readback.append(await db.kv.get("k"))
                 await db.close()
+
             asyncio.run(go())
 
         await asyncio.get_running_loop().run_in_executor(None, second_loop)
@@ -152,6 +153,7 @@ class TestAsyncDatabase(AsyncTestCase):
         """Two loops driving one connection corrupt the lock/sqlite
         session; the guard must fail loud with a clean DatabaseError."""
         from core.errors import DatabaseError
+
         db = self.tmp_db()
         await db.connect()
         await db.kv.set("bind", "1")
@@ -159,6 +161,7 @@ class TestAsyncDatabase(AsyncTestCase):
         def other_loop() -> None:
             async def go() -> None:
                 await db.kv.set("x", "1")
+
             asyncio.run(go())
 
         with self.assertRaises(DatabaseError):
@@ -190,28 +193,24 @@ class TestCredentialService(AsyncTestCase):
         with tempfile.TemporaryDirectory(prefix="sm-cred-") as tmp:
             db = Database(Path(tmp) / "t.db")
             await db.connect()
-            service = CredentialService(db.credentials,
-                                        key_path=Path(tmp) / "k.key")
+            service = CredentialService(db.credentials, key_path=Path(tmp) / "k.key")
             await service.store("alpha", "PLAINTEXT-MARKER-XYZ")
             await db.close()
             raw = (Path(tmp) / "t.db").read_bytes()
             self.assertNotIn(b"PLAINTEXT-MARKER-XYZ", raw)  # at rest
             self.assertNotIn("PLAINTEXT-MARKER-XYZ", repr(service))  # repr
-            self.assertNotIn("PLAINTEXT-MARKER-XYZ",
-                             str(service.status("alpha")))  # status words
+            self.assertNotIn("PLAINTEXT-MARKER-XYZ", str(service.status("alpha")))  # status words
 
     async def test_precedence_and_import(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-cred-") as tmp:
             db = Database(":memory:")
             await db.connect()
-            service = CredentialService(db.credentials,
-                                        key_path=Path(tmp) / "k1.key")
+            service = CredentialService(db.credentials, key_path=Path(tmp) / "k1.key")
             # missing -> None (NO env fallback exists anymore)
             self.assertIsNone(await service.resolve("alpha"))
             self.assertEqual(service.status("alpha"), "missing")
             # explicit import stores it
-            report = await service.import_from_env(
-                {"alpha": "env-tok", "beta": ""})
+            report = await service.import_from_env({"alpha": "env-tok", "beta": ""})
             self.assertEqual(report["imported"], ["alpha"])
             self.assertEqual(await service.resolve("alpha"), "env-tok")
             # re-import skips existing
@@ -224,12 +223,11 @@ class TestCredentialService(AsyncTestCase):
         with tempfile.TemporaryDirectory(prefix="sm-cred-") as tmp:
             db = Database(":memory:")
             await db.connect()
-            service = CredentialService(db.credentials,
-                                        key_path=Path(tmp) / "k2.key")
+            service = CredentialService(db.credentials, key_path=Path(tmp) / "k2.key")
             await service.store("alpha", "tok")
             self.assertTrue(await service.delete("alpha"))
             self.assertIsNone(await service.resolve("alpha"))
-            with self.assertRaises(Exception):
+            with self.assertRaises(Exception):  # noqa: B017 -- any store failure is the contract
                 await service.store("alpha", "")  # empty refused
             await db.close()
 
@@ -241,8 +239,7 @@ class TestCooldownService(AsyncTestCase):
         db = Database(":memory:")
         await db.connect()
         service = CooldownService(db.cooldowns, time_fn=lambda: clock["now"])
-        await service.set("alpha", "roll", "roulette", 45 * 60,
-                          source="discord_message")
+        await service.set("alpha", "roll", "roulette", 45 * 60, source="discord_message")
         clock["now"] += 10 * 60  # framework "restarts" 10 minutes later
         service2 = CooldownService(db.cooldowns, time_fn=lambda: clock["now"])
         report = await service2.restore()
@@ -270,10 +267,8 @@ class TestCooldownService(AsyncTestCase):
         service = CooldownService(db.cooldowns)
         await service.set("alpha", "roll", "roulette", 500)
         self.assertFalse(await service.is_active("beta", "roll", "roulette"))
-        self.assertEqual(
-            len(await service.active_for("beta")), 0)
-        self.assertEqual(
-            len(await service.active_for("alpha")), 1)
+        self.assertEqual(len(await service.active_for("beta")), 0)
+        self.assertEqual(len(await service.active_for("alpha")), 1)
         cleared = await service.delete_account("alpha")
         self.assertEqual(cleared, 1)
         self.assertFalse(await service.is_active("alpha", "roll", "roulette"))
@@ -335,6 +330,7 @@ class TestPluginStateService(AsyncTestCase):
         await db.connect()
         state = PluginStateService(db.kv)
         from core.errors import PluginError
+
         with self.assertRaises(PluginError):
             state._key("global", None, "")
         await db.close()

@@ -1,9 +1,11 @@
 """PHASE-4 lifecycle governor tests: anti-thrash, bypass, forget, stats."""
+
 from __future__ import annotations
 
 import asyncio
 import unittest
 from types import SimpleNamespace as NS
+from typing import Any
 
 from core.account_manager.lifecycle import (
     OUTCOME_RATE_LIMITED,
@@ -60,8 +62,9 @@ class GovernorUnitTests(unittest.TestCase):
             LifecyclePolicy(start_burst=0)
         with self.assertRaises(ValueError):
             LifecyclePolicy(restart_cooldown_s=-1)
+        bad_refill: Any = "fast"  # runtime validation rejects non-numeric input
         with self.assertRaises(ValueError):
-            LifecyclePolicy(start_refill_s="fast")
+            LifecyclePolicy(start_refill_s=bad_refill)
 
     def test_stop_then_start_blocked_until_restart_cooldown(self) -> None:
         clock = _ManualClock()
@@ -155,8 +158,9 @@ class GovernorManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.start("alpha")
         self.assertIn("rate-limited", str(ctx.exception))
         self.assertIn("retry in", str(ctx.exception))
-        self.assertEqual(h.manager.get("alpha").runtime.status.value,
-                         "stopped")  # refusal did not mutate state
+        self.assertEqual(
+            h.manager.get("alpha").runtime.status.value, "stopped"
+        )  # refusal did not mutate state
 
     async def test_estop_bypasses_governor(self) -> None:
         h = make_manager()
@@ -171,8 +175,7 @@ class GovernorManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         out = h.manager.emergency_stop("alpha")  # must NOT raise
         self.assertTrue(out["stop_initiated"])
         await asyncio.sleep(0.1)
-        self.assertEqual(h.manager.get("alpha").runtime.status.value,
-                         "stopped")
+        self.assertEqual(h.manager.get("alpha").runtime.status.value, "stopped")
 
     async def test_remove_forgets_pacer(self) -> None:
         h = make_manager()

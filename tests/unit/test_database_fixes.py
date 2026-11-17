@@ -12,9 +12,11 @@ One test per audited defect:
     deterministic re-apply of the ALTER migration,
 (e) log messages are capped at 2000 chars.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,8 +69,7 @@ class TestAccountDeleteCascadesAccountPlugins(AsyncDatabaseTestCase):
         await self.db.accounts.add("alpha")
         await self.db.account_plugins.assign_plugin("alpha", "exporter")
         await self.db.account_plugins.assign_plugin("alpha", "roll")
-        self.assertEqual(
-            await self.db.account_plugins.plugins_of("alpha"), ["exporter", "roll"])
+        self.assertEqual(await self.db.account_plugins.plugins_of("alpha"), ["exporter", "roll"])
 
         self.assertTrue(await self.db.accounts.delete("alpha"))
 
@@ -87,7 +88,9 @@ class TestTelemetryRingEviction(unittest.IsolatedAsyncioTestCase):
     async def test_ring_keeps_appending_past_maxlen(self) -> None:
         tele = DbTelemetry()
         tele.enabled = True  # bypass LZ_DB_TELEMETRY; deterministic
-        total = tele._ring.maxlen + 200
+        capacity = tele._ring.maxlen
+        assert capacity is not None  # the telemetry ring is always bounded
+        total = capacity + 200
         for i in range(total):
             tele.record("read", (i + 1) * 0.001)  # ms == i + 1
 
@@ -97,11 +100,13 @@ class TestTelemetryRingEviction(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["requests"]["errors"], 0)
 
         ring = tele._ring
-        self.assertEqual(len(ring), ring.maxlen)  # full, not frozen short
+        capacity = ring.maxlen
+        assert capacity is not None  # the telemetry ring is always bounded
+        self.assertEqual(len(ring), capacity)  # full, not frozen short
         # holding the NEWEST records proves eviction ran: the first entry
         # is record #(total - maxlen + 1), the last is record #total —
         # the frozen-ring bug would show 1 and maxlen instead
-        self.assertEqual(ring[0][1], total - ring.maxlen + 1)
+        self.assertEqual(ring[0][1], total - capacity + 1)
         self.assertEqual(ring[-1][1], total)
         self.assertEqual(snap["read_ms"]["max"], float(total))
 
@@ -115,21 +120,19 @@ class TestParallelFirstBoot(AsyncDatabaseTestCase):
         path = Path(self.tmp.name) / "race.db"
         db1 = Database(path)
         db2 = Database(path)
-        results = await asyncio.gather(db1.connect(), db2.connect(),
-                                       return_exceptions=True)
+        results = await asyncio.gather(db1.connect(), db2.connect(), return_exceptions=True)
         try:
             for r in results:
                 if isinstance(r, BaseException):
                     raise AssertionError(f"parallel first boot failed: {r!r}")
                 self.assertIsInstance(r, int)
             # consistent bookkeeping: every version stamped exactly once
-            rows = await db1.connection.fetch_all(
-                "SELECT version FROM schema_migrations")
+            rows = await db1.connection.fetch_all("SELECT version FROM schema_migrations")
             versions = sorted(row["version"] for row in rows)
             self.assertEqual(versions, list(range(1, latest_version() + 1)))
             dupes = await db1.connection.fetch_all(
-                "SELECT version FROM schema_migrations "
-                "GROUP BY version HAVING COUNT(*) > 1")
+                "SELECT version FROM schema_migrations GROUP BY version HAVING COUNT(*) > 1"
+            )
             self.assertEqual(dupes, [])
         finally:
             await db1.close()
@@ -139,18 +142,18 @@ class TestParallelFirstBoot(AsyncDatabaseTestCase):
         """Deterministic pin of the loser's path: re-applying the ALTER
         migration over an already-migrated file hits exactly the parallel
         winner's 'duplicate column name' — tolerated, never double-stamped."""
-        alter = [(v, n, s) for v, n, s in MIGRATIONS
-                 if "ALTER TABLE" in s.upper()]
-        self.assertTrue(alter, "race guard is only exercised while an "
-                               "ALTER-carrying migration exists")
+        alter = [(v, n, s) for v, n, s in MIGRATIONS if "ALTER TABLE" in s.upper()]
+        self.assertTrue(
+            alter, "race guard is only exercised while an ALTER-carrying migration exists"
+        )
         version, name, sql = alter[-1]
         # the loser path pinned directly: applying an already-applied
         # ALTER migration through the guarded applier hits the winner's
         # error, tolerates it, and never double-stamps
         await self.db._apply_guarded(version, name, sql)
         rows = await self.db.connection.fetch_all(
-            "SELECT COUNT(*) AS n FROM schema_migrations WHERE version = ?",
-            (version,))
+            "SELECT COUNT(*) AS n FROM schema_migrations WHERE version = ?", (version,)
+        )
         self.assertLessEqual(rows[0]["n"], 1)  # never double-stamped
 
 
@@ -158,8 +161,7 @@ class TestLogMessageCap(AsyncDatabaseTestCase):
     """(e) log messages are capped at 2000 chars (audit content: 500)."""
 
     async def test_message_capped_at_2000(self) -> None:
-        await self.db.logs.add({"severity": "error", "source": "t",
-                                "message": "x" * 5000})
+        await self.db.logs.add({"severity": "error", "source": "t", "message": "x" * 5000})
         rows = await self.db.logs.recent(10)
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(rows[0]["message"]), 2000)
@@ -179,7 +181,7 @@ if __name__ == "__main__":
 
 class TestCancelDuringBeginDoesNotWedgeConnection(AsyncDatabaseTestCase):
     async def test_cancel_during_begin_then_write_still_works(self) -> None:
-        async def writer():
+        async def writer() -> None:
             async with self.db.connection.write():
                 await asyncio.sleep(10)
 
@@ -188,25 +190,24 @@ class TestCancelDuringBeginDoesNotWedgeConnection(AsyncDatabaseTestCase):
             for _ in range(ticks):
                 await asyncio.sleep(0)
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
             await asyncio.sleep(0.05)
-            await self.db.kv.set(f"k{ticks}", ticks)   # used to fail: tx stuck
+            await self.db.kv.set(f"k{ticks}", ticks)  # used to fail: tx stuck
             self.assertEqual(await self.db.kv.get(f"k{ticks}"), ticks)
 
 
 class TestTelemetryPercentiles(unittest.TestCase):
     def test_percentiles_stay_within_observed_range_and_json_safe(self) -> None:
         import json
+
         t = DbTelemetry()
         t.enabled = True
         for _ in range(10):
-            t.record("read", 0.00005)          # 0.05 ms
+            t.record("read", 0.00005)  # 0.05 ms
         snap = t.snapshot()
         self.assertLessEqual(snap["read_ms"]["p50"], 0.1)
-        t.record("commit", 0.5)                # 500 ms: overflow bucket
+        t.record("commit", 0.5)  # 500 ms: overflow bucket
         snap = t.snapshot()
         self.assertNotEqual(snap["commit_ms"]["p95"], float("inf"))
         json.dumps(snap, allow_nan=False)
@@ -216,12 +217,13 @@ class TestMigrationToleratedAlterKeepsOtherStatements(AsyncDatabaseTestCase):
     async def test_existing_column_does_not_lose_profile_table(self) -> None:
         await self.db.close()
         import sqlite3
+
         raw = sqlite3.connect(self.path)
         raw.execute("DROP TABLE IF EXISTS plugin_profiles")
         raw.execute("DELETE FROM schema_migrations WHERE version >= 7")
         raw.commit()
         cols = [r[1] for r in raw.execute("PRAGMA table_info(account_plugins)")]
-        self.assertIn("profile", cols)         # column survives the rollback
+        self.assertIn("profile", cols)  # column survives the rollback
         # v10's fold reads sync_groups — recreate its shape (v11 dropped it)
         raw.execute("""
             CREATE TABLE IF NOT EXISTS sync_groups (
@@ -243,8 +245,7 @@ class TestMigrationToleratedAlterKeepsOtherStatements(AsyncDatabaseTestCase):
 class TestStoredNullSettingSurvivesRead(AsyncDatabaseTestCase):
     async def test_json_null_override_is_not_dropped(self) -> None:
         await self.db.plugins.set_setting("alpha", "roll", "limit", None)
-        self.assertEqual(await self.db.plugins.settings("alpha", "roll"),
-                         {"limit": None})
+        self.assertEqual(await self.db.plugins.settings("alpha", "roll"), {"limit": None})
         self.assertEqual(
-            (await self.db.plugins.all_account_settings())["alpha"]["roll"],
-            {"limit": None})
+            (await self.db.plugins.all_account_settings())["alpha"]["roll"], {"limit": None}
+        )

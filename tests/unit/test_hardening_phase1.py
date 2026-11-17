@@ -3,6 +3,7 @@
 Every test here pins a defect found in the audit; each failed on the
 pre-audit code.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +12,11 @@ import logging
 import math
 import os
 import stat
-import tempfile
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from core._asyncutil import outer_cancel_pending
@@ -32,9 +34,7 @@ from database.db import Database
 
 #: fixture plugins (the framework ships none; the fixture keeps the boot
 #: path exercising plugin discovery/attachment)
-FIXTURE_PLUGINS = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
-)
+FIXTURE_PLUGINS = Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
 
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
@@ -73,9 +73,9 @@ class TestDatabaseLayer(_TmpCase):
         # connection was released and nothing half-applied remained
         self.assertFalse(db.connection.connected)
         import sqlite3
+
         con = sqlite3.connect(self.dir / "m.db")
-        tables = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         rows = con.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
         con.close()
         self.assertNotIn("ok_t", tables)
@@ -88,8 +88,7 @@ class TestDatabaseLayer(_TmpCase):
 
         async def writer() -> None:
             async with db.connection.write() as conn:
-                await conn.execute(
-                    "INSERT INTO kv (key, value) VALUES ('k', 'half')")
+                await conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'half')")
                 inside.set()
                 await release.wait()
                 raise RuntimeError("abort")
@@ -126,7 +125,7 @@ class TestDatabaseLayer(_TmpCase):
 
         task = asyncio.create_task(slow_write())
         await started.wait()
-        await db.close()           # must wait, not cut the transaction off
+        await db.close()  # must wait, not cut the transaction off
         await task
         db2 = await self.open_db("t.db")
         self.assertEqual(len(await db2.connection.fetch_all("SELECT * FROM kv")), 1)
@@ -137,8 +136,9 @@ class TestDatabaseLayer(_TmpCase):
         await db.accounts.add("b")
         for acct in ("a", "b"):
             await db.credentials.store(acct, b"cipher-" + acct.encode())
-            await db.cooldowns.upsert(account=acct, plugin="p", cooldown_key="k",
-                                      started_at=1.0, expires_at=2e12)
+            await db.cooldowns.upsert(
+                account=acct, plugin="p", cooldown_key="k", started_at=1.0, expires_at=2e12
+            )
         self.assertTrue(await db.accounts.delete("a"))
         self.assertIsNone(await db.credentials.load("a"))
         self.assertEqual(await db.cooldowns.active_for("a"), [])
@@ -147,13 +147,20 @@ class TestDatabaseLayer(_TmpCase):
 
     async def test_corrupt_cooldown_metadata_does_not_crash_listing(self) -> None:
         db = await self.open_db()
-        await db.cooldowns.upsert(account="a", plugin="p", cooldown_key="good",
-                                  started_at=1.0, expires_at=2e12,
-                                  metadata={"x": 1})
-        await db.cooldowns.upsert(account="a", plugin="p", cooldown_key="bad",
-                                  started_at=1.0, expires_at=2e12)
+        await db.cooldowns.upsert(
+            account="a",
+            plugin="p",
+            cooldown_key="good",
+            started_at=1.0,
+            expires_at=2e12,
+            metadata={"x": 1},
+        )
+        await db.cooldowns.upsert(
+            account="a", plugin="p", cooldown_key="bad", started_at=1.0, expires_at=2e12
+        )
         await db.connection.execute(
-            "UPDATE cooldowns SET metadata_json='{broken' WHERE cooldown_key='bad'")
+            "UPDATE cooldowns SET metadata_json='{broken' WHERE cooldown_key='bad'"
+        )
         rows = await db.cooldowns.active_for("a")
         by_key = {r["cooldown_key"]: r for r in rows}
         self.assertEqual(by_key["good"]["metadata"], {"x": 1})
@@ -162,10 +169,12 @@ class TestDatabaseLayer(_TmpCase):
     async def test_cooldown_restore_single_query_all_accounts(self) -> None:
         db = await self.open_db()
         for acct in ("a", "b", "c"):
-            await db.cooldowns.upsert(account=acct, plugin="p", cooldown_key="k",
-                                      started_at=1.0, expires_at=2e12)
-        await db.cooldowns.upsert(account="a", plugin="p", cooldown_key="old",
-                                  started_at=1.0, expires_at=5.0)
+            await db.cooldowns.upsert(
+                account=acct, plugin="p", cooldown_key="k", started_at=1.0, expires_at=2e12
+            )
+        await db.cooldowns.upsert(
+            account="a", plugin="p", cooldown_key="old", started_at=1.0, expires_at=5.0
+        )
         svc = CooldownService(db.cooldowns)
         self.assertEqual(
             await svc.restore(),
@@ -177,7 +186,8 @@ class TestDatabaseLayer(_TmpCase):
         svc = CooldownService(None)
         for bad in (math.inf, math.nan, "abc"):
             with self.assertRaises(ValueError):
-                await svc.set("a", "p", "k", bad)
+                # "abc" is deliberately the wrong type: runtime must reject it
+                await svc.set("a", "p", "k", bad)  # type: ignore[arg-type]
         await svc.set("a", "p", "k", 5)  # normal path still fine
 
     async def test_add_many_one_batch_prunes_once_and_keeps_newest(self) -> None:
@@ -185,8 +195,8 @@ class TestDatabaseLayer(_TmpCase):
         await db.connect()
         self.addAsyncCleanup(db.close)
         n = await db.logs.add_many(
-            [{"message": f"m{i}", "severity": "info", "source": "s"}
-             for i in range(12)])
+            [{"message": f"m{i}", "severity": "info", "source": "s"} for i in range(12)]
+        )
         self.assertEqual(n, 12)
         rows = await db.logs.recent(100)
         self.assertEqual([r["message"] for r in rows], [f"m{i}" for i in range(7, 12)])
@@ -196,15 +206,21 @@ class TestDatabaseLayer(_TmpCase):
 
 
 class TestTaskIdsSurviveRestart(_TmpCase):
-    async def _boot(self, db_name: str, restore: bool, n: int) -> list:
+    async def _boot(self, db_name: str, restore: bool, n: int) -> list[Any]:
         from core.task_scheduler import TaskScheduler
         from tests.unit.test_task_scheduler import FakeAudit, FakeLimiter, FakeLogger, FakeSender
 
         db = Database(self.dir / db_name)
         await db.connect()
-        sched = TaskScheduler(EventBus(), FakeLogger(), FakeLimiter(),
-                              FakeSender(), FakeAudit(), default_timeout=5.0,
-                              history_repo=db.tasks)
+        sched = TaskScheduler(
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            FakeSender(),
+            FakeAudit(),
+            default_timeout=5.0,
+            history_repo=db.tasks,
+        )
         if restore:
             await sched.restore_sequence()
         sched.start()
@@ -243,9 +259,12 @@ class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 task = asyncio.current_task()
-                before = task.cancelling()
+                assert task is not None  # we are running inside it
+                # Task.cancelling() is 3.11+; this test is skipIf-guarded
+                # below 3.11, but mypy's typeshed is pinned to 3.10
+                before = task.cancelling()  # type: ignore[attr-defined]
                 seen["pending"] = outer_cancel_pending()
-                seen["unchanged"] = task.cancelling() == before
+                seen["unchanged"] = task.cancelling() == before  # type: ignore[attr-defined]
                 raise
 
         task = asyncio.create_task(victim())
@@ -259,7 +278,7 @@ class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
     async def test_internal_handler_cancel_is_isolated_not_propagated(self) -> None:
         bus = EventBus()
 
-        async def selfcancel(event) -> None:
+        async def selfcancel(event: Event) -> None:
             raise asyncio.CancelledError()
 
         got = []
@@ -272,17 +291,18 @@ class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
 
 class TestPersistQueue(unittest.IsolatedAsyncioTestCase):
     class Repo:
-        def __init__(self, fail_batches=False, bad=None) -> None:
-            self.batches, self.singles = [], []
+        def __init__(self, fail_batches: bool = False, bad: Any = None) -> None:
+            self.batches: list[list[dict[str, Any]]] = []
+            self.singles: list[dict[str, Any]] = []
             self.fail_batches, self.bad = fail_batches, bad
 
-        async def add_many(self, items) -> int:
+        async def add_many(self, items: list[dict[str, Any]]) -> int:
             if self.fail_batches:
                 raise RuntimeError("batch down")
             self.batches.append(list(items))
             return len(items)
 
-        async def add(self, item) -> None:
+        async def add(self, item: dict[str, Any]) -> None:
             if item.get("n") == self.bad:
                 raise RuntimeError("bad row")
             self.singles.append(item)
@@ -314,13 +334,14 @@ class TestPersistQueue(unittest.IsolatedAsyncioTestCase):
         pq = PersistQueue("t")
         await pq.start(repo, batch=10, interval=0.01)
         stopper = asyncio.ensure_future(pq.stop(2.0))
-        await asyncio.sleep(0)          # parked inside stop()'s first wait
+        await asyncio.sleep(0)  # parked inside stop()'s first wait
         stopper.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await stopper
         self.assertFalse(pq._stopping)  # used to stay True forever
+        assert pq._draining is not None
         self.assertTrue(pq._draining.done())
-        await asyncio.wait_for(pq.stop(1.0), 2.0)   # must not hang or join a dead future
+        await asyncio.wait_for(pq.stop(1.0), 2.0)  # must not hang or join a dead future
 
     async def test_overflow_counted(self) -> None:
         pq = PersistQueue("t", max_inflight=3)
@@ -363,8 +384,7 @@ class TestCredentials(_TmpCase):
         self.assertIs(CredentialsError, CoreCredentialsError)
 
     def test_env_bom_and_inline_comments(self) -> None:
-        env = Credentials.parse_env(
-            '\ufeffPRIMARY_BOT_ID=123 # the bot\nTOKEN=ab#cd\nQ="x # y"\n')
+        env = Credentials.parse_env('\ufeffPRIMARY_BOT_ID=123 # the bot\nTOKEN=ab#cd\nQ="x # y"\n')
         self.assertEqual(env, {"PRIMARY_BOT_ID": "123", "TOKEN": "ab#cd", "Q": "x # y"})
         self.assertEqual(Credentials(env).primary_bot_id, 123)
 
@@ -382,8 +402,9 @@ class TestCredentials(_TmpCase):
             _ = svc.fernet
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
             key = path.read_text()
-            self.assertEqual(CredentialService(None, key_path=path)
-                             ._load_or_create_key().decode(), key)
+            self.assertEqual(
+                CredentialService(None, key_path=path)._load_or_create_key().decode(), key
+            )
 
     async def test_corrupt_key_is_credentials_error(self) -> None:
         path = self.dir / "bad.key"
@@ -407,18 +428,25 @@ class TestBootstrapRobustness(_TmpCase):
         # a mid-build failure AFTER some cleanups registered (a malformed
         # rate_limits spec used to be the trigger, but it is now — by
         # design — a skip-and-warn, so fail a later boot step instead)
-        async def boom(*args, **kwargs):
+        async def boom(*args: Any, **kwargs: Any) -> None:
             raise ValueError("mid-build failure")
 
-        with mock.patch("core.bootstrap._seed_config_defaults", boom):
-            with self.assertRaises(ValueError):
-                await build(config_dir=str(self._config()),
-                            plugin_dir=str(FIXTURE_PLUGINS),
-                            client_factory=lambda n, t: None, credentials=creds,
-                            database=db, quiet=True)
+        with (
+            mock.patch("core.bootstrap._seed_config_defaults", boom),
+            self.assertRaises(ValueError),
+        ):
+            await build(
+                config_dir=str(self._config()),
+                plugin_dir=str(FIXTURE_PLUGINS),
+                client_factory=lambda n, t: None,
+                credentials=creds,
+                database=db,
+                quiet=True,
+            )
         self.assertFalse(db.connection.connected)
         root = logging.getLogger("libzent")
         from core.logging_service import StdlibBridge
+
         self.assertFalse([h for h in root.handlers if isinstance(h, StdlibBridge)])
 
     async def test_malformed_policy_spec_no_longer_bricks_boot(self) -> None:
@@ -426,27 +454,37 @@ class TestBootstrapRobustness(_TmpCase):
         creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
         cfg = self.dir / "cfg-mal"
         cfg.mkdir()
-        (cfg / "rate_limits.json").write_text(json.dumps(
-            {"global": {"message": {"interval": "oops"}}}))
-        fw = await build(config_dir=str(cfg),
-                         plugin_dir=str(FIXTURE_PLUGINS),
-                         client_factory=lambda n, t: None, credentials=creds,
-                         database=db, quiet=True)
+        (cfg / "rate_limits.json").write_text(
+            json.dumps({"global": {"message": {"interval": "oops"}}})
+        )
+        fw = await build(
+            config_dir=str(cfg),
+            plugin_dir=str(FIXTURE_PLUGINS),
+            client_factory=lambda n, t: None,
+            credentials=creds,
+            database=db,
+            quiet=True,
+        )
         await fw.shutdown()
         self.assertFalse(db.connection.connected)
 
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
         creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config()),
-                         plugin_dir=str(FIXTURE_PLUGINS),
-                         client_factory=lambda n, t: None, credentials=creds,
-                         database=db, quiet=True)
+        fw = await build(
+            config_dir=str(self._config()),
+            plugin_dir=str(FIXTURE_PLUGINS),
+            client_factory=lambda n, t: None,
+            credentials=creds,
+            database=db,
+            quiet=True,
+        )
 
-        async def boom() -> None:
+        async def boom() -> dict[str, Any]:
             raise RuntimeError("stop_all exploded")
 
-        fw.accounts.stop_all = boom
+        # deliberately swap in a failing stop_all: shutdown must survive it
+        fw.accounts.stop_all = boom  # type: ignore[method-assign]
         await fw.shutdown()
         self.assertFalse(db.connection.connected)
         await fw.shutdown()  # idempotent
@@ -454,10 +492,14 @@ class TestBootstrapRobustness(_TmpCase):
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
         creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config()),
-                         plugin_dir=str(FIXTURE_PLUGINS),
-                         client_factory=lambda n, t: None, credentials=creds,
-                         database=db, quiet=True)
+        fw = await build(
+            config_dir=str(self._config()),
+            plugin_dir=str(FIXTURE_PLUGINS),
+            client_factory=lambda n, t: None,
+            credentials=creds,
+            database=db,
+            quiet=True,
+        )
         await fw.logs.stop_persistence()
         rows = await db.logs.recent(500)
         await fw.shutdown()
@@ -467,6 +509,7 @@ class TestBootstrapRobustness(_TmpCase):
 class TestConfigValidation(_TmpCase):
     def test_bad_policy_shapes_fail_loud_with_message(self) -> None:
         from core.config import load_config
+
         cfg = self.dir / "c"
         cfg.mkdir()
         (cfg / "rate_limits.json").write_text('{"global": [1,2]}')
@@ -478,6 +521,7 @@ class TestConfigValidation(_TmpCase):
 
     def test_bom_json_tolerated(self) -> None:
         from core.config import load_config
+
         cfg = self.dir / "c2"
         cfg.mkdir()
         (cfg / "global_settings.json").write_bytes(b'\xef\xbb\xbf{"p": {"a": 1}}')

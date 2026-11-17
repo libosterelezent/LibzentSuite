@@ -13,20 +13,24 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace as NS
+from typing import TYPE_CHECKING, Any
 
 from adapters.discord.client import RealDiscordClient
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _lib():
+
+def _lib() -> tuple[NS, list[str]]:
     """when_mentioned / when_mentioned_or doubles with observable calls."""
     calls: list[str] = []
 
-    def when_mentioned(bot, message):
+    def when_mentioned(bot: Any, message: Any) -> list[str]:
         calls.append(f"mention:{getattr(message, 'id', '?')}")
         return [f"<@{bot.user_id}>"]
 
-    def when_mentioned_or(symbol):
-        def _both(bot, message):
+    def when_mentioned_or(symbol: str) -> Callable[[Any, Any], list[str]]:
+        def _both(bot: Any, message: Any) -> list[str]:
             calls.append(f"both:{symbol}:{getattr(message, 'id', '?')}")
             return [f"<@{bot.user_id}>", symbol]
 
@@ -35,13 +39,13 @@ def _lib():
     return NS(when_mentioned=when_mentioned, when_mentioned_or=when_mentioned_or), calls
 
 
-def _bot_msg(msg_id=1, bot_id=555):
+def _bot_msg(msg_id: int = 1, bot_id: int = 555) -> tuple[NS, NS]:
     return NS(user_id=bot_id), NS(id=msg_id)
 
 
 class DynamicPrefixTests(unittest.TestCase):
-    def _client(self, **kw) -> RealDiscordClient:
-        base: dict = {"command_prefix": "sm!"}
+    def _client(self, **kw: Any) -> RealDiscordClient:
+        base: dict[str, Any] = {"command_prefix": "sm!"}
         base.update(kw)
         # bypass __init__ (its loop-bound state needs a running loop):
         # only the prefix-resolution fields matter to this contract
@@ -54,7 +58,9 @@ class DynamicPrefixTests(unittest.TestCase):
         return client
 
     def test_provider_change_lands_next_message(self) -> None:
-        cache: dict[str, dict] = {"alpha": {"prefix_mode": "mention", "prefix_symbol": ""}}
+        cache: dict[str, dict[str, Any]] = {
+            "alpha": {"prefix_mode": "mention", "prefix_symbol": ""}
+        }
         # "@me" env: mention mode resolves to the mention form (an env
         # SYMBOL prefix would win over mention — the pinned precedence)
         client = self._client(command_prefix="@me", prefix_provider=lambda: cache.get("alpha"))
@@ -83,7 +89,7 @@ class DynamicPrefixTests(unittest.TestCase):
         self.assertEqual(prefix(bot, msg), "sm!")  # constructor snapshot
 
     def test_provider_failure_falls_back_to_snapshot(self) -> None:
-        def broken():
+        def broken() -> dict[str, Any] | None:
             raise RuntimeError("cache cold")
 
         client = self._client(prefix_mode="symbol", prefix_symbol="sm!", prefix_provider=broken)
@@ -115,16 +121,17 @@ class FactoryProviderWiringTests(unittest.TestCase):
 
         class StubAccess:
             def __init__(self) -> None:
-                self.cache: dict[str, dict | None] = {
+                self.cache: dict[str, dict[str, Any] | None] = {
                     "alpha": {"prefix_mode": "both", "prefix_symbol": "gr!"}
                 }
 
-            def prefix_config_sync(self, name):
+            def prefix_config_sync(self, name: str) -> dict[str, Any] | None:
                 return self.cache.get(name)
 
         access = StubAccess()
         factory = RealClientFactory(
-            NS(self_command_prefix="sm!", owner_user_ids=[]),
+            # duck-typed credentials double: only prefix metadata is read
+            NS(self_command_prefix="sm!", owner_user_ids=[]),  # type: ignore[arg-type]
             command_prefix="sm!",
             access_manager=access,
         )

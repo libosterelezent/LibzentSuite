@@ -1,4 +1,5 @@
 """Second fixture plugin (single-FILE form) for discovery/multi-plugin tests."""
+
 from __future__ import annotations
 
 from core.plugin_base import PluginBase

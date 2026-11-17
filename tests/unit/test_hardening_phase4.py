@@ -5,12 +5,15 @@ reconnect-while-peer-runs, delete+re-create end-to-end, stagger pinning,
 deactivate-once on remove) and the generation-token race fixes (S1 F2/F3/F6,
 S2 supervisor hardening).
 """
+
 from __future__ import annotations
 
 import asyncio
+import itertools
 import unittest
+from typing import Any
 
-from core.account_manager import AccountStatus
+from core.account_manager import AccountRuntime, AccountStatus
 from core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
@@ -19,13 +22,15 @@ from tests.unit.test_account_manager import _fast_reconnect_settings
 class ConcurrentStartsTests(unittest.IsolatedAsyncioTestCase):
     async def test_five_accounts_start_concurrently(self) -> None:
         """S8-T1: A+B+C+D+E via gather — one client + supervisor each."""
-        h = make_manager(token_values={
-            "DISCORD_TOKEN_ALPHA": "tok-alpha",
-            "DISCORD_TOKEN_BETA": "tok-beta",
-            "DISCORD_TOKEN_GAMMA": "tok-gamma",
-            "DISCORD_TOKEN_DELTA": "tok-delta",
-            "DISCORD_TOKEN_EPSILON": "tok-epsilon",
-        })
+        h = make_manager(
+            token_values={
+                "DISCORD_TOKEN_ALPHA": "tok-alpha",
+                "DISCORD_TOKEN_BETA": "tok-beta",
+                "DISCORD_TOKEN_GAMMA": "tok-gamma",
+                "DISCORD_TOKEN_DELTA": "tok-delta",
+                "DISCORD_TOKEN_EPSILON": "tok-epsilon",
+            }
+        )
         names = ["alpha", "beta", "gamma", "delta", "epsilon"]
         for name in names:
             await h.manager.add_account(name)
@@ -35,8 +40,7 @@ class ConcurrentStartsTests(unittest.IsolatedAsyncioTestCase):
         await h.collector.wait_for(AccountConnected, 5)
         self.assertEqual(len(h.factory.clients), 5)
         supervisors = [h.manager.get(n).runtime.supervisor for n in names]
-        self.assertTrue(all(s is not None and not s.done()
-                            for s in supervisors))
+        self.assertTrue(all(s is not None and not s.done() for s in supervisors))
         self.assertEqual(len({id(s) for s in supervisors}), 5)
         await h.manager.stop_all()
         await asyncio.sleep(0.05)
@@ -48,19 +52,16 @@ class ConcurrentStartsTests(unittest.IsolatedAsyncioTestCase):
         """S8-T2: two starts created before either runs — one wins."""
         h = make_manager()
         await h.manager.add_account("alpha")
-        tasks = [asyncio.create_task(h.manager.start("alpha"))
-                 for _ in range(2)]
-        done, pending = await asyncio.wait(
-            tasks, return_when=asyncio.ALL_COMPLETED, timeout=5)
-        outcomes = [t.exception() if t.exception() else t.result()["status"]
-                    for t in done]
+        tasks = [asyncio.create_task(h.manager.start("alpha")) for _ in range(2)]
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED, timeout=5)
+        outcomes = [t.exception() if t.exception() else t.result()["status"] for t in done]
         statuses = [o for o in outcomes if isinstance(o, str)]
         errors = [o for o in outcomes if not isinstance(o, str)]
-        self.assertEqual(len(statuses), 1)              # exactly one winner
+        self.assertEqual(len(statuses), 1)  # exactly one winner
         self.assertEqual(statuses[0], "running")
-        self.assertEqual(len(errors), 1)                # loser refused
+        self.assertEqual(len(errors), 1)  # loser refused
         self.assertIn("already", str(errors[0]))
-        self.assertEqual(len(h.factory.clients), 1)     # ONE client built
+        self.assertEqual(len(h.factory.clients), 1)  # ONE client built
         await h.manager.stop("alpha")
 
 
@@ -82,7 +83,7 @@ class ReconnectIsolationTests(unittest.IsolatedAsyncioTestCase):
         rt_b = h.manager.get("beta").runtime
         self.assertEqual(rt_a.status, AccountStatus.RUNNING)
         self.assertIs(rt_a.client, h.factory.clients[-1])  # fresh client
-        self.assertIs(rt_b.client, beta_client)             # B's untouched
+        self.assertIs(rt_b.client, beta_client)  # B's untouched
         self.assertEqual(rt_b.status, AccountStatus.RUNNING)
         await h.manager.stop_all()
 
@@ -107,47 +108,48 @@ class DeleteRecreateTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.start("alpha")
         rt_new = h.manager.get("alpha").runtime
 
-        self.assertIsNot(rt_new, rt_old)                    # fresh runtime
-        self.assertNotIn("alpha", h.settings.overrides)     # no settings
+        self.assertIsNot(rt_new, rt_old)  # fresh runtime
+        self.assertNotIn("alpha", h.settings.overrides)  # no settings
         self.assertIsNot(rt_new.supervisor, old_supervisor)
-        self.assertEqual(rt_new.flaps, [])                  # no flap residue
+        self.assertEqual(rt_new.flaps, [])  # no flap residue
         self.assertTrue(rt_new.session_started > 0)
         await h.manager.stop("alpha")
 
-    async def test_remove_aborts_when_account_recreated_mid_cascade(self):
+    async def test_remove_aborts_when_account_recreated_mid_cascade(self) -> None:
         """PHASE-4 (S1-F3): the destructive cascade must not hit the NEW
         same-named account that was added while removal was parked."""
         h = make_manager()
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         await h.manager.stop("alpha")
-        rt = h.manager.get("alpha").runtime
+        h.manager.get("alpha")  # liveness probe: the runtime still resolves
 
         park = asyncio.Event()
         original = h.manager._plugin_manager.detach_account
 
-        async def parked_detach(account):
+        async def parked_detach(account: str) -> None:
             await park.wait()
-            return await original(account)
+            await original(account)
 
+        # park spy: stalls the cascade mid-flight (monkey-patch)
         h.manager._plugin_manager.detach_account = parked_detach
         remove_task = asyncio.create_task(h.manager.remove_account("alpha"))
-        await asyncio.sleep(0.05)              # removal parked in cascade
+        await asyncio.sleep(0.05)  # removal parked in cascade
         # the real repo raises on the duplicate UNTIL the cascade's late
         # row delete — simulate the re-create landing exactly in the
         # post-delete window (an external/ raced writer) so the guard is
         # exercised the way production can actually reach it
         h.repo.records.pop("alpha", None)
-        await h.manager.add_account("alpha")   # same name re-created NOW
+        await h.manager.add_account("alpha")  # same name re-created NOW
         park.set()
         out = await remove_task
 
-        self.assertFalse(out.get("removed", True))          # aborted
-        self.assertTrue(out.get("recreated"))               # flagged why
+        self.assertFalse(out.get("removed", True))  # aborted
+        self.assertTrue(out.get("recreated"))  # flagged why
         # the NEW account survived the old account's cascade
         self.assertIn("alpha", h.manager.names())
         row = await h.repo.get("alpha")
-        self.assertIsNotNone(row)                           # DB row intact
+        self.assertIsNotNone(row)  # DB row intact
 
 
 class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
@@ -158,12 +160,14 @@ class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         rt = h.manager.get("alpha").runtime
-        old_supervisor = rt.supervisor
+        # start() guarantees a live supervisor; the attribute is Optional
+        # only because a runtime can sit between supervisor generations.
+        old_supervisor: Any = rt.supervisor
 
         # simulate the FAILED stand-down: supervisor alive, account failed
         rt.status = AccountStatus.FAILED
-        await h.manager.start("alpha")          # restart bumps generation
-        new_supervisor = rt.supervisor
+        await h.manager.start("alpha")  # restart bumps generation
+        new_supervisor: Any = rt.supervisor
         self.assertIsNot(new_supervisor, old_supervisor)
 
         # the old supervisor wakes late (its 60s backstop or a lost set):
@@ -185,13 +189,14 @@ class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         park = asyncio.Event()
         original_disconnect = rt.client.disconnect
 
-        async def parked_disconnect():
+        async def parked_disconnect() -> None:
             await park.wait()
             await original_disconnect()
 
+        # park spy: stalls the stop mid-disconnect (monkey-patch)
         rt.client.disconnect = parked_disconnect
         stop_task = asyncio.create_task(h.manager.stop("alpha"))
-        await asyncio.sleep(0.05)               # stop parked in disconnect
+        await asyncio.sleep(0.05)  # stop parked in disconnect
         gen_after_stop = rt.generation
         # a NEW start takes ownership while the old stop is parked; it is
         # refused by state (CONNECTING->STOPPED flip happens under the
@@ -222,17 +227,18 @@ class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.start("alpha")
         rt = h.manager.get("alpha").runtime
 
-        async def exploding_loop(name, rt_):
+        async def exploding_loop(name: str, rt: AccountRuntime, *, gen: int | None = None) -> None:
             raise RuntimeError("supervisor exploded on purpose")
 
-        h.manager._reconnect_loop = exploding_loop
+        # failure injection: the supervisor dies on wake (monkey-patch)
+        h.manager._reconnect_loop = exploding_loop  # type: ignore[method-assign]
         rt.client.drop("gateway closed (code=4007)")
         await asyncio.sleep(0.3)
         # _on_disconnect saw the (about-to-die) supervisor and flipped
         # RECONNECTING; the done-callback must settle FAILED so start()
         # stays usable
         self.assertEqual(rt.status, AccountStatus.FAILED)
-        out = await h.manager.start("alpha")     # recovery works
+        out = await h.manager.start("alpha")  # recovery works
         self.assertEqual(out["status"], "running")
         await h.manager.stop("alpha")
 
@@ -248,15 +254,16 @@ class StaggerTests(unittest.IsolatedAsyncioTestCase):
 
         original = h.collector._append
 
-        def stamping(event):
+        def stamping(event: Any) -> None:
             if isinstance(event, AccountConnected):
                 stamps.append(loop.time())
             original(event)
 
-        h.collector._append = stamping
+        # timing spy: stamps each collected event (monkey-patch)
+        h.collector._append = stamping  # type: ignore[method-assign]
         await h.manager.start_all(stagger=0.15)
         await h.collector.wait_for(AccountConnected, 3)
-        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(stamps)]
         self.assertTrue(all(g >= 0.13 for g in gaps), gaps)
         await h.manager.stop_all()
 

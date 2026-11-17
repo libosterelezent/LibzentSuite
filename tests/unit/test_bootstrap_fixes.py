@@ -2,6 +2,7 @@
 cooldowns): await-race guards, fail-closed REMOTE_CONTROL, comment
 parsing, symlink rejection, concurrent access-manager mutations and
 malformed rate-limit specs must not brick the boot."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +14,7 @@ from typing import Any
 from unittest import mock
 
 from core.access_manager import AccessManager
-from core.bootstrap import _seed_config_defaults
+from core.bootstrap import Framework, _seed_config_defaults
 from core.config import ProjectConfig
 from core.cooldowns import CooldownService
 from core.credential_service import CredentialService
@@ -63,20 +64,20 @@ class RaceRepo:
 
 
 class TestStoreDeleteRace(_TmpCase):
-    async def test_delete_during_store_repo_await_leaves_memory_clean(self):
+    async def test_delete_during_store_repo_await_leaves_memory_clean(self) -> None:
         repo = RaceRepo()
         svc = CredentialService(repo, key_path=self.dir / "k.key")
         task = asyncio.create_task(svc.store("alpha", "tok"))
         await asyncio.wait_for(repo.parked.wait(), timeout=2)
-        await svc.delete("alpha")     # racing delete completes mid-store
-        repo.release.set()            # store() resumes after the repo write
+        await svc.delete("alpha")  # racing delete completes mid-store
+        repo.release.set()  # store() resumes after the repo write
         await task
         self.assertNotIn("alpha", svc._memory)
         self.assertNotIn("alpha", svc._runtime_sources)
         self.assertNotIn("alpha", svc._db_accounts)
         self.assertIsNone(await svc.resolve("alpha"))
 
-    async def test_store_without_race_caches_normally(self):
+    async def test_store_without_race_caches_normally(self) -> None:
         repo = RaceRepo()
         repo.release.set()  # no parking: the guard must not break the path
         svc = CredentialService(repo, key_path=self.dir / "k.key")
@@ -87,19 +88,18 @@ class TestStoreDeleteRace(_TmpCase):
 
 # -------------------------------------------------------- parse_env fixes
 class TestParseEnvComments(unittest.TestCase):
-    def test_empty_value_with_trailing_comment(self):
-        self.assertEqual(Credentials.parse_env("DASHBOARD_TOKEN= # disabled\n"),
-                         {"DASHBOARD_TOKEN": ""})
+    def test_empty_value_with_trailing_comment(self) -> None:
+        self.assertEqual(
+            Credentials.parse_env("DASHBOARD_TOKEN= # disabled\n"), {"DASHBOARD_TOKEN": ""}
+        )
 
-    def test_comment_forms(self):
-        env = Credentials.parse_env(
-            "A=1 # c\nB=ab#cd\nC=\"x # y\"\nD=\t# tabbed\nE= #disabled\n")
-        self.assertEqual(env, {"A": "1", "B": "ab#cd", "C": "x # y",
-                               "D": "", "E": ""})
+    def test_comment_forms(self) -> None:
+        env = Credentials.parse_env('A=1 # c\nB=ab#cd\nC="x # y"\nD=\t# tabbed\nE= #disabled\n')
+        self.assertEqual(env, {"A": "1", "B": "ab#cd", "C": "x # y", "D": "", "E": ""})
 
 
 class TestFromFileSymlink(unittest.TestCase):
-    def test_symlinked_env_rejected(self):
+    def test_symlinked_env_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-link-") as tmp:
             real = Path(tmp) / "real.env"
             real.write_text("A=1\n")
@@ -108,7 +108,7 @@ class TestFromFileSymlink(unittest.TestCase):
             with self.assertRaises(CredentialsError):
                 Credentials.from_file(link)
 
-    def test_real_env_still_loads(self):
+    def test_real_env_still_loads(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-link-") as tmp:
             real = Path(tmp) / ".env"
             real.write_text("A=1\n")
@@ -116,7 +116,7 @@ class TestFromFileSymlink(unittest.TestCase):
 
 
 class TestPrimaryBotIdTruncation(unittest.TestCase):
-    def test_malformed_value_truncated_in_error(self):
+    def test_malformed_value_truncated_in_error(self) -> None:
         creds = Credentials({"PRIMARY_BOT_ID": "x" * 100})
         with self.assertRaises(CredentialsError) as ctx:
             _ = creds.primary_bot_id
@@ -149,8 +149,9 @@ class SlowKv:
 
 
 class TestAccessManagerConcurrency(unittest.IsolatedAsyncioTestCase):
-    async def test_concurrent_admin_add_remove_pairs(self):
-        am = AccessManager(SlowKv())
+    async def test_concurrent_admin_add_remove_pairs(self) -> None:
+        kv: Any = SlowKv()  # duck-typed KvRepository double (see its seam)
+        am = AccessManager(kv)
         await am.set_admin_ids(list(range(0, 40, 2)))  # evens preloaded
         tasks = []
         for i in range(20):
@@ -159,54 +160,50 @@ class TestAccessManagerConcurrency(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tasks)
         self.assertEqual(await am.admin_ids(), list(range(1, 40, 2)))
 
-    async def test_concurrent_allowed_add_remove_pairs(self):
-        am = AccessManager(SlowKv())
+    async def test_concurrent_allowed_add_remove_pairs(self) -> None:
+        kv: Any = SlowKv()  # duck-typed KvRepository double (see its seam)
+        am = AccessManager(kv)
         await am.set_allowed_user_ids("alpha", list(range(0, 40, 2)))
         tasks = []
         for i in range(20):
-            tasks.append(asyncio.create_task(
-                am.add_allowed("alpha", i * 2 + 1)))
-            tasks.append(asyncio.create_task(
-                am.remove_allowed("alpha", i * 2)))
+            tasks.append(asyncio.create_task(am.add_allowed("alpha", i * 2 + 1)))
+            tasks.append(asyncio.create_task(am.remove_allowed("alpha", i * 2)))
         await asyncio.gather(*tasks)
-        self.assertEqual(await am.allowed_user_ids("alpha"),
-                         list(range(1, 40, 2)))
+        self.assertEqual(await am.allowed_user_ids("alpha"), list(range(1, 40, 2)))
 
 
 # -------------------------------------------- malformed rate_limits spec
 class TestSeedConfigDefaultsMalformed(unittest.IsolatedAsyncioTestCase):
-    async def test_malformed_interval_skips_without_raising(self):
-        limiter = RateLimitManager(
-            EventBus(), ServiceLogger(LogService(), "rl"), None)
+    async def test_malformed_interval_skips_without_raising(self) -> None:
+        limiter = RateLimitManager(EventBus(), ServiceLogger(LogService(), "rl"), None)
 
         class _Policies:
-            async def list(self):
+            async def list(self) -> list[Any]:
                 return []
 
         class _Db:
             policies = _Policies()
 
-        config = ProjectConfig(policies={
-            "global": {"message": {"interval": "fast"}},
-            "accounts": {"alpha": {"dm": {"interval": [1]}}},
-        })
+        config = ProjectConfig(
+            policies={
+                "global": {"message": {"interval": "fast"}},
+                "accounts": {"alpha": {"dm": {"interval": [1]}}},
+            }
+        )
         await _seed_config_defaults(limiter, config, _Db())  # must not raise
 
-
-    async def test_below_floor_default_is_clamped_not_skipped(self):
-        limiter = RateLimitManager(
-            EventBus(), ServiceLogger(LogService(), "rl"), None)
+    async def test_below_floor_default_is_clamped_not_skipped(self) -> None:
+        limiter = RateLimitManager(EventBus(), ServiceLogger(LogService(), "rl"), None)
         limiter.set_floor(5.0)
 
         class _Policies:
-            async def list(self):
+            async def list(self) -> list[Any]:
                 return []
 
         class _Db:
             policies = _Policies()
 
-        config = ProjectConfig(policies={
-            "global": {"message": {"interval": 2.6}}})
+        config = ProjectConfig(policies={"global": {"message": {"interval": 2.6}}})
         await _seed_config_defaults(limiter, config, _Db())
         stored = [p for p in limiter.policies() if p["action"] == "message"]
         self.assertEqual([p["interval"] for p in stored], [5.0])
@@ -217,7 +214,7 @@ class SlowCooldownRepo:
     """Cooldown repo double whose upsert() PARKS after the repo write."""
 
     def __init__(self) -> None:
-        self.rows: dict[tuple, dict[str, Any]] = {}
+        self.rows: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self.parked = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -227,51 +224,58 @@ class SlowCooldownRepo:
         self.parked.set()
         await self.release.wait()
 
-    async def get(self, account: str, plugin: str, cooldown_key: str,
-                  now: float = None, profile: str = "") -> dict[str, Any] | None:
+    async def get(
+        self,
+        account: str,
+        plugin: str,
+        cooldown_key: str,
+        now: float | None = None,
+        profile: str = "",
+    ) -> dict[str, Any] | None:
         row = self.rows.get((account, plugin, profile, cooldown_key))
         if row is None or (now is not None and row["expires_at"] <= now):
             return None
         return dict(row)
 
-    async def clear(self, account: str, plugin: str,
-                    cooldown_key: str, profile: str = "") -> bool:
+    async def clear(self, account: str, plugin: str, cooldown_key: str, profile: str = "") -> bool:
         return self.rows.pop((account, plugin, profile, cooldown_key), None) is not None
 
 
 class TestCooldownSetClearRace(_TmpCase):
-    async def test_clear_during_set_upsert_await_does_not_resurrect(self):
+    async def test_clear_during_set_upsert_await_does_not_resurrect(self) -> None:
         repo = SlowCooldownRepo()
         svc = CooldownService(repo)
         task = asyncio.create_task(svc.set("alpha", "p", "k", 60))
         await asyncio.wait_for(repo.parked.wait(), timeout=2)
         await svc.clear("alpha", "p", "k")  # racing clear completes mid-set
-        repo.release.set()                  # set() resumes after the upsert
+        repo.release.set()  # set() resumes after the upsert
         await task
         self.assertFalse(await svc.is_active("alpha", "p", "k"))
 
-    async def test_set_without_race_mirrors(self):
+    async def test_set_without_race_mirrors(self) -> None:
         repo = SlowCooldownRepo()
         repo.release.set()
         svc = CooldownService(repo)
         await svc.set("alpha", "p", "k", 60)
         self.assertTrue(await svc.is_active("alpha", "p", "k"))
 
-    async def test_zero_duration_replaces_previous_cooldown(self):
+    async def test_zero_duration_replaces_previous_cooldown(self) -> None:
         from database.db import Database
+
         db = Database(":memory:")
         await db.connect()
         try:
             svc = CooldownService(db.cooldowns)
             await svc.set("alpha", "p", "k", 100)
             self.assertTrue(await svc.is_active("alpha", "p", "k"))
-            await svc.set("alpha", "p", "k", 0)     # shorten to "now"
+            await svc.set("alpha", "p", "k", 0)  # shorten to "now"
             self.assertFalse(await svc.is_active("alpha", "p", "k"))
         finally:
             await db.close()
 
-    async def test_active_for_prefers_extended_db_row(self):
+    async def test_active_for_prefers_extended_db_row(self) -> None:
         from database.db import Database
+
         now = [1000.0]
         db = Database(":memory:")
         await db.connect()
@@ -280,9 +284,15 @@ class TestCooldownSetClearRace(_TmpCase):
             await svc.set("alpha", "p", "k", 10)
             # another process extends the same key in the database
             await db.cooldowns.upsert(
-                account="alpha", plugin="p", cooldown_key="k",
-                started_at=now[0], expires_at=now[0] + 100,
-                source="x", reason="", metadata=None)
+                account="alpha",
+                plugin="p",
+                cooldown_key="k",
+                started_at=now[0],
+                expires_at=now[0] + 100,
+                source="x",
+                reason="",
+                metadata=None,
+            )
             rows = await svc.active_for("alpha")
             self.assertEqual([r["expires_at"] for r in rows], [1100.0])
         finally:
@@ -304,6 +314,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         from pathlib import Path
 
         from core import logging_service as m
+
         self._m = m
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-claims-")
         self.addCleanup(self.tmp.cleanup)
@@ -318,7 +329,11 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
 
     def _restore(self) -> None:
         import logging
-        m = self._m
+
+        # re-imported (not via self._m): the attribute loses the specific
+        # module type, and mypy then rejects the private-name writes below
+        from core import logging_service as m
+
         m._STDERR_USERS = self.users
         m._STDERR_LISTENER = self.listener
         m._STDERR_CONFIGURED = self.configured
@@ -326,31 +341,35 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         lg.handlers[:] = self.handlers
         lg.propagate = self.propagate
 
-    async def _build(self, *, env_file=None, config_dir=None):
+    async def _build(
+        self, *, env_file: Path | None = None, config_dir: Path | None = None
+    ) -> Framework:
         from core import bootstrap
+
         env = str(env_file or self.root / "absent.env")
         cfg = str(config_dir or self.root / "config")
         return await bootstrap.build(
-            env_file=env, config_dir=cfg,
+            env_file=env,
+            config_dir=cfg,
             db_path=str(self.root / "claims.db"),
             plugin_dir="tests/fixtures/plugins",
-            quiet=False)
+            quiet=False,
+        )
 
     async def test_borrowing_build_releases_its_claim(self) -> None:
         try:
             m = self._m
-            m.stop_stderr_pipeline()          # known idle floor
-            fw1 = await self._build()         # CREATOR
+            m.stop_stderr_pipeline()  # known idle floor
+            fw1 = await self._build()  # CREATOR
             self.assertTrue(m.stderr_pipeline_active())
-            fw2 = await self._build()         # BORROWER (own db below)
+            fw2 = await self._build()  # BORROWER (own db below)
             self.assertTrue(m.stderr_pipeline_active())
-            await fw1.shutdown()              # owner gone first
+            await fw1.shutdown()  # owner gone first
             self.assertTrue(
-                m.stderr_pipeline_active(),
-                "the borrowing framework keeps the pipeline alive")
+                m.stderr_pipeline_active(), "the borrowing framework keeps the pipeline alive"
+            )
             await fw2.shutdown()
-            self.assertFalse(m.stderr_pipeline_active(),
-                             "the last claim stops the listener")
+            self.assertFalse(m.stderr_pipeline_active(), "the last claim stops the listener")
         finally:
             self._restore()
 
@@ -370,11 +389,10 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         except Exception:
             pass
         finally:
-            if fw is not None:      # never returned, but stay safe
+            if fw is not None:  # never returned, but stay safe
                 await fw.shutdown()
             self._restore()
-        self.assertEqual(m._STDERR_USERS, 0,
-                         "the failed build released its claim")
+        self.assertEqual(m._STDERR_USERS, 0, "the failed build released its claim")
         self.assertFalse(m.stderr_pipeline_active())
 
 
@@ -389,14 +407,16 @@ class PluginDataTeardownTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    async def _build(self):
+    async def _build(self) -> Framework:
         from core import bootstrap
+
         return await bootstrap.build(
             env_file=str(self.root / "absent.env"),
             config_dir=str(self.root / "config"),
             db_path=str(self.root / "state" / "libzent.db"),
             plugin_dir="tests/fixtures/plugins",
-            quiet=True)
+            quiet=True,
+        )
 
     async def test_shutdown_closes_the_plugin_data_store(self) -> None:
         fw = await self._build()
@@ -412,4 +432,5 @@ class PluginDataTeardownTests(unittest.IsolatedAsyncioTestCase):
             store._conn,
             "shutdown must close the plugin-data store — an open "
             "aiosqlite connection keeps a non-daemon worker thread "
-            "alive and hangs interpreter exit")
+            "alive and hangs interpreter exit",
+        )

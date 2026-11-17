@@ -7,6 +7,7 @@ overflow is dropped and counted; stop drains within a bounded timeout.
 
 Standalone: no database, no event bus fixtures beyond minimal fakes.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +16,7 @@ import io
 import sqlite3
 import time
 import unittest
+from typing import Any
 
 from core.audit import AuditRecorder
 from core.event_bus import EventBus
@@ -27,10 +29,10 @@ class AsyncLogRepo:
     """Counting LogRepository: records every awaited add, optional delay."""
 
     def __init__(self, delay: float = 0.0) -> None:
-        self.added: list = []
+        self.added: list[dict[str, Any]] = []
         self.delay = delay
 
-    async def add(self, entry: dict) -> None:
+    async def add(self, entry: dict[str, Any]) -> None:
         if self.delay:
             await asyncio.sleep(self.delay)
         self.added.append(dict(entry))
@@ -42,7 +44,7 @@ class FailingLogRepo:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def add(self, entry: dict) -> None:
+    async def add(self, entry: dict[str, Any]) -> None:
         self.calls += 1
         raise sqlite3.OperationalError("disk full")
 
@@ -51,23 +53,23 @@ class AsyncAuditRepo:
     """Counting AuditRepository (async add/recent)."""
 
     def __init__(self) -> None:
-        self.added: list = []
+        self.added: list[dict[str, Any]] = []
 
-    async def add(self, entry: dict) -> None:
+    async def add(self, entry: dict[str, Any]) -> None:
         self.added.append(dict(entry))
 
-    async def recent(self, limit=100, account=None):
+    async def recent(self, limit: int = 100, account: str | None = None) -> list[dict[str, Any]]:
         return []
 
 
 class FakeLogger:
-    def info(self, source, message, **ctx):
+    def info(self, source: str, message: str, **ctx: Any) -> None:
         pass
 
-    def warning(self, source, message, **ctx):
+    def warning(self, source: str, message: str, **ctx: Any) -> None:
         pass
 
-    def error(self, source, message, **ctx):
+    def error(self, source: str, message: str, **ctx: Any) -> None:
         pass
 
 
@@ -75,12 +77,16 @@ class FakeLimiter:
     def __init__(self) -> None:
         self.gate: asyncio.Event | None = None
 
-    async def acquire(self, action, account, plugin, priority):
+    async def acquire(
+        self, action: str, account: str | None, plugin: str | None, priority: Any
+    ) -> FakeGrant:
         if self.gate is not None and not self.gate.is_set():
             await self.gate.wait()
         return FakeGrant()
 
-    def report_server_limit(self, account, action, retry_after, global_=False):
+    def report_server_limit(
+        self, account: str, action: str, retry_after: float, global_: bool = False
+    ) -> None:
         pass
 
 
@@ -91,9 +97,9 @@ class FakeGrant:
 
 class FakeSender:
     def __init__(self) -> None:
-        self.calls: list = []
+        self.calls: list[Any] = []
 
-    async def __call__(self, task):
+    async def __call__(self, task: Any) -> None:
         self.calls.append(task)
 
 
@@ -101,9 +107,9 @@ class FakeAudit:
     """Sync audit sink — AuditRecorder.record() stays non-async by contract."""
 
     def __init__(self) -> None:
-        self.calls: list = []
+        self.calls: list[dict[str, Any]] = []
 
-    def record(self, **kwargs):
+    def record(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         return dict(kwargs)
 
@@ -112,14 +118,14 @@ class AsyncHistoryRepo:
     """Async TaskHistoryRepository fake (add/recent awaited)."""
 
     def __init__(self) -> None:
-        self.add_calls: list = []
+        self.add_calls: list[dict[str, Any]] = []
 
-    async def add(self, entry):
+    async def add(self, entry: dict[str, Any]) -> Any:
         self.add_calls.append(dict(entry))
         return entry["id"]
 
-    async def recent(self, limit=50, account=None):
-        rows = self.add_calls
+    async def recent(self, limit: int = 50, account: str | None = None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = list(self.add_calls)
         if account:
             rows = [r for r in rows if r.get("account") == account]
         return rows[-limit:] if limit > 0 else []
@@ -148,7 +154,7 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         repo = AsyncLogRepo(delay=0.05)  # each add costs 50ms on the worker
         await service.start_persistence(repo, batch=10, interval=0.01)
         await asyncio.sleep(0.05)  # worker is inside a slow add right now
-        for i in range(100):       # warmup: logger cache, ring pages
+        for _i in range(100):  # warmup: logger cache, ring pages
             service.record("INFO", "lat", "warmup")
         gc.collect()
         gc.disable()  # a GC pause is environment noise, not record() cost
@@ -184,10 +190,10 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
             service.record("INFO", "of", f"m{i}")
         stats = service.stats()
         self.assertEqual(stats["dropped"], 500)
-        self.assertEqual(stats["entries"], 10_500)        # counters unaffected
-        self.assertEqual(len(service.tail(1)), 1)          # ring alive
-        await service.stop_persistence(timeout=30.0)       # bounded inline drain
-        self.assertEqual(len(repo.added), 10_000)          # cap, not 10_500
+        self.assertEqual(stats["entries"], 10_500)  # counters unaffected
+        self.assertEqual(len(service.tail(1)), 1)  # ring alive
+        await service.stop_persistence(timeout=30.0)  # bounded inline drain
+        self.assertEqual(len(repo.added), 10_000)  # cap, not 10_500
 
     async def test_failing_repo_counts_never_raises_into_record(self) -> None:
         """(d) A repo that always fails: every drain attempt is counted in
@@ -199,9 +205,9 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
             for i in range(5):
                 service.record("ERROR", "db", f"x{i}")  # must not raise
             await service.stop_persistence()
-        self.assertEqual(repo.calls, 5)                        # one attempt each
-        self.assertEqual(service.stats()["db_failures"], 5)   # observable
-        self.assertEqual(len(service.tail(10)), 5)             # ring intact
+        self.assertEqual(repo.calls, 5)  # one attempt each
+        self.assertEqual(service.stats()["db_failures"], 5)  # observable
+        self.assertEqual(len(service.tail(10)), 5)  # ring intact
         # failure-burst policy: at most ONE raw stderr one-liner
         self.assertEqual(stderr.getvalue().count("log persistence failing"), 1)
 
@@ -252,7 +258,7 @@ class TestAuditRecorderQueuedPersistence(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def add(self, entry):
+            async def add(self, entry: dict[str, Any]) -> None:
                 self.calls += 1
                 raise RuntimeError("audit db down")
 
@@ -281,22 +287,26 @@ class FlakyCooldownRepo:
     .cooldowns exposes)."""
 
     def __init__(self) -> None:
-        self.rows: dict = {}
+        # (account, plugin, profile, cooldown_key) -> row dict — the exact
+        # key shape database.repositories.cooldowns persists under.
+        self.rows: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self.fail_clear = False
         self.clear_expired_for_calls = 0
         self.clear_calls = 0
 
-    async def upsert(self, **kw):
+    async def upsert(self, **kw: Any) -> None:
         key = (kw["account"], kw["plugin"], kw.get("profile", ""), kw["cooldown_key"])
         self.rows[key] = dict(kw)
 
-    async def clear(self, a, p, k, profile=""):
+    async def clear(self, a: str, p: str, k: str, profile: str = "") -> bool:
         self.clear_calls += 1
         if self.fail_clear:
             raise RuntimeError("db locked")
         return self.rows.pop((a, p, profile, k), None) is not None
 
-    async def clear_expired_for(self, a, p, k, now, profile=""):
+    async def clear_expired_for(
+        self, a: str, p: str, k: str, now: float, profile: str = ""
+    ) -> bool:
         self.clear_expired_for_calls += 1
         if self.fail_clear:
             raise RuntimeError("db locked")
@@ -306,20 +316,24 @@ class FlakyCooldownRepo:
             return True
         return False
 
-    async def clear_expired(self, now=None):
+    async def clear_expired(self, now: float | None = None) -> int:
         return 0
 
-    async def active_all(self, now=None):
+    async def active_all(self, now: float | None = None) -> list[dict[str, Any]]:
         return list(self.rows.values())
 
-    async def active_for(self, account, plugin=None, now=None):
+    async def active_for(
+        self, account: str, plugin: str | None = None, now: float | None = None
+    ) -> list[dict[str, Any]]:
         return [r for r in self.rows.values() if r["account"] == account]
 
-    async def get(self, a, p, k, now=None, profile=""):
+    async def get(
+        self, a: str, p: str, k: str, now: float | None = None, profile: str = ""
+    ) -> dict[str, Any] | None:
         row = self.rows.get((a, p, profile, k))
         return row if row and row["expires_at"] > now else None
 
-    async def delete_account(self, account):
+    async def delete_account(self, account: str) -> int:
         return 0
 
 
@@ -381,7 +395,7 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         # ...but another process EXTENDED the persisted row meanwhile
         repo.rows[("beta", "p", "", "k")]["expires_at"] = clock["now"] + 500
 
-        row = await svc.get("beta", "p", "k")
+        row: Any = await svc.get("beta", "p", "k")
         self.assertIsNotNone(row)  # the extension wins over stale memory
         self.assertEqual(row["expires_at"], clock["now"] + 500)
         self.assertIn(("beta", "p", "", "k"), repo.rows)  # still persisted
@@ -394,10 +408,10 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         from core.cooldowns import CooldownService
 
         svc = CooldownService(FlakyCooldownRepo(), time_fn=lambda: 0.0)
-        row = await svc.set("a", "p", "k", "60")  # printf %f used to TypeError
+        numeric_string: Any = "60"  # printf %f used to TypeError
+        row = await svc.set("a", "p", "k", numeric_string)
         self.assertAlmostEqual(row["expires_at"], 60.0, places=6)
-        self.assertAlmostEqual(await svc.remaining("a", "p", "k"), 60.0,
-                               places=6)
+        self.assertAlmostEqual(await svc.remaining("a", "p", "k"), 60.0, places=6)
 
 
 # ------------------------------------------------------------- scheduler
@@ -409,7 +423,11 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         audit = FakeAudit()
         repo = AsyncHistoryRepo()
         scheduler = TaskScheduler(
-            EventBus(), FakeLogger(), FakeLimiter(), FakeSender(), audit,
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            FakeSender(),
+            audit,
             history_repo=repo,
         )
         scheduler.start()
@@ -434,9 +452,9 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         immediately, and the history row + TaskCancelled event follow via
         the scheduled async tail — never a synchronous repo call."""
         bus = EventBus()
-        seen: list = []
+        seen: list[str] = []
 
-        def _on(event) -> None:
+        def _on(event: Any) -> None:
             seen.append(type(event).__name__)
 
         from core.event_bus import Event
@@ -452,18 +470,18 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         try:
             limiter.gate = asyncio.Event()  # park the task in acquire
             task = scheduler.submit("alpha", "p", "message", channel_id=1)
-            await asyncio.sleep(0.02)      # picked up by its lane
+            await asyncio.sleep(0.02)  # picked up by its lane
             self.assertTrue(scheduler.cancel(task.id))
             self.assertEqual(task.status, "cancelled")  # immediate (sync)
-            self.assertEqual(repo.add_calls, [])        # nothing sync-written
+            self.assertEqual(repo.add_calls, [])  # nothing sync-written
             for _ in range(200):
                 if repo.add_calls:
                     break
                 await asyncio.sleep(0.005)
-            self.assertEqual(len(repo.add_calls), 1)     # scheduled tail ran
+            self.assertEqual(len(repo.add_calls), 1)  # scheduled tail ran
             self.assertEqual(repo.add_calls[0]["status"], "cancelled")
             self.assertIn("TaskCancelled", seen)
-            self.assertEqual(audit.calls, [])            # never sent -> no row
+            self.assertEqual(audit.calls, [])  # never sent -> no row
             limiter.gate.set()
         finally:
             await scheduler.stop(drain=False)
@@ -473,11 +491,12 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         finish tail (history write + audit) is still in flight must join the
         tail barrier BEFORE cancelling lanes — the row and the audit record
         may not be silently dropped by the timeout path."""
+
         class SlowRepo:
             def __init__(self) -> None:
-                self.adds: list = []
+                self.adds: list[dict[str, Any]] = []
 
-            async def add(self, entry):
+            async def add(self, entry: dict[str, Any]) -> Any:
                 await asyncio.sleep(0.05)
                 self.adds.append(dict(entry))
                 return entry["id"]
@@ -485,7 +504,11 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         audit = FakeAudit()
         repo = SlowRepo()
         scheduler = TaskScheduler(
-            EventBus(), FakeLogger(), FakeLimiter(), FakeSender(), audit,
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            FakeSender(),
+            audit,
             history_repo=repo,
         )
         scheduler.start()

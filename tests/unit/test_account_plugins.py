@@ -6,6 +6,7 @@ sorted reads, bulk replacement, boot bulk-read, and restart persistence
 must not reapply). This layer does no account/plugin existence
 validation, so tests never need to create account rows.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -68,16 +69,14 @@ class AssignmentTests(AccountPluginsTestBase):
     async def test_multiple_plugins_one_account(self) -> None:
         for plugin in ("roll", "snipe", "claim"):
             await self.repo.assign_plugin("alpha", plugin)
-        self.assertEqual(
-            await self.repo.plugins_of("alpha"), ["claim", "roll", "snipe"])
+        self.assertEqual(await self.repo.plugins_of("alpha"), ["claim", "roll", "snipe"])
 
     async def test_multiple_accounts_independent_sets(self) -> None:
         await self.repo.assign_plugin("alpha", "roll")
         await self.repo.assign_plugin("beta", "snipe")
         await self.repo.assign_plugin("beta", "claim")
         self.assertEqual(await self.repo.plugins_of("alpha"), ["roll"])
-        self.assertEqual(
-            await self.repo.plugins_of("beta"), ["claim", "snipe"])
+        self.assertEqual(await self.repo.plugins_of("beta"), ["claim", "snipe"])
 
 
 # ----------------------------------------------------------- replacement
@@ -146,8 +145,7 @@ class RestartTests(AccountPluginsTestBase):
         self.assertEqual(applied, 0)
 
         self.assertEqual(await self.repo.plugins_of("alpha"), ["roll"])
-        self.assertEqual(
-            await self.repo.plugins_of("beta"), ["claim", "snipe"])
+        self.assertEqual(await self.repo.plugins_of("beta"), ["claim", "snipe"])
         self.assertEqual(
             await self.repo.all_assignments(),
             {"alpha": ["roll"], "beta": ["claim", "snipe"]},

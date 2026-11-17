@@ -14,11 +14,13 @@ Covers, one class per audited finding:
       task under sustained NORMAL load, while a young LOW still waits
       strictly behind every NORMAL.
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
 import unittest
+from typing import Any
 from unittest import mock
 
 from core.event_bus import Event, EventBus, MessageReceived, TaskCancelled, TaskCompleted
@@ -46,22 +48,27 @@ class _HugeCooldownLimiter:
         self.entered = asyncio.Event()
         self.acquire_calls = 0
 
-    async def acquire(self, action, account, plugin, priority):
+    async def acquire(self, action: str, account: str, plugin: str, priority: Any) -> FakeGrant:
         self.acquire_calls += 1
         self.entered.set()
         if self.acquire_calls == 1:
             await asyncio.sleep(60.0)  # MAX_INTERVAL-scale cooldown
         return FakeGrant(action=action, account=account, plugin=plugin)
 
-    def report_server_limit(self, *args, **kwargs):  # pragma: no cover
+    def report_server_limit(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
         pass
 
 
 class TestCancelWhileInAcquire(unittest.IsolatedAsyncioTestCase):
-    def _scheduler(self, limiter, sender) -> TaskScheduler:
+    def _scheduler(self, limiter: Any, sender: Any) -> TaskScheduler:
         scheduler = TaskScheduler(
-            EventBus(), FakeLogger(), limiter, sender, FakeAudit(),
-            default_timeout=5.0, history_repo=FakeHistoryRepo(),
+            EventBus(),
+            FakeLogger(),
+            limiter,
+            sender,
+            FakeAudit(),
+            default_timeout=5.0,
+            history_repo=FakeHistoryRepo(),
         )
         scheduler.start()
         self.addAsyncCleanup(scheduler.stop, drain=False, timeout=2.0)
@@ -69,9 +76,9 @@ class TestCancelWhileInAcquire(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_preempts_acquire_and_frees_the_lane(self) -> None:
         limiter = _HugeCooldownLimiter()
-        sent: list = []
+        sent: list[int] = []
 
-        async def sender(task: Task):
+        async def sender(task: Task) -> None:
             sent.append(task.id)
             return None
 
@@ -104,12 +111,16 @@ class TestCancelWhileInAcquire(unittest.IsolatedAsyncioTestCase):
 
         limiter = _HugeCooldownLimiter()
 
-        async def sender(task: Task):
+        async def sender(task: Task) -> None:
             return None
 
         scheduler = self._scheduler(limiter, sender)
         recorder = EventRecorder(scheduler._bus)
-        self.addAsyncCleanup(recorder.close)
+
+        async def close_recorder() -> None:
+            recorder.close()
+
+        self.addAsyncCleanup(close_recorder)
         task = scheduler.submit("alpha", "p", "message", channel_id=1)
         self.assertTrue(await asyncio.wait_for(limiter.entered.wait(), 2.0))
 
@@ -127,15 +138,20 @@ class TestCancelWhileInAcquire(unittest.IsolatedAsyncioTestCase):
 # ------------------------------------------------- (b) budget-expiry terminal
 class TestBudgetExpiryTerminal(unittest.IsolatedAsyncioTestCase):
     async def test_budget_expiry_is_terminal_and_sender_runs_once(self) -> None:
-        calls: list = []
+        calls: list[int] = []
 
-        async def slow_sender(task: Task):
+        async def slow_sender(task: Task) -> None:
             calls.append(task.id)
             await asyncio.sleep(0.5)  # blows the 0.05s attempt budget
 
         scheduler = TaskScheduler(
-            EventBus(), FakeLogger(), FakeLimiter(), slow_sender, FakeAudit(),
-            default_timeout=0.05, history_repo=FakeHistoryRepo(),
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            slow_sender,
+            FakeAudit(),
+            default_timeout=0.05,
+            history_repo=FakeHistoryRepo(),
         )
         scheduler.start()
         self.addAsyncCleanup(scheduler.stop, drain=False, timeout=2.0)
@@ -147,14 +163,14 @@ class TestBudgetExpiryTerminal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.status, "timed_out")  # terminal timeout...
         self.assertEqual(len(calls), 1)  # ...sender invoked EXACTLY ONCE
         self.assertEqual(task.attempts, 0)  # no retry consumed
+        assert task.error is not None
         self.assertIn("outcome unknown", task.error)  # documented rationale
         self.assertIsNone(task.wire_sent)  # unknown -> audited (safe side)
 
 
 # ------------------------------------------- (c) control-plane never dropped
 def _msg(i: int) -> MessageReceived:
-    return MessageReceived(account="a", message_id=i, channel_id=1,
-                           author_id=1, content=f"m{i}")
+    return MessageReceived(account="a", message_id=i, channel_id=1, author_id=1, content=f"m{i}")
 
 
 class TestControlPlaneNeverDropped(unittest.IsolatedAsyncioTestCase):
@@ -162,7 +178,7 @@ class TestControlPlaneNeverDropped(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         bus.MAX_QUEUE = 8  # tiny main bound for the test
         gate = asyncio.Event()
-        acks: list = []
+        acks: list[int] = []
 
         async def slow(event: Event) -> None:  # parks the dispatcher
             await gate.wait()
@@ -172,7 +188,7 @@ class TestControlPlaneNeverDropped(unittest.IsolatedAsyncioTestCase):
 
         bus.publish_nowait(_msg(0))  # dispatcher parks inside slow_handler
         await asyncio.sleep(0.02)
-        ack_ids = []
+        ack_ids: list[int] = []
         for i in range(1, 40):
             bus.publish_nowait(_msg(i))  # main queue overflows (drop-newest)
             if i % 2 == 0:
@@ -192,7 +208,7 @@ class TestControlPlaneNeverDropped(unittest.IsolatedAsyncioTestCase):
     async def test_control_queue_priority_over_main(self) -> None:
         """Ack events drain ahead of older main-queue telemetry."""
         bus = EventBus()
-        order: list = []
+        order: list[str] = []
         gate = asyncio.Event()
 
         async def slow(event: Event) -> None:
@@ -220,18 +236,19 @@ class TestPy310IsolationPath(unittest.IsolatedAsyncioTestCase):
     answer 'unattributable' (cancellation_attributable -> False,
     outer_cancel_pending -> True), which is exactly what 3.10 produces."""
 
-    def _patch_310(self):
+    def _patch_310(self) -> tuple[Any, Any]:
         import core.event_bus as eb
+
         return (
-            mock.patch.object(eb, "cancellation_attributable",
-                              lambda task=None: False),
-            mock.patch.object(eb, "outer_cancel_pending",
-                              lambda task=None, *, unknown=False: unknown or True),
+            mock.patch.object(eb, "cancellation_attributable", lambda task=None: False),
+            mock.patch.object(
+                eb, "outer_cancel_pending", lambda task=None, *, unknown=False: unknown or True
+            ),
         )
 
     async def test_internal_handler_cancel_does_not_wedge(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[int] = []
 
         def poison(event: Event) -> None:
             raise asyncio.CancelledError()  # internal, not a task cancel
@@ -257,11 +274,13 @@ class TestPy310IsolationPath(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         bus.SLICE_EVENTS = 1  # yield after every event: a deterministic
         # landing point for the cancel (outside publish's isolation)
-        seen: list = []
+        seen: list[int] = []
 
         def cancel_dispatcher(event: Event) -> None:
-            if bus._dispatcher is not None and event.message_id == 0:
-                bus._dispatcher.cancel()
+            dispatcher = bus._dispatcher
+            # the handler is Event-typed; only MessageReceived carries the id
+            if dispatcher is not None and getattr(event, "message_id", None) == 0:
+                dispatcher.cancel()
 
         bus.subscribe(MessageReceived, cancel_dispatcher)
         bus.subscribe(MessageReceived, lambda e: seen.append(e.message_id))
@@ -283,27 +302,32 @@ class TestPy310IsolationPath(unittest.IsolatedAsyncioTestCase):
 class TestLowAging(unittest.IsolatedAsyncioTestCase):
     def _scheduler(self) -> TaskScheduler:
         scheduler = TaskScheduler(
-            EventBus(), FakeLogger(), FakeLimiter(), self._sender, FakeAudit(),
-            default_timeout=5.0, history_repo=FakeHistoryRepo(),
+            EventBus(),
+            FakeLogger(),
+            FakeLimiter(),
+            self._sender,
+            FakeAudit(),
+            default_timeout=5.0,
+            history_repo=FakeHistoryRepo(),
         )
         scheduler.start()
         self.addAsyncCleanup(scheduler.stop, drain=False, timeout=5.0)
         return scheduler
 
-    async def _sender(self, task: Task):
+    async def _sender(self, task: Task) -> None:
         await asyncio.sleep(0)  # minimal send
         return None
 
     async def test_aged_low_runs_within_bounded_pops(self) -> None:
         scheduler = self._scheduler()
         gate = scheduler._limiter.block_acquires()
-        low = scheduler.submit("alpha", "p", "message", channel_id=1,
-                               priority=Priority.LOW)
+        low = scheduler.submit("alpha", "p", "message", channel_id=1, priority=Priority.LOW)
         # backdate past the starvation threshold (monotonic age axis)
         low.submitted_mono = time.monotonic() - (LOW_STARVATION_S + 5.0)
         normals = [
-            scheduler.submit("alpha", "p", "reaction", channel_id=1,
-                             message_id=1, priority=Priority.NORMAL)
+            scheduler.submit(
+                "alpha", "p", "reaction", channel_id=1, message_id=1, priority=Priority.NORMAL
+            )
             for _ in range(50)
         ]
         await asyncio.sleep(0.05)  # first NORMAL parked in acquire
@@ -328,11 +352,11 @@ class TestLowAging(unittest.IsolatedAsyncioTestCase):
         NORMAL — the aging path must not fire early."""
         scheduler = self._scheduler()
         gate = scheduler._limiter.block_acquires()
-        low = scheduler.submit("alpha", "p", "message", channel_id=1,
-                               priority=Priority.LOW)
+        low = scheduler.submit("alpha", "p", "message", channel_id=1, priority=Priority.LOW)
         normals = [
-            scheduler.submit("alpha", "p", "reaction", channel_id=1,
-                             message_id=1, priority=Priority.NORMAL)
+            scheduler.submit(
+                "alpha", "p", "reaction", channel_id=1, message_id=1, priority=Priority.NORMAL
+            )
             for _ in range(10)
         ]
         await asyncio.sleep(0.05)
@@ -349,14 +373,13 @@ class TestLowAging(unittest.IsolatedAsyncioTestCase):
         cancelled stale head is pruned and a later aged LOW still ages."""
         scheduler = self._scheduler()
         gate = scheduler._limiter.block_acquires()
-        stale = scheduler.submit("alpha", "p", "message", channel_id=1,
-                                 priority=Priority.LOW)
-        low = scheduler.submit("alpha", "p", "message", channel_id=2,
-                               priority=Priority.LOW)
+        stale = scheduler.submit("alpha", "p", "message", channel_id=1, priority=Priority.LOW)
+        low = scheduler.submit("alpha", "p", "message", channel_id=2, priority=Priority.LOW)
         low.submitted_mono = time.monotonic() - (LOW_STARVATION_S + 5.0)
         normals = [
-            scheduler.submit("alpha", "p", "reaction", channel_id=1,
-                             message_id=1, priority=Priority.NORMAL)
+            scheduler.submit(
+                "alpha", "p", "reaction", channel_id=1, message_id=1, priority=Priority.NORMAL
+            )
             for _ in range(12)
         ]
         self.assertTrue(scheduler.cancel(stale.id))

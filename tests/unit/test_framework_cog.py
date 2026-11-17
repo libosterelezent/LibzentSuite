@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace as NS
+from typing import Any
 
 from discord.ext import commands
 
@@ -26,26 +27,28 @@ class FrameworkVerbsCogTests(unittest.IsolatedAsyncioTestCase):
         await bot.add_cog(FrameworkVerbsCog())
         sent: list[str] = []
 
-        async def _send(text):
+        async def _send(text: str) -> None:
             sent.append(text)
 
-        ctx = NS(
+        ctx: Any = NS(
             bot=bot,
             prefix="!",
             command=bot.get_command("say"),
             message=NS(attachments=[]),
             send=_send,
         )
-        await bot.get_command("say")(ctx, text="hello world")
+        say = bot.get_command("say")
+        assert say is not None
+        await say(ctx, text="hello world")
         self.assertEqual(sent, ["hello world"])
 
     async def test_estop_hits_the_api(self) -> None:
         from core.plugin_manager import commands as commands_mod
 
-        calls: list[tuple] = []
+        calls: list[str] = []
         original = commands_mod.COMMAND_HUB.api_provider
 
-        async def fake_estop_all(surface="api"):
+        async def fake_estop_all(surface: str = "api") -> dict[str, bool]:
             calls.append(surface)
             return {"stopped": True}
 
@@ -56,17 +59,19 @@ class FrameworkVerbsCogTests(unittest.IsolatedAsyncioTestCase):
             await bot.add_cog(FrameworkVerbsCog())
             sent: list[str] = []
 
-            async def _send(text):
+            async def _send(text: str) -> None:
                 sent.append(text)
 
-            ctx = NS(
+            ctx: Any = NS(
                 bot=bot,
                 prefix="!",
                 command=bot.get_command("estop"),
                 message=NS(attachments=[]),
                 send=_send,
             )
-            await bot.get_command("estop")(ctx)
+            estop = bot.get_command("estop")
+            assert estop is not None
+            await estop(ctx)
         finally:
             commands_mod.COMMAND_HUB.api_provider = original
         self.assertEqual(calls, ["chat"])
@@ -85,11 +90,11 @@ class FrameworkVerbsCogTests(unittest.IsolatedAsyncioTestCase):
         called: list[str] = []
         original = commands_mod.COMMAND_HUB.api_provider
 
-        async def _stats():
+        async def _stats() -> dict[str, float]:
             called.append("ratelimit_stats")
             return {"floor": 1.5}
 
-        async def _manifests():
+        async def _manifests() -> list[dict[str, str]]:
             called.append("plugins_manifests")
             return [{"name": "ping"}]
 
@@ -100,18 +105,20 @@ class FrameworkVerbsCogTests(unittest.IsolatedAsyncioTestCase):
             await bot.add_cog(FrameworkVerbsCog())
             sent: list[str] = []
 
-            async def _send(text):
+            async def _send(text: str) -> None:
                 sent.append(text)
 
             for verb in ("pg", "ratelimit", "plugins"):
-                ctx = NS(
+                ctx: Any = NS(
                     bot=bot,
                     prefix="!",
                     command=bot.get_command(verb),
                     message=NS(attachments=[]),
                     send=_send,
                 )
-                await bot.get_command(verb)(ctx)
+                verb_command = bot.get_command(verb)
+                assert verb_command is not None
+                await verb_command(ctx)
         finally:
             commands_mod.COMMAND_HUB.api_provider = original
         self.assertEqual(called.count("ratelimit_stats"), 2)  # pg + ratelimit

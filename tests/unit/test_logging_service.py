@@ -19,6 +19,7 @@ process — setUp strips bridges and installs a counting probe, tearDown
 RESTORES the original handlers (strip-only was fragile). configure_stderr is
 NEVER called here (its module-global latch would poison later tests).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,8 +29,10 @@ import logging
 import sqlite3
 import threading
 import unittest
+from typing import Any
 
 from core.logging_service import (
+    LogEntry,
     LogService,
     ServiceLogger,
     StdlibBridge,
@@ -43,13 +46,11 @@ class CountingHandler(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__()
-        self.messages: list = []
+        self.messages: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.messages.append(record.getMessage())
-        except Exception:
-            pass
 
 
 class TestNoBridgeFeedbackLoop(unittest.TestCase):
@@ -60,9 +61,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self._saved_handlers = list(self.root.handlers)
         self._saved_level = self.root.level
         self._saved_propagate = self.root.propagate
-        self.root.handlers[:] = [
-            h for h in self._saved_handlers if not isinstance(h, StdlibBridge)
-        ]
+        self.root.handlers[:] = [h for h in self._saved_handlers if not isinstance(h, StdlibBridge)]
 
     def tearDown(self) -> None:
         self.root.handlers[:] = self._saved_handlers
@@ -96,8 +95,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_raw_stdlib_records_still_flow_in(self) -> None:
         service = LogService()
         attach_stdlib_bridge(service)
-        logging.getLogger("libzent.alpha.exporter").info(
-            "exporter loaded (trigger=%s)", "export")
+        logging.getLogger("libzent.alpha.exporter").info("exporter loaded (trigger=%s)", "export")
         tail = service.tail(10)
         self.assertEqual(len(tail), 1)
         self.assertEqual(tail[0]["source"], "alpha:exporter")
@@ -114,16 +112,17 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         restore the value observed at FIRST attach once the last bridge
         goes away."""
         from core.logging_service import _BRIDGE_PRIOR_PROPAGATE
+
         service = LogService()
         self.root.propagate = True
         attach_stdlib_bridge(service)
-        self.assertFalse(self.root.propagate)      # pinned while attached
-        attach_stdlib_bridge(service)              # second attach keeps prior
-        self.root.propagate = False                # bystander flips it
+        self.assertFalse(self.root.propagate)  # pinned while attached
+        attach_stdlib_bridge(service)  # second attach keeps prior
+        self.root.propagate = False  # bystander flips it
         detach_stdlib_bridge()
-        self.assertTrue(self.root.propagate)       # first-attach value back
+        self.assertTrue(self.root.propagate)  # first-attach value back
         self.assertNotIn("libzent", _BRIDGE_PRIOR_PROPAGATE)
-        detach_stdlib_bridge()                     # idempotent, no restore
+        detach_stdlib_bridge()  # idempotent, no restore
         self.assertTrue(self.root.propagate)
 
     def test_attach_closes_quiet_mode_propagate_hole(self) -> None:
@@ -191,8 +190,8 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         hostile = Hostile()
         self.root.addHandler(hostile)
         service.record("INFO", "a", "one")
-        self.assertEqual(len(service.tail(50)), 1)   # canonical only
-        self.assertEqual(hostile.spawns, 1)          # saw the mirror once
+        self.assertEqual(len(service.tail(50)), 1)  # canonical only
+        self.assertEqual(hostile.spawns, 1)  # saw the mirror once
         self.root.removeHandler(hostile)
 
     def test_critical_maps_to_error(self) -> None:
@@ -209,29 +208,34 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            async def add(self, entry: dict) -> None:
+            async def add(self, entry: dict[str, Any]) -> None:
                 self.calls += 1
                 raise sqlite3.OperationalError("disk full")
 
-        async def scenario() -> tuple:
+        async def scenario() -> tuple[LogService, BoomRepo]:
             service = LogService()
             repo = BoomRepo()
             with contextlib.redirect_stderr(io.StringIO()):  # silence the burst one-liner
                 await service.start_persistence(repo)
-                service.record("ERROR", "db", "x")      # must not raise
-                await service.stop_persistence()        # drain (the one add fails)
+                service.record("ERROR", "db", "x")  # must not raise
+                await service.stop_persistence()  # drain (the one add fails)
             return service, repo
 
         service, repo = asyncio.run(scenario())
-        self.assertEqual(repo.calls, 1)             # exactly one attempt
+        self.assertEqual(repo.calls, 1)  # exactly one attempt
         self.assertEqual(len(service.tail(10)), 1)  # canonical entry kept
         self.assertEqual(service.stats()["db_failures"], 1)  # observable
 
     def test_subscriber_failure_isolated_and_counted(self) -> None:
         service = LogService()
-        seen: list = []
-        service.subscribe(lambda entry: 1 / 0)      # raises
-        service.subscribe(seen.append)              # still runs
+        seen: list[LogEntry] = []
+
+        def exploding(_entry: LogEntry) -> None:
+            """Deliberately raises: subscriber isolation under test."""
+            raise ZeroDivisionError("division by zero")
+
+        service.subscribe(exploding)  # raises
+        service.subscribe(seen.append)  # still runs
         service.record("INFO", "dash", "x")
         self.assertEqual(seen and len(seen), 1)
         self.assertEqual(len(service.tail(5)), 1)
@@ -250,7 +254,8 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         service = LogService()
         bridge = StdlibBridge(service)
         record = logging.LogRecord(
-            "discord.http", logging.ERROR, "f", 1, "rate limited", None, None)
+            "discord.http", logging.ERROR, "f", 1, "rate limited", None, None
+        )
         bridge.emit(record)
         entry = service.tail(1)[0]
         self.assertEqual(entry["source"], "ext:discord.http")
@@ -260,12 +265,16 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         """REGRESSION (audit round 4): record()'s degraded-mode fallback
         itself called str(source) — an object with a broken __str__ as BOTH
         source and message escaped the 'never raises' contract."""
+
         class Hostile:
             def __str__(self) -> str:
                 raise RuntimeError("unprintable")
 
         service = LogService()
-        out = service.record(Hostile(), Hostile(), Hostile())
+        bad_severity: Any = Hostile()  # wrong shape on purpose
+        bad_source: Any = Hostile()  # wrong shape on purpose
+        bad_message: Any = Hostile()  # wrong shape on purpose
+        out = service.record(bad_severity, bad_source, bad_message)
         self.assertEqual(out["severity"], "INFO")
         self.assertEqual(out["source"], "<unloggable source>")
         self.assertEqual(out["message"], "<unloggable message>")
@@ -289,9 +298,9 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_bridge_ingested_record_single_db_row(self) -> None:
         class CountingRepo:
             def __init__(self) -> None:
-                self.rows: list = []
+                self.rows: list[dict[str, Any]] = []
 
-            async def add(self, entry: dict) -> None:
+            async def add(self, entry: dict[str, Any]) -> None:
                 self.rows.append(entry)
 
         async def scenario() -> CountingRepo:
@@ -311,7 +320,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         attach_stdlib_bridge(service_a)
         self.assertGreaterEqual(detach_stdlib_bridge(), 1)
         logging.getLogger("libzent.a").info("post-detach")
-        self.assertEqual(service_a.tail(10), [])    # no ingestion anymore
+        self.assertEqual(service_a.tail(10), [])  # no ingestion anymore
         # a fresh attach binds the NEW service (stale-bridge hazard closed)
         service_b = LogService()
         attach_stdlib_bridge(service_b)
@@ -323,20 +332,21 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_stop_persistence_detaches_sink(self) -> None:
         """Shutdown ordering (spec §29): stop_persistence() BEFORE
         db.close(); records after the stop stay in the ring only."""
+
         class CountingRepo:
             def __init__(self) -> None:
-                self.rows: list = []
+                self.rows: list[dict[str, Any]] = []
 
-            async def add(self, entry: dict) -> None:
+            async def add(self, entry: dict[str, Any]) -> None:
                 self.rows.append(entry)
 
-        async def scenario() -> tuple:
+        async def scenario() -> tuple[LogService, CountingRepo]:
             service = LogService()
             repo = CountingRepo()
             await service.start_persistence(repo)
             service.record("INFO", "a", "before")
-            await service.stop_persistence()       # the off-switch now
-            service.record("INFO", "a", "after")   # no worker -> not persisted
+            await service.stop_persistence()  # the off-switch now
+            service.record("INFO", "a", "after")  # no worker -> not persisted
             return service, repo
 
         service, repo = asyncio.run(scenario())
@@ -354,9 +364,7 @@ class TestRound2Audit(unittest.TestCase):
         self._saved_handlers = list(self.root.handlers)
         self._saved_level = self.root.level
         self._saved_propagate = self.root.propagate
-        self.root.handlers[:] = [
-            h for h in self._saved_handlers if not isinstance(h, StdlibBridge)
-        ]
+        self.root.handlers[:] = [h for h in self._saved_handlers if not isinstance(h, StdlibBridge)]
 
     def tearDown(self) -> None:
         self.root.handlers[:] = self._saved_handlers
@@ -373,7 +381,7 @@ class TestRound2Audit(unittest.TestCase):
         thread = threading.Thread(target=foreign)
         thread.start()
         thread.join()
-        self.assertEqual(len(service.tail(10)), 1)      # ingested
+        self.assertEqual(len(service.tail(10)), 1)  # ingested
 
         def foreign_detach() -> None:
             detach_stdlib_bridge()
@@ -382,21 +390,20 @@ class TestRound2Audit(unittest.TestCase):
         thread.start()
         thread.join()
         logging.getLogger("libzent.foreign").info("after detach")
-        self.assertEqual(len(service.tail(10)), 1)      # not ingested
+        self.assertEqual(len(service.tail(10)), 1)  # not ingested
 
     def test_record_from_threads_ts_monotonic_in_ring(self) -> None:
         """ts is captured under the ring lock: ring order and timestamp
         order agree even under concurrent record() from many threads."""
         service = LogService()
-        received: list = []
+        received: list[LogEntry] = []
         service.subscribe(received.append)
 
         def burst(name: str) -> None:
             for i in range(200):
                 service.record("INFO", name, f"m{i}")
 
-        threads = [threading.Thread(target=burst, args=(f"t{t}",))
-                   for t in range(8)]
+        threads = [threading.Thread(target=burst, args=(f"t{t}",)) for t in range(8)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -413,7 +420,8 @@ class TestRound2Audit(unittest.TestCase):
                 raise RuntimeError("no")
 
         service = LogService()
-        out = service.record("ERROR", "sched", Unprintable())
+        bad_message: Any = Unprintable()  # wrong shape on purpose
+        out = service.record("ERROR", "sched", bad_message)
         self.assertEqual(out["severity"], "INFO")  # degraded path is INFO
         self.assertEqual(out["message"], "<unloggable message>")
         self.assertEqual(out["source"], "sched")
@@ -434,26 +442,26 @@ class TestRound2Audit(unittest.TestCase):
     def test_ring_bound_holds_when_consumer_stalls(self) -> None:
         """A slow CONSUMER (tail reader) cannot grow memory past the ring:
         the oldest entries evict and subscribers are still notified."""
-        calls: list = []
+        calls: list[LogEntry] = []
         service = LogService(capacity=50)
         service.subscribe(calls.append)
         for i in range(300):
             service.record("INFO", "stall", f"m{i}")  # consumer never reads
-        tail = service.tail(1000)                      # late first read
+        tail = service.tail(1000)  # late first read
         self.assertEqual(len(tail), 50)
         self.assertEqual(tail[-1]["message"], "m299")
         self.assertEqual(tail[0]["message"], "m250")
-        self.assertEqual(len(calls), 300)              # live tail never starved
+        self.assertEqual(len(calls), 300)  # live tail never starved
 
     def test_post_stop_records_counted_dropped(self) -> None:
         class CountingRepo:
             def __init__(self) -> None:
-                self.rows: list = []
+                self.rows: list[dict[str, Any]] = []
 
-            async def add(self, entry: dict) -> None:
+            async def add(self, entry: dict[str, Any]) -> None:
                 self.rows.append(entry)
 
-        async def scenario() -> tuple:
+        async def scenario() -> tuple[LogService, CountingRepo]:
             service = LogService()
             repo = CountingRepo()
             await service.start_persistence(repo, interval=0.01)
@@ -465,8 +473,8 @@ class TestRound2Audit(unittest.TestCase):
 
         service, repo = asyncio.run(scenario())
         self.assertEqual(len(repo.rows), 1)
-        self.assertEqual(len(service.tail(10)), 3)         # ring unaffected
-        self.assertEqual(service.stats()["dropped"], 2)    # observable
+        self.assertEqual(len(service.tail(10)), 3)  # ring unaffected
+        self.assertEqual(service.stats()["dropped"], 2)  # observable
         self.assertEqual(service.stats()["entries"], 3)
 
 
@@ -479,10 +487,11 @@ class StderrPipelineClaims(unittest.TestCase):
     framework claim releases — an owner shutting down first must not
     silence a framework built after it."""
 
-    def test_last_release_stops_first_does_not(self):
+    def test_last_release_stops_first_does_not(self) -> None:
         import logging
 
         from core import logging_service as m
+
         # snapshot + restore the process-global state (the pipeline AND
         # the stdlib logger it touches — configure_stderr flips
         # propagate, which the pipeline stop does not restore)
@@ -493,19 +502,20 @@ class StderrPipelineClaims(unittest.TestCase):
         handlers_before = list(lg.handlers)
         propagate_before = lg.propagate
         try:
-            m.stop_stderr_pipeline()          # known idle floor
+            m.stop_stderr_pipeline()  # known idle floor
             created = m.claim_stderr_pipeline()
             self.assertTrue(created, "first claim creates the pipeline")
             self.assertTrue(m.stderr_pipeline_active())
             borrowed = m.claim_stderr_pipeline()
             self.assertFalse(borrowed, "second claim borrows")
-            m.release_stderr_pipeline()       # OWNER (first) shuts down
+            m.release_stderr_pipeline()  # OWNER (first) shuts down
             self.assertTrue(
                 m.stderr_pipeline_active(),
-                "the live borrower keeps the pipeline after the owner exits")
-            m.release_stderr_pipeline()       # last claim releases
+                "the live borrower keeps the pipeline after the owner exits",
+            )
+            m.release_stderr_pipeline()  # last claim releases
             self.assertFalse(m.stderr_pipeline_active())
-            m.release_stderr_pipeline()       # stray release is a no-op
+            m.release_stderr_pipeline()  # stray release is a no-op
             self.assertFalse(m.stderr_pipeline_active())
         finally:
             m._STDERR_USERS = users_before
