@@ -1246,16 +1246,6 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
             "alpha": {"ping": NS(instance=NS(COG=PingCog))},
         }
 
-        async def host_cog(account: str, plugin: str, bot: Any, paced: Any = None) -> Any:
-            cog_class = h.plugins._accounts[account][plugin].instance.COG
-            return await host.attach(bot, account, plugin, cog_class, paced=paced)
-
-        async def unhost_cog(account: str, plugin: str) -> bool:
-            return await host.detach(account, plugin)
-
-        h.plugins.host_cog = host_cog
-        h.plugins.unhost_cog = unhost_cog
-
         added: list[Any] = []
         removed: list[str] = []
 
@@ -1267,8 +1257,9 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
                 removed.append(name)
 
         bot = _FakeBot()
-        rt = h.manager.get("alpha")
-        rt.client = NS(_client=bot)  # type: ignore[attr-defined]
+        # the runtime wrapper (what _attach_plugins reads), not the
+        # public Account model — the bot rides rt.client._client
+        h.manager._accounts["alpha"].client = NS(_client=bot)  # type: ignore[attr-defined]
 
         # the stale cog from the previous assignment set
         class _OldCog:
