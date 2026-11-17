@@ -249,10 +249,11 @@ def configure_stderr(level: int | None = None) -> None:
         level = _default_console_level()
     root = logging.getLogger("libzent")
     # the LOGGER admits broadly (INFO keeps the structured bridge fed —
-    # records stay queryable); the CONSOLE threshold lives on the
-    # terminal stream handler inside the pipeline, where propagation
-    # cannot bypass it
-    root.setLevel(logging.INFO)
+    # records stay queryable; DEBUG when DEBUG is requested, so
+    # LIBZENT_CONSOLE_LEVEL=DEBUG diagnostics survive the logger gate);
+    # the CONSOLE threshold lives on the terminal stream handler inside
+    # the pipeline, where propagation cannot bypass it
+    root.setLevel(min(logging.INFO, level))
     _start_stderr_pipeline(console_level=level)
     handler = _STDERR_QUEUE_HANDLER
     if handler is not None:

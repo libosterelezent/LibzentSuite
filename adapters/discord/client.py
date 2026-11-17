@@ -718,7 +718,15 @@ class RealDiscordClient:
             client = self._client
             if isinstance(client, _commands_mod.Bot):  # always ours, always a Bot
                 try:
-                    await client.process_commands(message)
+                    ctx = await client.get_context(message)
+                    if ctx.command is not None:
+                        # COMMAND TRAFFIC: dispatch through the gated Bot
+                        # path and STOP — another authorized user's plugin
+                        # command must never ALSO become a plugin event
+                        # (the separation this comment promises; PR review
+                        # round 2, 2026-11-18)
+                        await client.invoke(ctx)
+                        return
                 except Exception:
                     self._logger.debug("self-command dispatch failed", exc_info=True)
             if self.on_message is None or message.author.id == self.user_id:

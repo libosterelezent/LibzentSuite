@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import unittest
+from types import SimpleNamespace as NS
 from typing import Any, ClassVar
 
 from interfaces.cli.commands import (
@@ -1762,14 +1763,45 @@ class LiveLogWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("REPL", str(ctx.exception))
 
     async def test_live_window_renders_tail_and_returns_on_any_line(self) -> None:
+        """Observable rendering: the seeded tail AND a live-streamed row
+        appear on the configured stream; the subscription tears down."""
         api = LiveLogWindowTests._LiveApi()
+        out = io.StringIO()
 
         async def feed() -> str:
+            # hold the window open until the subscription is REGISTERED,
+            # push one synthetic row through it, then return
+            while not api.subscribed:
+                await asyncio.sleep(0)
+            push_row = api.subscribed[0]
+            assert callable(push_row)
+            push_row(
+                NS(
+                    as_dict=lambda: {
+                        "ts": 1.0,
+                        "severity": "INFO",
+                        "source": "test",
+                        "message": "live-row",
+                        "account": None,
+                        "plugin": None,
+                        "event": None,
+                    }
+                )
+            )
+            # let the woken reader reschedule under ANY runner (the
+            # isolated-test loop coalesces zero-sleeps differently than
+            # a plain asyncio.run — the row must land before the close)
+            for _ in range(6):
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.02)
             return "q"
 
-        summary = await run_command(api, "log alpha --live", input_feed=feed)
+        summary = await run_command(api, "log alpha --live", input_feed=feed, out=out)
         assert summary is not None
         self.assertIn("live log closed", summary)
+        text = out.getvalue()
+        self.assertIn("live log:", text)  # the header
+        self.assertIn("live-row", text)  # the streamed row RENDERED
         self.assertEqual(api.subscribed, [])  # unsubscribed on exit
 
     async def test_live_flag_parses_in_any_position_and_keeps_args(self) -> None:

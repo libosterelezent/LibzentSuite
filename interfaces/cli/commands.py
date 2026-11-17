@@ -329,43 +329,77 @@ async def _live_log_window(
 
     unsubscribe = svc.subscribe(_on_entry)
     rendered = len(entries)
-    feed_task: asyncio.Future[str] | None = None
+    # ONE input task for the window's whole life (CodeRabbit PR review
+    # round 2, 2026-11-18): re-creating it per iteration abandoned live
+    # consumers on the shared input queue — the first 'q' could vanish
+    # into a stale task and later CLI commands get eaten by zombies
+    feed_task: asyncio.Future[str] = asyncio.ensure_future(input_feed())
     entry_task: asyncio.Future[dict[str, Any]] | None = None
-    stop_task = asyncio.ensure_future(stop_wait) if stop_wait is not None else None
+    # the stop_wait is CALLER-OWNED (the REPL's own shutdown signal):
+    # ensure_future on an existing task returns the same object, and
+    # cancelling it here would make the REPL read done() and SHUT THE
+    # APP DOWN on a mere window close — it is awaited, never cancelled.
+    # Without a shutdown signal, a window-owned never-resolving stand-in
+    # fills the wait set (and IS reaped with the window's tasks).
+    stop_waiting: asyncio.Future[Any]
+    if stop_wait is not None:
+        stop_waiting = stop_wait
+        owns_stop_waiting = False
+    else:
+        stop_waiting = asyncio.ensure_future(_never())
+        owns_stop_waiting = True
     try:
         while True:
-            feed_task = asyncio.ensure_future(input_feed())
             entry_task = asyncio.ensure_future(streamed.get())
-            # the window observes SHUTDOWN too (CodeRabbit PR review
-            # 2026-11-17): a SIGINT during --live must not wait for a
-            # keypress that may never come — the stop signal exits the
-            # window exactly like a keypress would
-            waits = {feed_task, entry_task}
-            if stop_task is not None:
-                waits.add(stop_task)
+            # the window observes SHUTDOWN too: a SIGINT during --live
+            # must not wait for a keypress that may never come — the
+            # stop signal exits the window exactly like a keypress would
+            waits: list[asyncio.Future[Any]] = [feed_task, entry_task, stop_waiting]
             done, _pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
             if entry_task in done:
                 rendered += 1
                 _emit(_log_line(entry_task.result()))
             if feed_task in done:
-                feed_task.result()  # consume the line; any input returns
-                break
-            if stop_task is not None and stop_task in done:
-                break  # shutdown exits the window; the REPL tears down
+                # retrieve the outcome: a FAILED input task (the feed
+                # raised) must never masquerade as a clean close — the
+                # found-in-review blind spot that hid a NameError
+                feed_task.result()
+            if feed_task in done or stop_waiting in done:
+                # a raced row can be IN FLIGHT: consumed from the queue
+                # by the pending get, not yet rescheduled. Give the woken
+                # reader one bounded grace to complete, render it, then
+                # drain whatever queued behind it (PR review round 2:
+                # the observable window must not drop raced rows).
+                if entry_task is not None and entry_task not in done:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait({entry_task}, timeout=0.05)
+                if entry_task is not None and entry_task.done() and not entry_task.cancelled():
+                    rendered += 1
+                    _emit(_log_line(entry_task.result()))
+                while not streamed.empty():
+                    rendered += 1
+                    _emit(_log_line(streamed.get_nowait()))
+                break  # any input returns; shutdown returns
     finally:
-        # cancel AND reap on EVERY exit path — cancellation landing
-        # inside asyncio.wait skips loop-body cleanup, and an un-reaped
-        # cancelled task is exactly the "exception was never retrieved"
-        # wreckage this window must never cause
-        for task in (feed_task, entry_task, stop_task):
+        # cancel AND reap the WINDOW-OWNED tasks on every exit path —
+        # the caller's stop_wait stays untouched
+        owned: list[Any] = [feed_task, entry_task]
+        if owns_stop_waiting:
+            owned.append(stop_waiting)
+        for task in owned:
             if task is not None:
                 task.cancel()
-        for task in (feed_task, entry_task, stop_task):
+        for task in owned:
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
         unsubscribe()
     return f"--- live log closed ({rendered} lines shown; back on the CLI ---"
+
+
+async def _never() -> None:
+    """A future that never resolves — the no-shutdown-signal stand-in."""
+    await asyncio.Event().wait()
 
 
 async def run_command(
