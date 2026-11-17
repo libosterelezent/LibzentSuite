@@ -16,6 +16,21 @@ nothing can ship until that hold is lifted; see
 
 ## [Unreleased]
 
+### Changed
+- Implemented contracts moved from `docs/plans/` into the binding
+  architecture document (rev 4.0): the two-level data model (new §4a),
+  the better.py-self fork adoption contract (new §5a), and the FULL
+  W0 workspace spec — the 18 locked decisions now live in §4's
+  decision record (superseded preset semantics annotated), the W0
+  spec file retired with it. The architecture doc's stale
+  facts corrected in the same pass: the COG command face replaces the
+  retired COMMANDS grammar in §5, presets REFERENCE profiles (never
+  copy), the module map gains the landed API/UI interfaces and the
+  cog host, migrations are v16. The absorbed plan files are RETIRED
+  from `docs/plans/` — which now holds planned and in-progress
+  contracts only (implemented structure in `docs/architecture/`,
+  history in `docs/reference/completed.rst`).
+
 ### Added
 - The plugin COG seam: plugin cogs get `ctx.services` — the
   per-(account, plugin) paced facade, bound by the cog host at attach
@@ -29,8 +44,8 @@ nothing can ship until that hold is lifted; see
   construction), REST + CLI surfaces, the legacy fold (template
   bindings became instances, idempotent), and workspace presets that
   REFERENCE profiles (apply activates in place, never copies) with
-  executions that checkpoint and resume without replaying
-  (`docs/design/data-management-adoption.md` — the full contract).
+  executions that checkpoint and resume without replaying (the
+  contract: `docs/architecture/architecture.rst` §4a).
 - FastAPI core API (`interfaces/api/`) and Flet UI shell
   (`interfaces/ui/`) over the one ControlAPI facade.
 - Repository health stack: security workflow (gitleaks full-history,
