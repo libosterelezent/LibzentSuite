@@ -519,6 +519,14 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(task.status, "timed_out")
         assert task.error is not None
         self.assertIn("timed out", task.error)
+        # the TaskFailed publish is scheduled, not inline with the status
+        # transition — wait for its arrival instead of racing it (the
+        # gate flake that blocked two full runs; bounded wait, no settle)
+        self.assertTrue(
+            await self.wait_until(
+                lambda: any(e.task_id == task.id for e in self.recorder.of(TaskFailed))
+            )
+        )
         failed = self.recorder.of(TaskFailed)
         self.assertEqual([e.task_id for e in failed], [task.id])
 
