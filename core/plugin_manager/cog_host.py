@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from core.plugin_base import PluginServices
+
 LOG = logging.getLogger("libzent.cogs")
 
 __all__ = ["CogServices", "PluginCogHost"]
@@ -58,8 +60,10 @@ class AuditPublisher(Protocol):
 class CogServices:
     """The toolbox injected into every plugin cog instance.
 
-    Kept intentionally tiny: the services facade (paced sends) arrives
-    through ctx; this object carries the event-side utilities."""
+    Carries the event-side utilities AND the paced facade: the host
+    binds the per-(account, plugin) PluginServices at attach time and
+    the client's before_invoke lifts it onto ``ctx.services`` — the
+        documented command seam (roadmap #4)."""
 
     def __init__(
         self,
@@ -75,6 +79,7 @@ class CogServices:
         self._to_rich = to_rich
         self._audit = audit_publisher
         self._inbound_factory = inbound_factory
+        self._paced: PluginServices | None = None
 
     @property
     def account(self) -> str:
@@ -103,6 +108,21 @@ class CogServices:
             return  # unwired stack: the audit simply doesn't fire
         dto = self.to_rich(message)
         self._audit(self._inbound_factory(account=self._account, message=dto))
+
+    @property
+    def paced(self) -> PluginServices | None:
+        """The per-(account, plugin) paced facade, bound at attach
+        time by the host. None until the account manager hands the
+        facade over — consumers treat None as unwired (fail-closed),
+        never as a fallback to some other account's pipeline."""
+        return self._paced
+
+    def bind_paced(self, paced: PluginServices | None) -> None:
+        """Bind (or rebind) the paced facade for this toolbox. Called
+        by the host on attach; detach pops the whole toolbox, so the
+        binding never outlives the (account, plugin) cog it belongs
+        to."""
+        self._paced = paced
 
 
 class PluginCogHost:
@@ -146,12 +166,22 @@ class PluginCogHost:
             )
         return self._services[key]
 
-    async def attach(self, bot: Any, account: str, plugin: str, cog_class: Any) -> Any:
+    async def attach(
+        self,
+        bot: Any,
+        account: str,
+        plugin: str,
+        cog_class: Any,
+        paced: PluginServices | None = None,
+    ) -> Any:
         """Build the cog instance with its toolbox injected and add it
         to the account's Bot (the fork's add_cog is a coroutine). The
         cog class receives ``services`` (the CogServices toolbox) as
-        its sole keyword argument."""
+        its sole keyword argument; ``paced`` is the per-(account,
+        plugin) facade, bound to the toolbox so the client hook can
+        lift it onto ``ctx.services`` (roadmap #4)."""
         services = self.services_for(account, plugin)
+        services.bind_paced(paced)
         cog = cog_class(services=services)
         await bot.add_cog(cog)
         self._cogs[(account, plugin)] = cog
