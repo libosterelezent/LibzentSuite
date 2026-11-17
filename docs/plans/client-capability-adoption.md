@@ -109,6 +109,16 @@ What the facade is STILL worth (the owner's question, answered):
 AGENTS §1.4's "plugins never touch clients" retires with this lock;
 the pacing-floor and pipeline contracts (§1.5) stand unchanged.
 
+**Why the facade does not ride the client's constructor** (owner
+question 2026-11-17): construction ORDER (the bot exists at connect,
+facades at attach — injection would race) and CARDINALITY (the
+client is per-account, the facade per-(account, plugin) — one bot
+hosting N plugins has N facades, so `bot.services` is ambiguous).
+The race-free unified object is the TOOLBOX the cog receives at
+construction: `self.services.client` (raw reach, aliased `self.bot`
+by convention) + `self.services.paced` (the facade's every verb).
+One object, bound at attach, account-scoped, dies with the cog.
+
 ## Tier 2 (behind explicit policy gates) and Tier 3 (excluded)
 
 Carried verbatim from the knowledgebase study: typing staging,
