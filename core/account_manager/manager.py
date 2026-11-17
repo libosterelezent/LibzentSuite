@@ -1976,7 +1976,9 @@ class AccountManager:
                 runtimes = getattr(plugins_mgr, "_accounts", {}).get(name, {})
                 for plugin_name in list(runtimes):
                     try:
-                        await plugins_mgr.host_cog(name, plugin_name, bot)
+                        await plugins_mgr.host_cog(
+                            name, plugin_name, bot, paced=self.services_for(name, plugin_name)
+                        )
                     except Exception as exc:
                         self._logger.debug(
                             "cog hosting failed for %s/%s: %s", name, plugin_name, exc
