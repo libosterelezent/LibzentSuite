@@ -1729,3 +1729,70 @@ class ColumnSeparationTests(unittest.TestCase):
 
         self.assertEqual(_col("ab", 5), "ab   ")
         self.assertEqual(_col("a-very-long-account-name", 8), "a-very-long-account-name ")
+
+
+class LiveLogWindowTests(unittest.IsolatedAsyncioTestCase):
+    """The live-log contract (owner rule 2026-11-17): --live switches the
+    interface to the log window; any input line returns to the CLI; a
+    one-shot invocation without an input feed is a usage error, never a
+    silent fall-back to flooding."""
+
+    class _LiveApi(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.subscribed: list[object] = []
+
+        def logs_service(self) -> Any:
+            outer = self
+
+            class _Svc:
+                def subscribe(self, cb: Any) -> Any:
+                    outer.subscribed.append(cb)
+
+                    def _unsub() -> None:
+                        outer.subscribed.remove(cb)
+
+                    return _unsub
+
+            return _Svc()
+
+    async def test_live_requires_the_repl_feed(self) -> None:
+        with self.assertRaises(UsageError) as ctx:
+            await run_command(LiveLogWindowTests._LiveApi(), "log alpha --live")
+        self.assertIn("REPL", str(ctx.exception))
+
+    async def test_live_window_renders_tail_and_returns_on_any_line(self) -> None:
+        api = LiveLogWindowTests._LiveApi()
+
+        async def feed() -> str:
+            return "q"
+
+        summary = await run_command(api, "log alpha --live", input_feed=feed)
+        assert summary is not None
+        self.assertIn("live log closed", summary)
+        self.assertEqual(api.subscribed, [])  # unsubscribed on exit
+
+    async def test_live_flag_parses_in_any_position_and_keeps_args(self) -> None:
+        api = LiveLogWindowTests._LiveApi()
+
+        async def feed() -> str:
+            return ""
+
+        await run_command(api, "log alpha -f 5", input_feed=feed)
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        # the initial tail kept account + limit; --live/-f stripped
+        self.assertEqual(recorded[0][0:2], (5, "alpha"))
+
+    async def test_global_log_live_routes_to_the_framework_view(self) -> None:
+        api = LiveLogWindowTests._LiveApi()
+
+        async def feed() -> str:
+            return "q"
+
+        summary = await run_command(api, "global-log --live", input_feed=feed)
+        assert summary is not None
+        self.assertIn("live log closed", summary)
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        self.assertTrue(recorded[0][3])  # without_account: the suite's rows

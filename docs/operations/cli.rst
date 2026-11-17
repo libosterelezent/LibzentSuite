@@ -17,8 +17,8 @@ list|add|plugins|plugin-add|plugin-remove|remove|info|credential|enable|
 start|stop|estop`` · ``credentials
 status|import-env`` · ``cooldowns [account]|clear`` · ``plugins
 list|state|enable|disable|settings|setwarnings|floor|lane`` · ``tasks list|cancel|history|cancel-matching`` ·
-``simulation list|run`` · ``log <account> [n] [severity]`` ·
-``global-log [n] [severity]`` · ``audit`` ·
+``simulation list|run`` · ``log <account> [n] [severity] [--live]`` ·
+``global-log [n] [severity] [--live]`` · ``audit`` ·
 ``estop [resume]`` · ``help`` · ``quit``. Bare ``cooldowns [account]``
 lists every account's active persistent cooldowns (soonest first).
 

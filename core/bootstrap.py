@@ -412,6 +412,7 @@ class Framework:
     @staticmethod
     async def _detach_bridge() -> None:
         detach_stdlib_bridge()  # then stop ingesting stdlib
+        detach_stdlib_bridge("discord")  # the fork's tree mirrors with it
 
 
 async def _security_audit(database: Any, credential_service: Any, env_file: str) -> None:
@@ -598,6 +599,11 @@ async def _assemble(
     await logs.start_persistence(database.logs)
     cleanups.append(("log persistence", logs.stop_persistence))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
+    # The fork's own logger tree (discord.*) is captured the same way:
+    # gateway/cache chatter becomes queryable via `global-log` instead of
+    # riding lastResort raw onto the console — the contract that logs
+    # never interrupt the command interface (owner rule 2026-11-17).
+    attach_stdlib_bridge(logs, "discord")
     cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()
     _wire_event_logging(bus, logs)

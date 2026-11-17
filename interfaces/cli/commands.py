@@ -46,13 +46,20 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import math
 import shlex
 import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Coroutine, Sequence
+
+    #: an awaitable that yields ONE input line (the REPL's queue get) —
+    #: the live log window reads from the SAME queue the prompt reads,
+    #: so there is exactly one stdin reader at any moment
+    AwaitableFactory = Callable[[], Coroutine[Any, Any, str]]
 
 __all__ = [
     "HELP",
@@ -170,13 +177,13 @@ HELP: dict[str, tuple[str, str, str]] = {
         "offline scenario runs over the simulator",
     ),
     "log": (
-        "<account> [n] [DEBUG|INFO|WARNING|ERROR]",
+        "<account> [n] [DEBUG|INFO|WARNING|ERROR] [--live]",
         "one client's log tail",
         "structured log tail for ONE account (default: last 20; severity"
         " UPPERCASE as the trailing arg)",
     ),
     "global-log": (
-        "[n] [DEBUG|INFO|WARNING|ERROR]",
+        "[n] [DEBUG|INFO|WARNING|ERROR] [--live]",
         "the suite's own logs",
         "framework log tail — entries with no account context (default:"
         " last 20; severity UPPERCASE as the trailing arg). The legacy"
@@ -244,7 +251,103 @@ def help_text() -> str:
 
 
 # ------------------------------------------------------------ run_command
-async def run_command(api: Any, line: str) -> str | None:
+
+
+def _log_line(entry: dict[str, Any]) -> str:
+    """One streamed log line, same shape format_logs renders."""
+    context = " ".join(f"{k}={entry[k]}" for k in ("account", "plugin", "event") if entry.get(k))
+    stamp = entry.get("ts")
+    when = (
+        time.strftime("%H:%M:%S", time.localtime(stamp))
+        if isinstance(stamp, (int, float))
+        else str(stamp or "")
+    )
+    return (
+        f"{when} {entry.get('severity', '')!s:7} {entry.get('source', '')}"
+        f" {entry.get('message', '')} {context}"
+    ).rstrip()
+
+
+class _LiveFlag:
+    """Parsed --live / -f state for the log verbs."""
+
+    def __init__(self, rest: list[str]) -> None:
+        self.rest = rest
+        self.on = False
+
+
+def _strip_live(args: list[str]) -> _LiveFlag:
+    """Pull the --live / -f switch out of a log verb's args."""
+    flag = _LiveFlag(args)
+    for token in list(flag.rest):
+        if token in ("--live", "-f"):
+            flag.on = True
+            flag.rest.remove(token)
+    return flag
+
+
+async def _live_log_window(
+    api: Any,
+    *,
+    account: str | None,
+    severity: str | None,
+    input_feed: AwaitableFactory | None,
+    limit: int = 20,
+) -> str:
+    """The live log window: stream matching entries until a keypress returns.
+
+    Contract (owner rule 2026-11-17): invoking a log verb with --live
+    SWITCHES the interface to the log window; any input line ('q' is the
+    convention, Enter works) switches back to the CLI. Rendering is
+    line-buffered stdout; the window never interrupts the REPL's reader.
+    """
+    if input_feed is None:
+        raise UsageError("--live needs the interactive REPL (one-shot mode has no window)")
+    svc = api.logs_service()
+    entries: list[dict[str, Any]] = await api.logs_tail(
+        limit, account=account, severity=severity, without_account=account is None
+    )
+    scope = f"account {account!r}" if account else "the suite (global)"
+    print(f"--- live log: {scope} — press q (or Enter) to return ---", flush=True)
+    for entry in entries:
+        print(_log_line(entry), flush=True)
+    streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def _on_entry(entry: Any) -> None:
+        # a live window must never break the log path
+        with contextlib.suppress(Exception):
+            streamed.put_nowait(entry.as_dict())
+
+    unsubscribe = svc.subscribe(_on_entry)
+    rendered = len(entries)
+    try:
+        while True:
+            feed_task = asyncio.ensure_future(input_feed())
+            entry_task = asyncio.ensure_future(streamed.get())
+            done, _pending = await asyncio.wait(
+                {feed_task, entry_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if entry_task in done:
+                rendered += 1
+                print(_log_line(entry_task.result()), flush=True)
+            for task in (feed_task, entry_task):
+                task.cancel()
+            # reap BOTH tasks: an un-retrieved cancelled task is exactly
+            # the "exception was never retrieved" wreckage this window
+            # must never cause (awaiting a finished task is a no-op)
+            for task in (feed_task, entry_task):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            if feed_task in done:
+                break
+    finally:
+        unsubscribe()
+    return f"--- live log closed ({rendered} lines shown; back on the CLI ---"
+
+
+async def run_command(
+    api: Any, line: str, *, input_feed: AwaitableFactory | None = None
+) -> str | None:
     """Execute one command line against the ControlAPI.
 
     Expects the raw input line (shlex-parsed here, so quoted arguments work).
@@ -306,7 +409,8 @@ async def run_command(api: Any, line: str) -> str | None:
     if cmd == "simulation":
         return await _simulation_group(api, args)
     if cmd == "log":
-        rest = list(args)
+        live = _strip_live(list(args))
+        rest = live.rest
         severity: str | None = None
         if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
             severity = rest.pop(-1)  # exact-case: account names are lowercase
@@ -320,9 +424,14 @@ async def run_command(api: Any, line: str) -> str | None:
             limit = _integer(rest.pop(0), cmd, "n")
         if rest:
             raise UsageError(f"usage: log {HELP['log'][0]}")
+        if live.on:
+            return await _live_log_window(
+                api, account=account, severity=severity, input_feed=input_feed, limit=limit
+            )
         return format_logs(await api.logs_tail(limit, account=account, severity=severity))
     if cmd == "global-log":
-        rest = list(args)
+        live = _strip_live(list(args))
+        rest = live.rest
         severity = None
         if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
             severity = rest.pop(-1)
@@ -333,6 +442,10 @@ async def run_command(api: Any, line: str) -> str | None:
             limit = _integer(rest.pop(0), cmd, "n")
         if rest:
             raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
+        if live.on:
+            return await _live_log_window(
+                api, account=None, severity=severity, input_feed=input_feed, limit=limit
+            )
         return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
     if cmd == "logs":
         # compat alias (hidden from the overview): the old '[n] [account]'
