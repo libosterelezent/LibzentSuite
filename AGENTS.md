@@ -2,7 +2,7 @@
 
 Binding instructions for AI coding agents working anywhere in this repository. LibzentSuite is a game-agnostic, multi-account Discord flow-orchestration framework: a framework core, pluggable plugins and parser packs, and three interfaces — CLI, FastAPI core API, Flet UI — that all sit on one `ControlAPI` facade.
 
-These rules do not replace the current source code, the tests, or the architecture contracts (`docs/architecture/architecture.md`, `docs/architecture/integration.md`). Where they disagree with the code, follow §1.6.
+These rules do not replace the current source code, the tests, or the architecture contracts (`docs/architecture/architecture.rst`, `docs/architecture/integration.rst`). Where they disagree with the code, follow §1.6.
 
 ## Quick reference
 
@@ -87,7 +87,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 | Location | Role | Rules |
 | --- | --- | --- |
-| `AGENTS.md`, `docs/architecture/architecture.md`, `docs/architecture/integration.md` | Agent guidance and the binding engineering/architecture contracts | The only places for them. Verify against the code; fix or report stale contracts. |
+| `AGENTS.md`, `docs/architecture/architecture.rst`, `docs/architecture/integration.rst` | Agent guidance and the binding engineering/architecture contracts | The only places for them. Verify against the code; fix or report stale contracts. |
 | `docs/design/`, `docs/plans/` | Subsystem design specs and plans: locked decisions and intended direction (workspace design, data-management adoption, the Flet UI design contract, …) | Read the one for the subsystem you touch. If code and spec disagree, surface it (§1.6) instead of picking silently. |
 | rest of `docs/`, `README.md`, `CHANGELOG.md` | User-facing description, the roadmap (`docs/roadmap.md`), and history | Descriptive only — no coding rules, agent instructions, linting policy, or behavioral mandates. |
 | `knowledgebase/` | Technical reference and project history | Local-only (gitignored, absent from a fresh clone). Append-only. No rules. |
@@ -114,7 +114,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 ## 6. Public contracts, architecture, and UI
 
-- Read `docs/architecture/architecture.md` (ownership and boundaries) and `docs/architecture/integration.md` (the current inter-module contract) first. When they look stale, verify them against the code, don't perpetuate a known contradiction, and propose the correction.
+- Read `docs/architecture/architecture.rst` (ownership and boundaries) and `docs/architecture/integration.rst` (the current inter-module contract) first. When they look stale, verify them against the code, don't perpetuate a known contradiction, and propose the correction.
 - `core.api.ControlAPI` stays the shared facade for the CLI, the FastAPI core API (`interfaces/api/`), and the Flet UI (`interfaces/ui/`). When a feature needs a new shared operation, add it there and update the implementation, every interface, and the tests together.
 - UI work follows the owner's Flet UI design contract, `docs/plans/flet_ui_design_contract.md`. Layout, navigation, component structure, and interaction flow may change without changing backend behavior; a previous page list or implementation is not a standing requirement unless the task or a current contract reaffirms it.
 - Specify each component: purpose, inputs/outputs, interaction states (disabled, loading, success, failure), validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a markup trick or the presence of a comment.
