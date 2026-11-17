@@ -270,6 +270,9 @@ class TestLifecycle(SchedulerTestBase):
         )
         completed = self.recorder.of(TaskCompleted)[0]
         self.assertEqual(completed.task_id, task.id)
+        # the mechanical chain trigger's second key (live-debugging
+        # toolkit 2026-11-17: blank in production, chains never matched)
+        self.assertEqual((completed.plugin, completed.action), ("exporter", "message"))
         self.assertGreaterEqual(completed.duration_s, 0.0)
         assert task.result_summary is not None
         self.assertIn("DiscordMessage", task.result_summary)

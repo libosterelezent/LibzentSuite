@@ -139,6 +139,8 @@ class _WorkspaceGateReader:
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .workspace.models import SignalIdentity
+
 ROOT_LOGGER = logging.getLogger("libzent")
 
 
@@ -710,6 +712,17 @@ async def _assemble(
         invoker=_LatePluginsInvoker(lambda: plugins),  # resolved at call time
         gate_reader=_workspace_gate_reader,
     )
+
+    # the outbox's delivery callback binds NOW — the runtime that
+    # consumes signals exists. Constructed with deliver=None (the
+    # runtime cannot be passed to its own dependency), this bind is
+    # the wiring the constructor comment promised; found missing in
+    # production by the live-debugging toolkit (2026-11-17): signals
+    # pended forever and signal-triggered chains never fired.
+    async def _deliver_pending_signal(signal: SignalIdentity) -> None:
+        await chain_runtime.on_signal(signal.signal_id)
+
+    signals_outbox.bind_delivery(_deliver_pending_signal)
 
     async def _on_task_completed(event: TaskCompleted) -> None:
         with contextlib.suppress(Exception):

@@ -22,8 +22,16 @@ import sys
 from core.bootstrap import build
 
 
-async def run_sim(name: str | None, list_only: bool, plugin_dir: str = "plugins") -> int:
-    """Run scenario(s) through the offline SimulationRunner (no network)."""
+async def run_sim(
+    name: str | None, list_only: bool, plugin_dir: str = "tests/fixtures/sim_plugins"
+) -> int:
+    """Run scenario(s) through the offline SimulationRunner (no network).
+
+    The default plugin dir is the SIM workload fixture (where the
+    scenario exporter lives), not ./plugins — the live plugin directory
+    carries no simulator workload, so every scenario failed there
+    (found by the live-debugging toolkit's first pass, 2026-11-17);
+    --plugins still overrides for custom runs."""
     from adapters.simulator import SCENARIOS, SimulationRunner
 
     if list_only:
@@ -203,7 +211,9 @@ def main() -> int:
     )
     parser.add_argument("--config", default="config", help="config directory (default: ./config)")
     parser.add_argument(
-        "--plugins", default="plugins", help="plugin directory (default: ./plugins)"
+        "--plugins",
+        default="tests/fixtures/sim_plugins",
+        help="plugin directory (default: the simulator workload fixture)",
     )
     parser.add_argument("--env", default=".env", help="credentials file (default: ./.env)")
     parser.add_argument(

@@ -129,6 +129,11 @@ class TaskCompleted(Event):
     duration_s: float = 0.0
     summary: str = ""
     plugin: str = ""
+    # the action the task executed (e.g. "message") — the mechanical
+    # chain trigger's match key alongside plugin. Additive with a
+    # default; found dead-blank in production by the live-debugging
+    # toolkit (2026-11-17): terminal chains could never match.
+    action: str = ""
 
 
 @dataclass
@@ -145,6 +150,8 @@ class TaskFailed(Event):
     error: str = ""
     error_kind: str = ""
     plugin: str = ""
+    # see TaskCompleted.action — the same match key, same finding
+    action: str = ""
 
 
 @dataclass
