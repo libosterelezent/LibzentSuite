@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from core.errors import AccountError, UnsafePolicyError
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
@@ -627,8 +629,10 @@ class Harness:
     async def step_raises(
         self, name: str, expected: tuple[type[Exception], ...], action: Callable[[], Awaitable[Any]]
     ) -> bool:
-        """Run one step EXPECTING a domain exception (the typo traps and
-        safety guards): PASS when it raises, finding when it does not."""
+        """Run one step EXPECTING the operation's DECLARED guard exception
+        (the typo traps and safety guards): PASS only when THAT exception
+        raises — an unrelated failure (say, a persistence RuntimeError
+        during a below-floor check) stays on the failure path."""
         self._console.line(f"step: {name} (expects {expected[0].__name__})")
         try:
             result = await action()
@@ -809,7 +813,7 @@ async def phase_accounts(h: Harness) -> None:
 
     await h.step_raises(
         "duplicate add is refused",
-        (Exception,),
+        (AccountError,),
         lambda: h.api.accounts_add({"name": "alpha"}),
     )
     started = await h.step("start alpha", lambda: h.api.accounts_start("alpha"))
@@ -1284,7 +1288,7 @@ async def phase_rate_limits(h: Harness) -> None:
     )
     await h.step_raises(
         "below-floor policy is rejected",
-        (Exception,),
+        (UnsafePolicyError,),
         lambda: h.api.ratelimit_set("message", 0.2, level="global"),
     )
     warnings = await h.step("ratelimit_warnings", h.api.ratelimit_warnings)
@@ -1389,7 +1393,7 @@ async def phase_workspaces(h: Harness) -> None:
     )
     await h.step_raises(
         "delete with a member is refused",
-        (Exception,),
+        (ValueError,),
         lambda: h.api.workspaces_delete("grind"),
     )
     gone = await h.step("leave workspace", lambda: h.api.workspaces_remove_account("alpha"))
