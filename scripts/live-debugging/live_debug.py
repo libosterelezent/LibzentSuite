@@ -46,6 +46,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import os
 import re
 import shutil
 import sys
@@ -67,6 +68,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core.errors import AccountError, UnsafePolicyError  # noqa: E402  # needs the sys.path setup above
+from core.workspace.runtime import ChainRuntime  # noqa: E402  # definition validation before persist
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
@@ -467,6 +469,12 @@ class Harness:
             client_factory=client_factory,
             credentials=credentials,
             database=database,
+            # db_path locates the SIDE-CARS (plugin-data.db,
+            # credentials.key) next to the workdir database — passing
+            # only ``database=`` left them on build()'s default
+            # state/ path, breaking the harness's isolation promise
+            # (PR review 2026-11-18)
+            db_path=str(self.workdir / "libzent.db"),
             quiet=True,
             env_file=str(env_file),
         )
@@ -849,10 +857,22 @@ async def phase_boot(h: Harness) -> None:
     manifests = await h.step("plugin manifests", h.api.plugins_manifests)
     names = sorted(m.get("name") for m in manifests or [])
     h.expect(
-        names == ["ldp_worker", "ping"],
-        what="discovered plugins (production ping + toolkit fixture)",
-        expectation="['ldp_worker', 'ping']",
+        names == ["ldp_follower", "ldp_worker", "ping"],
+        what="discovered plugins (production ping + toolkit fixtures)",
+        expectation="['ldp_follower', 'ldp_worker', 'ping']",
         actual=str(names),
+    )
+    # side-car isolation (PR review 2026-11-18): plugin-data.db and
+    # credentials.key resolve from db_path's parent — with only
+    # ``database=`` passed they landed on the DEFAULT state/ path. The
+    # store's resolved path is the live proof the workdir owns them.
+    plugin_data_path = str(Path(h.framework.plugin_data.path).resolve())
+    workdir_path = str(h.workdir.resolve())
+    h.expect(
+        plugin_data_path.startswith(workdir_path + os.sep),
+        what="plugin-data side-car lives inside the harness workdir",
+        expectation=f"{workdir_path}{os.sep}plugin-data.db",
+        actual=plugin_data_path,
     )
     status = await h.step("status snapshot", h.api.status)
     ok = isinstance(status, dict) and status.get("uptime_s", -1) >= 0
@@ -986,6 +1006,16 @@ async def phase_credentials(h: Harness) -> None:
         what="alpha credential resolves through the encrypted store",
         expectation="credential state db (env no longer exists at runtime)",
         actual=str(alpha_row),
+    )
+    # the Fernet key is a side-car too (PR review 2026-11-18): it must
+    # have been minted next to the workdir database — a key in the
+    # live state/ would mean every harness run encrypted its synthetic
+    # tokens under the owner's real key material
+    h.expect(
+        (h.workdir / "credentials.key").is_file(),
+        what="credential key lives inside the harness workdir",
+        expectation=f"{h.workdir}{os.sep}credentials.key exists",
+        actual=f"exists={(h.workdir / 'credentials.key').is_file()}",
     )
     set_again = await h.step(
         "re-store alpha credential (rotation)",
@@ -1658,33 +1688,43 @@ async def phase_chains_signals(h: Harness) -> None:
     burst, so a completed run proves A-acts-B-follows, not self-follow."""
     await h.ensure_account("alpha", ["ping", "ldp_worker"])
     await _ensure_workspace(h, "grind")
-    # beta joins as the FOLLOWER: ldp_worker attached (the handler needs
-    # an active runtime) but with its OWN trigger word, so alpha's burst
-    # word never makes beta react. Both members stay eligible — pausing
-    # alpha would fence ALPHA's own sends at the dispatch guard — so the
-    # chain steps below route EXPLICITLY to beta: a completed run with
-    # target beta proves A-acts-B-follows, never self-follow
-    await h.ensure_account("beta", ["ldp_worker"])
-    await h.step(
-        "point beta's trigger word away from alpha's",
-        lambda: h.api.plugins_set_setting("beta", "ldp_worker", "trigger", "beta-standby"),
-    )
+    # beta joins as the FOLLOWER carrying ldp_follower — the fixture
+    # SPLIT from ldp_worker (PR review 2026-11-18): when one plugin
+    # played both roles, the follower's own sends re-matched the
+    # ldp_worker terminal trigger (same plugin + task action) and its
+    # handler re-emitted chain-done, so the probe self-perpetuated
+    # runs. The follower completes as plugin=ldp_follower (no
+    # re-match) and has NO chat surface (alpha's burst word can never
+    # make it react — structural, not a settings workaround). Both
+    # members stay eligible — pausing alpha would fence ALPHA's own
+    # sends at the dispatch guard — so the chain steps below route
+    # EXPLICITLY to beta: a completed run with target beta proves
+    # A-acts-B-follows, never self-follow
+    await h.ensure_account("beta", ["ldp_follower"])
     await h.step("beta joins grind", lambda: h.api.workspaces_add_account("beta", "grind"))
     repo = h.framework.database.workspaces
     definition = {
+        # the name is REQUIRED (PR review 2026-11-18): the runtime
+        # reads it back from definition_json — a nameless row can
+        # never match a trigger, and because intake parses every
+        # enabled row first it also blocks signal intake workspace-wide
+        "name": "follow-burst",
         "steps": [
             {
                 "position": 1,
-                "plugin": "ldp_worker",
+                "plugin": "ldp_follower",
                 "routing": "specific_account",
                 "target": "beta",
                 "on": {"task_action": "message", "plugin": "ldp_worker", "event": "task_completed"},
                 "gate": {},
-                "emit": "chain-done",
+                "emit": "",
             }
         ],
         "on_skip": "continue",
     }
+    # validate BEFORE persisting (PR review 2026-11-18): insert_chain
+    # is a raw repo write with no gate of its own
+    ChainRuntime.parse_definition(definition)
     chain_id = await h.step(
         "insert chain definition (follow-burst)",
         lambda: repo.insert_chain("grind", "follow-burst", json.dumps(definition)),
@@ -1725,12 +1765,22 @@ async def phase_chains_signals(h: Harness) -> None:
         expectation="completed follow-burst run routed to beta (alpha initiated the burst)",
         actual=f"run={follow_run.get('id') if follow_run else None} target={follower!r}",
     )
+    # and the run must trace back to ALPHA's act, not beta's own sends
+    # — the runaway the shared trigger key used to produce (PR review
+    # 2026-11-18)
+    triggered_by = str(follow_run.get("triggered_by") or "") if follow_run is not None else ""
+    h.expect(
+        triggered_by == "task:alpha:ldp_worker",
+        what="the follow run was triggered by ALPHA's burst",
+        expectation="triggered_by == 'task:alpha:ldp_worker'",
+        actual=f"triggered_by={triggered_by!r}",
+    )
     signal_chain = {
         "name": "signal-followup",
         "steps": [
             {
                 "position": 1,
-                "plugin": "ldp_worker",
+                "plugin": "ldp_follower",
                 "routing": "specific_account",
                 "target": "beta",
                 "on": {"signal": "ldp_worker:chain-done"},
@@ -1740,6 +1790,7 @@ async def phase_chains_signals(h: Harness) -> None:
         ],
         "on_skip": "continue",
     }
+    ChainRuntime.parse_definition(signal_chain)
     signal_chain_id = await h.step(
         "insert signal-triggered chain (signal-followup)",
         lambda: repo.insert_chain("grind", "signal-followup", json.dumps(signal_chain)),
@@ -2026,6 +2077,18 @@ async def phase_shutdown(h: Harness) -> None:
         what="teardown raised no new ERROR-class anomalies",
         expectation="ordered shutdown completes clean",
         actual=f"{new_errors} new major+ finding(s) during teardown",
+    )
+    # cleanup failures are WARNING-class at the root logger, and the
+    # structured bridge detaches mid-teardown — the count above cannot
+    # see them. Framework.shutdown_failures is the durable witness
+    # (PR review 2026-11-18): a failed database.close() used to still
+    # read as a graceful shutdown and exit 0
+    h.expect(
+        not h.framework.shutdown_failures,
+        what="every shutdown cleanup step succeeded",
+        expectation="shutdown_failures is empty",
+        actual=f"{len(h.framework.shutdown_failures)} failure(s): "
+        f"{h.framework.shutdown_failures[:3] or None}",
     )
 
 
