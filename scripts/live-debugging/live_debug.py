@@ -1443,6 +1443,7 @@ async def phase_workspaces(h: Harness) -> None:
 async def phase_presets(h: Harness) -> None:
     """Presets: settings-template apply path + P8 definitions/executions."""
     await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    await _ensure_workspace(h, "grind")  # preset definitions reference it
     repos = h.framework.database
     template = await h.step(
         "create preset template (scope account/alpha)",
@@ -1870,6 +1871,7 @@ async def phase_simulation(h: Harness) -> None:
         expectation="export_basic among the six",
         actual=str(names),
     )
+
     # POSITIVE check at the CURRENT `--sim` default: main.py points the
     # runner at the workload fixtures (tests/fixtures/sim_plugins)
     default_runner = SimulationRunner(plugin_dir=str(SCENARIO_FIXTURES))
@@ -1891,6 +1893,7 @@ async def phase_simulation(h: Harness) -> None:
             expectation="scenario returns in <=120s",
             actual="timed out",
         )
+
     # SEPARATE override case: an EXPLICIT --plugins override to the
     # production dir finds no exporter workload there — the scenario
     # must fail loudly, never pass vacuously
