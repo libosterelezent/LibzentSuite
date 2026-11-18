@@ -152,48 +152,57 @@ _CONTRACT_WARNING_KEYWORDS = (
     "never retrieved",
 )
 
-#: WARNING rows matching these are DOCUMENTED benign behavior (expected
-#: on this harness's stacks) — recorded as observations, not defects
-_BENIGN_WARNING_PATTERNS = (
-    # the harness stops accounts with tasks in flight on purpose
-    "task was cancelled",
-    # scenarios deliberately stage server 429s / channel loss
-    "server rate limit",
-    "target gone",
-    "channel",
-)
+
+def _deliberate_row(severity: str, source: str, message: str, event: str | None) -> bool:
+    """True for known-DELIBERATE loud rows — operator actions and staged
+    failure paths that log WARNING/ERROR on purpose.
+
+    The old substring lists matched the words ANYWHERE, so an unrelated
+    error mentioning "emergency stop" sailed through as an exit-0
+    observation. The deliberate rows are manager rows WITHOUT a bus
+    event (the estop announcement, the scheduler's cancellation
+    receipts, the plugins' flow-abort notices), so the discriminator is
+    the exact source plus a specific message shape; ``event`` names the
+    structured bus event when the row carries one, and estop-driven
+    lifecycle events are matched by name + message instead of a bare
+    substring.
+    """
+    lowered = message.lower()
+    if event in ("AccountFailed", "AccountDisconnected"):
+        return "estop" in lowered
+    if severity == "ERROR":
+        # the account manager's estop announcement is ERROR-loud BY
+        # DESIGN: exact source + exact prefix, nothing broader
+        return source == "accounts" and message.startswith("EMERGENCY STOP ")
+    # WARNING: the scheduler's cancellation receipts (tasks the operator
+    # cancelled on purpose) and the documented flow-abort notices for
+    # vanished targets (one clean line, by the plugin contract)
+    if source == "scheduler" and "was cancelled" in lowered:
+        return True
+    return "flow aborted" in lowered or "targetgone" in lowered.replace(" ", "")
 
 
-#: ERROR rows matching these are DELIBERATE operator actions logging loud
-#: by design (the account manager estop line) — observations, not defects
-_BENIGN_ERROR_PATTERNS = ("emergency stop",)
-
-
-def classify_log_entry(severity: str, source: str, message: str) -> str | None:
+def classify_log_entry(
+    severity: str, source: str, message: str, event: str | None = None
+) -> str | None:
     """Map one structured log row to a finding severity (None = not one).
 
-    ERROR (and anything louder the service already collapses to ERROR)
-    is always at least a major finding. WARNING rows become minor when
-    the message reads like a contract violation (the keyword list), an
-    observation when it matches a known-benign pattern, and nothing at
-    all when it is ordinary operational chatter. INFO/DEBUG rows are
-    never findings.
+    ERROR is always at least major unless the row is a KNOWN deliberate
+    one (matched exactly — see _deliberate_row). WARNING rows become an
+    observation when deliberate, minor when the message reads like a
+    contract violation (the keyword list), and nothing at all when it is
+    ordinary operational chatter. INFO/DEBUG rows are never findings.
     """
     sev = (severity or "").upper()
-    if sev == "ERROR":
-        text = f"{source} {message}".lower()
-        if any(pattern in text for pattern in _BENIGN_ERROR_PATTERNS):
-            return "observation"
-        return "major"
-    if sev != "WARNING":
+    if sev not in ("ERROR", "WARNING"):
         return None
+    if _deliberate_row(sev, source, message, event):
+        return "observation"
+    if sev == "ERROR":
+        return "major"
     text = f"{source} {message}".lower()
     if any(word in text for word in _CONTRACT_WARNING_KEYWORDS):
-        if any(pattern in text for pattern in _BENIGN_WARNING_PATTERNS):
-            return "observation"
         return "minor"
-    if any(pattern in text for pattern in _BENIGN_WARNING_PATTERNS):
-        return "observation"
     return None
 
 
@@ -494,7 +503,8 @@ class Harness:
             severity = getattr(entry, "severity", "INFO")
             source = str(getattr(entry, "source", "?"))
             message = str(getattr(entry, "message", ""))
-            verdict = classify_log_entry(severity, source, message)
+            event = str(getattr(entry, "event", "") or "") or None
+            verdict = classify_log_entry(severity, source, message, event)
             if verdict is None:
                 return
             self.report(

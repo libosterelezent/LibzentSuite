@@ -142,9 +142,35 @@ class ClassifierTests(unittest.TestCase):
             live_debug.classify_log_entry("WARNING", "accounts", "stop failed for alpha"), "minor"
         )
 
-    def test_benign_warning_is_observation(self) -> None:
+    def test_the_estop_announcement_is_an_observation(self) -> None:
+        # ERROR-loud BY DESIGN: exact source + exact prefix
         self.assertEqual(
-            live_debug.classify_log_entry("WARNING", "ratelimit", "server rate limit honored"),
+            live_debug.classify_log_entry(
+                "ERROR", "accounts", "EMERGENCY STOP gamma: cancelled 0 tasks, disconnecting"
+            ),
+            "observation",
+        )
+
+    def test_an_unrelated_error_mentioning_emergency_stop_is_major(self) -> None:
+        # the old substring match let this through as an exit-0 observation
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "ERROR", "plugins", "restore-before-emergency stop failed: database locked"
+            ),
+            "major",
+        )
+
+    def test_scheduler_cancellation_receipts_are_observations(self) -> None:
+        self.assertEqual(
+            live_debug.classify_log_entry("WARNING", "scheduler", "task 7 was cancelled"),
+            "observation",
+        )
+
+    def test_vanished_target_abort_notices_are_observations(self) -> None:
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "WARNING", "account:alpha", "flow aborted for alpha: channel gone (TargetGone)"
+            ),
             "observation",
         )
 
