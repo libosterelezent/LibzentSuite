@@ -58,19 +58,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from core.errors import AccountError, UnsafePolicyError
+# the repository root must be importable BEFORE the first repository
+# import below (core.errors): direct invocation
+# ``python scripts/live-debugging/live_debug.py`` from any working
+# directory puts only this file's directory on sys.path
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.errors import AccountError, UnsafePolicyError  # noqa: E402  # needs the sys.path setup above
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     from core.logging_service import LogEntry
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:  # runnable from any working directory
-    sys.path.insert(0, str(REPO_ROOT))
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:  # runnable from any working directory
-    sys.path.insert(0, str(REPO_ROOT))
 
 TOOLKIT_DIR = Path(__file__).resolve().parent
 TOOLKIT_PLUGINS = TOOLKIT_DIR / "plugins"
