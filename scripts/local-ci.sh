@@ -126,8 +126,11 @@ step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
 # the environment is always exactly the lock's resolution.
 VENV310=/tmp/opencode/local-ci-venv310
 if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
-  python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
-  ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
+  pytest tests/ -q --ignore=./tests/unit/test_rich_model.py -n auto --dist loadscope \
+  > "$RUN_DIR/suite-310.log" 2>&1 \
+  && UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
+  python -m unittest tests.unit.test_rich_model >> "$RUN_DIR/suite-310.log" 2>&1; then
+  ok "3.10 suite: $(grep -E "passed|Ran" "$RUN_DIR/suite-310.log" | tail -2 | head -1)"
 else
   # no-match greps stay nonfatal (set -e + pipefail would otherwise
   # kill the gate before the verdict) and fall back to a bounded tail
@@ -142,7 +145,11 @@ report_state_residue
 step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
-if "$UV_BIN" run --frozen --python 3.13 coverage run -m unittest discover -s tests -t . > "$RUN_DIR/suite-313.log" 2>&1 \
+if "$UV_BIN" run --frozen --python 3.13 coverage run -m pytest tests/ -q \
+  --ignore=./tests/unit/test_rich_model.py -n0 \
+  > "$RUN_DIR/suite-313.log" 2>&1 \
+  && "$UV_BIN" run --frozen --python 3.13 coverage run -m pytest tests/unit/test_rich_model.py -q --append -n0 \
+  >> "$RUN_DIR/suite-313.log" 2>&1 \
   && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
   ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else

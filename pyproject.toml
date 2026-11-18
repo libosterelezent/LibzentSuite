@@ -105,6 +105,8 @@ dev = [
     "httpx>=0.28.1",
     "mypy==2.4.0",
     "pip-audit>=2.10.1",
+    "pytest>=9.2.0",
+    "pytest-xdist>=3.8.0",
     "ruff==0.17.2",
 ]
 
@@ -199,3 +201,19 @@ fail_under = 76.0
 precision = 1
 show_missing = false
 skip_covered = true
+
+[tool.pytest.ini_options]
+# pytest owns the test runner (adopted 2026-11-19; unittest discover retired).
+# xdist parallelizes across workers — the suite is embarrassingly parallel
+# (per-test temp DBs, fakes, per-process singleton isolation).
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --ignore=dump"
+
+# The distribution strategy lives in the RUNNER (local-ci.sh, CI), not
+# here: the bulk runs parallel (-n auto --dist loadscope), and one
+# timing-sensitive file (test_rich_model.py — CPU-contention-sensitive
+# cancellation tests) runs serially after. Keeping addopts bare means
+# `pytest tests/unit/test_x.py` Just Works for iteration without
+# pulling in xdist.
+
