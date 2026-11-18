@@ -168,8 +168,8 @@ fi
 step "8/8 Verdict"
 if [ -n "$REVIEW_PID" ]; then
   echo "       waiting for the concurrent review (PID $REVIEW_PID)..."
-  wait "$REVIEW_PID"
-  REVIEW_EXIT=$?
+  REVIEW_EXIT=0
+  wait "$REVIEW_PID" || REVIEW_EXIT=$?
   if [ "$REVIEW_EXIT" -ne 0 ]; then
     echo -e "\033[31mREVIEW: command failed (exit $REVIEW_EXIT)\033[0m"
     FAIL=1

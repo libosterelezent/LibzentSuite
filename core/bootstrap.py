@@ -313,6 +313,11 @@ class _TerminalTriggerNursery:
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # yield once after the suppress loop: if the CALLER was cancelled
+        # while we were inside it, its pending cancellation surfaces at
+        # this next await point (Python's guarantee; on 3.10 there is no
+        # Task.cancelling() to check directly — PR review round 6)
+        await asyncio.sleep(0)
 
 
 class Framework:
