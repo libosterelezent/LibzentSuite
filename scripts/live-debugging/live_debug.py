@@ -483,25 +483,37 @@ class Harness:
 
     # ------------------------------------------------------------- teardown
     async def teardown(self) -> None:
-        """Framework.shutdown + capture detach + workdir removal (idempotent)."""
+        """Framework.shutdown + capture detach + workdir removal.
+
+        Idempotent, and CANCELLATION-PROOF: a CancelledError landing
+        inside ``framework.shutdown`` still detaches the capture and
+        removes the workdir (the sync cleanup runs in finally), then
+        propagates — the cancellation is honored, never swallowed.
+        """
         if self._torn_down:
             return
         self._torn_down = True
-        if self.framework is not None:
-            try:
-                await self.framework.shutdown()
-            except Exception as exc:  # teardown must still finish
-                self.report(
-                    severity="major",
-                    summary=f"framework.shutdown raised {type(exc).__name__}",
-                    evidence=[repr(exc)],
-                    expectation="graceful ordered teardown (AGENTS bootstrap contract)",
-                    actual=f"{type(exc).__name__}: {exc}",
-                    repro="shutdown",
-                )
-        self._detach_capture()
-        if self.workdir is not None and not self._keep_workdir:
-            shutil.rmtree(self.workdir, ignore_errors=True)
+        try:
+            if self.framework is not None:
+                try:
+                    await self.framework.shutdown()
+                except asyncio.CancelledError:
+                    # cleanup below runs in the shared finally; the
+                    # cancellation itself re-raises after it
+                    self._console.line("teardown cancelled mid-shutdown — cleanup continues")
+                    raise
+                except Exception as exc:  # teardown must still finish
+                    self.report(
+                        severity="major",
+                        summary=f"framework.shutdown raised {type(exc).__name__}",
+                        evidence=[repr(exc)],
+                        expectation="graceful ordered teardown (AGENTS bootstrap contract)",
+                        actual=f"{type(exc).__name__}: {exc}",
+                        repro="shutdown",
+                    )
+        finally:
+            self._detach_capture()
+            self._remove_workdir()
 
     def _remove_workdir(self) -> None:
         """Delete the disposable workdir (kept with --keep-workdir)."""
