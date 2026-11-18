@@ -46,6 +46,29 @@ nothing can ship until that hold is lifted; see
   checkout with an flock through the 3.10 leg (two checkouts with
   different lockfiles used to mutate one shared environment under
   each other's running tests).
+- The pre-push review over the pending range (2026-11-19, 8 findings,
+  6 fixed / 1 resolved by the gate restructure / 1 triaged): a
+  cancelled `Framework.shutdown()` owner now FINISHES joining the
+  terminal-trigger reap before its cancellation propagates (the bare
+  shield surfaced the Cancel immediately while the detached reap kept
+  unwinding against dependencies shutdown was already closing);
+  standalone live-debug phases report `shutdown_failures` from their
+  implicit teardown (a failed `database.close()` could still exit 0
+  without the shutdown phase); the gate resolves `coderabbit` from
+  PATH before the installer default, syncs the persistent 3.10 venv
+  `--exact` (dropped dependencies no longer linger in it), and parses
+  the review stream as NDJSON (the literal grep missed spaced JSON,
+  an empty stream read as "0 findings", and a skipped review now
+  fails); two scheduler tests traded wall-clock settles for
+  event-proven park points — the 3.10 leg failed the torn-tail
+  regression under distributed load because a 20ms sleep let the
+  stop's abort legitimately cancel a task whose completion tail had
+  not parked yet. Triaged: the CLI live-log window's synchronous
+  `print` can block the loop on a stalled consumer pipe (pre-existing,
+  interactive `--live` feature — bounded off-loop output is a design
+  change deferred to its own pass); the fail-closed toggle test's
+  empty audit read is safe by construction (validation precedes the
+  audit call, so the rejection path queues no row).
 
 ### Changed
 - Implemented contracts moved from `docs/plans/` into the binding
