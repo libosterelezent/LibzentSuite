@@ -288,7 +288,10 @@ class TestLifecycle(SchedulerTestBase):
         self.limiter.wait_s = 0.25
         self.limiter.jitter_s = 0.1
         task = self.scheduler.submit("alpha", "p", "message", channel_id=9, content="x")
-        await self.settle()
+        # the audit row lands in the task's finish TAIL — a wall-clock
+        # settle raced it under load (distributed 3.10 runs read 0 rows);
+        # the row's presence is the deterministic completion barrier
+        await self.wait_until(lambda: len(self.audit.calls) >= 1)
         self.assertEqual(task.grant_wait_ms, 250.0)
         self.assertEqual(task.grant_jitter_ms, 100.0)
         self.assertEqual(len(self.audit.calls), 1)
@@ -1045,8 +1048,17 @@ class TestFailedStopHardening(SchedulerTestBase):
         all land even though _apply_terminal already removed the task."""
         gate = asyncio.Event()
         orig_add = self.repo.add
+        entries = 0
+        t1_parked = asyncio.Event()  # t1's completed-tail reached the write
+        t2_parked = asyncio.Event()  # the abort spawned t2's cancelled-tail
 
         async def blocked_add(entry: dict[str, Any]) -> int:
+            nonlocal entries
+            entries += 1
+            if entries == 1:
+                t1_parked.set()
+            elif entries == 2:
+                t2_parked.set()
             await gate.wait()  # simulate a slow aiosqlite write
             return await orig_add(entry)
 
@@ -1054,15 +1066,22 @@ class TestFailedStopHardening(SchedulerTestBase):
         repo_seam.add = blocked_add
         t1 = self.scheduler.submit("alpha", "p", "message")
         t2 = self.scheduler.submit("alpha", "p", "message")  # queued behind
-        await self.settle(0.02)  # t1 completed, its tail parked on the gate
+        # PROVE t1 completed and its history tail is parked on the gate
+        # before the stop exists: a wall-clock settle here let the abort
+        # win the race under load (the 3.10 leg's distributed run) and
+        # LEGITIMATELY cancel t1 — the wrong interleaving for this test
+        await asyncio.wait_for(t1_parked.wait(), timeout=5.0)
 
         owner = asyncio.create_task(self.scheduler.stop(drain=False, timeout=0.0))
-        await asyncio.sleep(0.05)  # owner parked: t1 terminal, row not landed
+        # PROVE the abort cancelled t2 and spawned its terminal tail —
+        # both history writes are in flight when the owner is cancelled
+        await asyncio.wait_for(t2_parked.wait(), timeout=5.0)
         owner.cancel()
         gate.set()  # DB becomes responsive again
         with self.assertRaises(asyncio.CancelledError):
             await owner
-        await self.settle(0.1)
+        # the shielded tails persist both rows without their owner
+        await self.wait_until(lambda: len(self.repo.add_calls) >= 2)
 
         self.assertEqual(t1.status, "completed")
         self.assertEqual(t2.status, "cancelled")
