@@ -286,12 +286,15 @@ class _TerminalTriggerNursery:
         return task
 
     def _reap(self, task: asyncio.Task[list[str]]) -> None:
-        # remove from the retained set (completed tasks accumulate —
-        # PR review round 5) AND retrieve the exception
+        # remove from the retained set AND log the failure at the task
+        # boundary (invisible failures are exactly the "exception was
+        # never retrieved" class this nursery exists to prevent)
         self._tasks.discard(task)
-        if not task.cancelled():
-            with contextlib.suppress(Exception):
-                task.exception()
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            ROOT_LOGGER.warning("terminal trigger task failed: %s", exc, exc_info=exc)
 
     async def aclose(self) -> None:
         """Close the gate, then cancel + await every retained task.
