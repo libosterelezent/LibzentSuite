@@ -507,6 +507,13 @@ class Harness:
         self._torn_down = True
         try:
             if self.framework is not None:
+                # standalone phases never reach phase_shutdown — when
+                # THIS teardown performs the shutdown, its cleanup
+                # failures must not escape as a green exit (PR #27
+                # round 7 review). phase_shutdown already asserted on
+                # its own call; the idempotent second shutdown here
+                # re-records nothing, so skip when it already ran.
+                performed_shutdown = not getattr(self.framework, "_shut_down", False)
                 try:
                     await self.framework.shutdown()
                 except asyncio.CancelledError:
@@ -523,6 +530,17 @@ class Harness:
                         actual=f"{type(exc).__name__}: {exc}",
                         repro="shutdown",
                     )
+                else:
+                    failures = list(getattr(self.framework, "shutdown_failures", None) or [])
+                    if performed_shutdown and failures:
+                        self.report(
+                            severity="major",
+                            summary=f"implicit shutdown recorded {len(failures)} cleanup failure(s)",
+                            evidence=failures[:3],
+                            expectation="every shutdown cleanup step succeeds (phase_shutdown contract)",
+                            actual=f"{len(failures)} failure(s): {failures[:3]}",
+                            repro="teardown (phase reached no explicit shutdown)",
+                        )
         finally:
             self._detach_capture()
             self._remove_workdir()
