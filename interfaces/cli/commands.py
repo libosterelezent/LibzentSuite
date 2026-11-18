@@ -422,13 +422,19 @@ async def _live_log_window(
                     rendered += 1
                     drained += 1
                     _emit(_log_line(streamed.get_nowait()))
+                    # yield every 25 rows: a slow stream must not hold
+                    # the event loop hostage during shutdown drain
+                    if drained % 25 == 0:
+                        await asyncio.sleep(0)
                 skipped = streamed.qsize() + omitted_on_overflow
                 if skipped:
                     _emit(f"--- {skipped} row(s) omitted (window closing) ---")
                 break  # any input returns; shutdown returns
     finally:
         # cancel AND reap the WINDOW-OWNED tasks on every exit path —
-        # the caller's stop_wait stays untouched
+        # the caller's stop_wait stays untouched. Cancellation of the
+        # WINDOW ITSELF propagates: the suppress below only shields the
+        # child tasks' cleanup, never the window's own cancellation.
         owned: list[Any] = [feed_task, entry_task]
         if owns_stop_waiting:
             owned.append(stop_waiting)
@@ -440,6 +446,11 @@ async def _live_log_window(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
         unsubscribe()
+        # if the window was cancelled, the cancellation propagates OUT
+        # (the caller's finally/teardown must see it)
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise asyncio.CancelledError
     closing = f"--- live log closed ({rendered} lines shown; back on the CLI ---"
     if omitted_on_overflow and streamed.empty():
         return f"{closing} [{omitted_on_overflow} row(s) dropped at peak volume]"

@@ -284,10 +284,10 @@ class _TerminalTriggerNursery:
         task.add_done_callback(self._reap)
         return task
 
-    @staticmethod
-    def _reap(task: asyncio.Task[list[str]]) -> None:
-        # retrieved always: an un-retrieved exception is the wreckage
-        # class this nursery exists to prevent
+    def _reap(self, task: asyncio.Task[list[str]]) -> None:
+        # remove from the retained set (completed tasks accumulate —
+        # PR review round 5) AND retrieve the exception
+        self._tasks.discard(task)
         if not task.cancelled():
             with contextlib.suppress(Exception):
                 task.exception()

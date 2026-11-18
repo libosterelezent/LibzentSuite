@@ -168,8 +168,12 @@ fi
 step "8/8 Verdict"
 if [ -n "$REVIEW_PID" ]; then
   echo "       waiting for the concurrent review (PID $REVIEW_PID)..."
-  wait "$REVIEW_PID" || true
-  if grep -q '"type":"finding"' "$RUN_DIR/review.ndjson" 2>/dev/null; then
+  wait "$REVIEW_PID"
+  REVIEW_EXIT=$?
+  if [ "$REVIEW_EXIT" -ne 0 ]; then
+    echo -e "\033[31mREVIEW: command failed (exit $REVIEW_EXIT)\033[0m"
+    FAIL=1
+  elif grep -q '"type":"finding"' "$RUN_DIR/review.ndjson" 2>/dev/null; then
     FINDINGS=$(grep -c '"type":"finding"' "$RUN_DIR/review.ndjson")
     echo -e "\033[31mREVIEW: $FINDINGS finding(s) — see $RUN_DIR/review.ndjson\033[0m"
     FAIL=1
