@@ -1633,7 +1633,17 @@ class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
         self.assertIn("did not settle", str(ctx.exception))
 
     async def test_click_invalid_data_becomes_cancel_when_outer_cancelled(self) -> None:
-        import adapters.discord.client as adc
+        # patch on the module the CLASS actually reads from — NOT a fresh
+        # import (test_module_import_never_pulls_the_library pops/restores
+        # sys.modules, and the restored import can yield a DIFFERENT module
+        # object than the one RealDiscordClient's methods resolve names in;
+        # pytest's alphabetical ordering runs it BEFORE this test, while
+        # unittest's runs it AFTER — the isolation bug pytest exposed)
+        import sys as _sys
+
+        from adapters.discord.client import RealDiscordClient
+
+        adc = _sys.modules[RealDiscordClient.__module__]
 
         exc = self.InvalidData("Did not receive a response from Discord")
 

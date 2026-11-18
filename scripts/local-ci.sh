@@ -32,6 +32,12 @@ if [ ! -x "$UV_BIN" ]; then
   exit 2
 fi
 
+# coderabbit resolves the same way (PR #27 round 7 review): a PATH
+# install must not fall through to a hardcoded maintainer home that
+# may not exist on another machine.
+CR_BIN="$(command -v coderabbit || true)"
+[ -n "$CR_BIN" ] || CR_BIN="$HOME/.local/bin/coderabbit"
+
 PROD="main.py core adapters interfaces database benchmark scripts parsers plugins"
 FAIL=0
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -112,8 +118,12 @@ fi
 # output lands in $RUN_DIR/review.ndjson.
 REVIEW_PID=""
 if [ "$REVIEW_FLAG" -eq 1 ]; then
+  if [ ! -x "$CR_BIN" ]; then
+    echo "local-ci: --review needs the coderabbit CLI — looked on PATH and at $HOME/.local/bin/coderabbit" >&2
+    exit 2
+  fi
   step "0/8 CodeRabbit review (concurrent with the suites)"
-  ("/home/libosterelezent/.local/bin/coderabbit" review --agent \
+  ("$CR_BIN" review --agent \
     --base-commit origin/master --fresh \
     > "$RUN_DIR/review.ndjson" 2>&1) &
   REVIEW_PID=$!
@@ -135,12 +145,10 @@ if ! flock -n 9; then
   echo "       another gate holds this checkout's 3.10 venv — waiting for it to finish..."
   flock 9
 fi
-if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
-  pytest tests/ -q --ignore=./tests/unit/test_rich_model.py -n auto --dist loadscope \
-  > "$RUN_DIR/suite-310.log" 2>&1 \
-  && UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
-  python -m unittest tests.unit.test_rich_model >> "$RUN_DIR/suite-310.log" 2>&1; then
-  ok "3.10 suite: $(grep -E "passed|Ran" "$RUN_DIR/suite-310.log" | tail -2 | head -1)"
+if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --exact --python 3.10 \
+  pytest tests/ -q -n auto --dist loadscope \
+  > "$RUN_DIR/suite-310.log" 2>&1; then
+  ok "3.10 suite: $(grep -E "passed" "$RUN_DIR/suite-310.log" | tail -1)"
 else
   # no-match greps stay nonfatal (set -e + pipefail would otherwise
   # kill the gate before the verdict) and fall back to a bounded tail
@@ -156,13 +164,16 @@ report_state_residue
 step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
-if "$UV_BIN" run --frozen --python 3.13 coverage run -m pytest tests/ -q \
-  --ignore=./tests/unit/test_rich_model.py -n0 \
+# PARALLEL coverage (process speed, 2026-11-19): coverage's --parallel-mode
+# writes per-worker .coverage.* files that `coverage combine` merges — the
+# 3.13 leg drops from ~8 min serial to ~2.5 min parallel, same floor
+rm -f .coverage .coverage.*
+if "$UV_BIN" run --frozen --python 3.13 coverage run --parallel-mode -m pytest tests/ -q -n auto --dist loadscope \
   > "$RUN_DIR/suite-313.log" 2>&1 \
-  && "$UV_BIN" run --frozen --python 3.13 coverage run -m pytest tests/unit/test_rich_model.py -q --append -n0 \
+  && "$UV_BIN" run --frozen --python 3.13 coverage combine \
   >> "$RUN_DIR/suite-313.log" 2>&1 \
   && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
-  ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
+  ok "3.13 suite: $(grep "passed" "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
   # tests and coverage fail separately: the suite log carries
   # FAILED/ERROR, the coverage log carries the floor line (which reads
@@ -191,12 +202,52 @@ if [ -n "$REVIEW_PID" ]; then
   if [ "$REVIEW_EXIT" -ne 0 ]; then
     echo -e "\033[31mREVIEW: command failed (exit $REVIEW_EXIT)\033[0m"
     FAIL=1
-  elif grep -q '"type":"finding"' "$RUN_DIR/review.ndjson" 2>/dev/null; then
-    FINDINGS=$(grep -c '"type":"finding"' "$RUN_DIR/review.ndjson")
-    echo -e "\033[31mREVIEW: $FINDINGS finding(s) — see $RUN_DIR/review.ndjson\033[0m"
-    FAIL=1
   else
-    echo -e "\033[32mREVIEW: 0 findings\033[0m"
+    # Parse the agent stream as NDJSON (PR #27 round 7 review): a
+    # literal grep misses spaced JSON, an empty stream read as "0
+    # findings", and a skipped review is NOT a clean one.
+    REVIEW_VERDICT="$(python3 - "$RUN_DIR/review.ndjson" <<'PY'
+import json
+import sys
+
+findings = 0
+completed = False
+try:
+    with open(sys.argv[1]) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") == "finding":
+                findings += 1
+            elif rec.get("type") == "complete":
+                completed = True
+                if rec.get("status") == "review_skipped":
+                    print("skipped")
+                    raise SystemExit(0)
+except OSError:
+    print("missing")
+    raise SystemExit(0)
+print("%d %s" % (findings, "ok" if completed else "incomplete"))
+PY
+)"
+    case "$REVIEW_VERDICT" in
+      "0 ok")
+        echo -e "\033[32mREVIEW: 0 findings\033[0m"
+        ;;
+      skipped|missing|*" incomplete")
+        echo -e "\033[31mREVIEW: no completed review ($REVIEW_VERDICT) — see $RUN_DIR/review.ndjson\033[0m"
+        FAIL=1
+        ;;
+      *)
+        echo -e "\033[31mREVIEW: ${REVIEW_VERDICT%% *} finding(s) — see $RUN_DIR/review.ndjson\033[0m"
+        FAIL=1
+        ;;
+    esac
   fi
 fi
 if [ "$FAIL" -eq 0 ]; then
