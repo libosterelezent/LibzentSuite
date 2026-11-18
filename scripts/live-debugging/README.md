@@ -62,7 +62,7 @@ Open a second terminal with `--watch` to tail the findings file live
 
 | # | Phase | Area | Exercises |
 |---|-------|------|-----------|
-| 1 | `boot` | framework | real bootstrap over the simulator, plugin discovery (production `ping` + the toolkit fixture `ldp_worker`), status snapshot, env-import verb, credential-leak scan |
+| 1 | `boot` | framework | real bootstrap over the simulator, plugin discovery (production `ping` + the toolkit fixtures `ldp_worker`/`ldp_follower`), side-car isolation check (`plugin-data.db` inside the workdir), status snapshot, env-import verb, credential-leak scan |
 | 2 | `accounts` | accounts | add (+Fernet credential), duplicate-add guard, start, `accounts_info`, account-scoped emergency stop (async by contract — bounded wait), stop/remove with cascade |
 | 3 | `credentials` | credentials | encrypted store status, rotation, `mgmt:credential.*` audit rows (after the queued-persistence drain), env migration with overwrite, no-leak checks |
 | 4 | `plugins` | plugin-assignment | assign/unassign/replace on a RUNNING account, typo trap, enable/disable through `plugins_state` |
@@ -75,13 +75,22 @@ Open a second terminal with `--watch` to tail the findings file live
 | 11 | `chains-signals` | chains-signals | chain definition (terminal trigger on `TaskCompleted`), A-acts-B-follows run + step execution, durable signal emission through the outbox, reconciler delivery (bounded wait over one 30 s sweep) firing the signal-triggered chain |
 | 12 | `observability` | audit-observability | account-filtered / global (`global-log`) / severity-filtered log tails, log stats, audit history incl. mgmt rows, bus lifecycle event rows |
 | 13 | `simulation` | simulator-scenarios | the `simulation_list` facade verb; `export_basic` at the CURRENT `--sim` default (the workload fixtures), plus an explicit production-dir `--plugins` override case that must fail honestly (no workload there) |
-| 14 | `shutdown` | framework | graceful ordered teardown with a no-new-anomalies check |
+| 14 | `shutdown` | framework | graceful ordered teardown with a no-new-anomalies check and a zero-failure cleanup check (`Framework.shutdown_failures` must be empty) |
 
-The toolkit's workload fixture `plugins/ldp_worker/` (staged beside the
-real `plugins/` inside the workdir) provides the traffic: an owner
-trigger word (`ldp-go [n]`) that paced-bursts through the pipeline, the
-conventional `on_ldp_worker_trigger` chain handler, and the
-`chain-done` durable signal.
+The toolkit's fixture plugins (staged beside the real `plugins/`
+inside the workdir) provide the traffic. They are split by ROLE (PR
+review 2026-11-18 — one plugin playing both roles self-perpetuated
+runs: the follower's sends re-matched ldp_worker's own terminal
+trigger, and its handler re-emitted the `chain-done` it was started
+by):
+
+- `plugins/ldp_worker/` — the ACTOR: an owner trigger word
+  (`ldp-go [n]`) that paced-bursts through the pipeline, plus the
+  `chain-done` durable signal through the facade's `emit_signal`.
+- `plugins/ldp_follower/` — the FOLLOWER: the conventional
+  `on_ldp_follower_trigger` chain-step handler (one paced send, no
+  emission, no chat surface — the follower account cannot react to
+  the actor's trigger word structurally).
 
 ## The findings file
 
@@ -163,5 +172,8 @@ patching the framework:
 ## Files
 
 - `live_debug.py` — the runner (phases, capture, findings, watch).
-- `plugins/ldp_worker/` — the toolkit's workload fixture plugin.
+- `plugins/ldp_worker/` — the toolkit's ACTOR fixture (paced bursts,
+  the `chain-done` facade emission).
+- `plugins/ldp_follower/` — the toolkit's FOLLOWER fixture (chain-step
+  handler: one paced send, no emission, no chat surface).
 - `findings/` — output (gitignored).
