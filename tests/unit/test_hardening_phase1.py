@@ -441,6 +441,7 @@ class TestBootstrapRobustness(_TmpCase):
                 client_factory=lambda n, t: None,
                 credentials=creds,
                 database=db,
+                db_path=str(self.dir / "b.db"),  # side-cars stay in the tmpdir
                 quiet=True,
             )
         self.assertFalse(db.connection.connected)
@@ -463,10 +464,12 @@ class TestBootstrapRobustness(_TmpCase):
             client_factory=lambda n, t: None,
             credentials=creds,
             database=db,
+            db_path=str(self.dir / "m.db"),  # side-cars stay in the tmpdir
             quiet=True,
         )
         await fw.shutdown()
         self.assertFalse(db.connection.connected)
+        self.assertEqual(fw.shutdown_failures, [])  # a clean teardown records nothing
 
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
@@ -477,6 +480,7 @@ class TestBootstrapRobustness(_TmpCase):
             client_factory=lambda n, t: None,
             credentials=creds,
             database=db,
+            db_path=str(self.dir / "s.db"),  # side-cars stay in the tmpdir
             quiet=True,
         )
 
@@ -487,7 +491,14 @@ class TestBootstrapRobustness(_TmpCase):
         fw.accounts.stop_all = boom  # type: ignore[method-assign]
         await fw.shutdown()
         self.assertFalse(db.connection.connected)
+        # the failure is RECORDED, not swallowed (PR review 2026-11-18):
+        # the root-logger warning dies with the detached bridge, the
+        # list is the durable witness callers read afterwards
+        self.assertEqual(len(fw.shutdown_failures), 1)
+        self.assertIn("accounts", fw.shutdown_failures[0])
+        self.assertIn("stop_all exploded", fw.shutdown_failures[0])
         await fw.shutdown()  # idempotent
+        self.assertEqual(len(fw.shutdown_failures), 1)  # the retry re-recorded nothing
 
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
@@ -498,6 +509,7 @@ class TestBootstrapRobustness(_TmpCase):
             client_factory=lambda n, t: None,
             credentials=creds,
             database=db,
+            db_path=str(self.dir / "l.db"),  # side-cars stay in the tmpdir
             quiet=True,
         )
         await fw.logs.stop_persistence()
