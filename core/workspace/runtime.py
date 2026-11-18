@@ -110,9 +110,13 @@ class ChainRuntime:
 
     # ------------------------------------------------------ definitions
 
-    def parse_definition(self, definition: dict[str, Any]) -> ChainDefinition:
+    @staticmethod
+    def parse_definition(definition: dict[str, Any]) -> ChainDefinition:
         """Validate through the domain model (InvalidDefinition names
-        the exact problem — the loader/CLI renders it verbatim)."""
+        the exact problem — the loader/CLI renders it verbatim). Pure:
+        callers without a runtime instance (the live-debug harness
+        validating a definition BEFORE persisting it) can use it
+        directly."""
         steps = tuple(
             ChainStep(
                 position=int(s.get("position", 0)),
