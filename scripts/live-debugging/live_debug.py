@@ -2117,16 +2117,25 @@ def _watch(findings_dir: Path) -> int:
         if newest != current:
             current, handled = newest, 0
             print(f"[watch] tailing {newest.name}", flush=True)
-        lines = current.read_text(encoding="utf-8").splitlines()
-        for line in lines[handled:]:
+        # Only COMPLETE newline-terminated records advance the cursor:
+        # the writer flushes per record, but the tail read can race a
+        # half-written final line — an unterminated record is retried on
+        # the next poll instead of being skipped forever. A complete but
+        # malformed line is announced, never silently dropped.
+        complete, _, _ = current.read_text(encoding="utf-8").rpartition("\n")
+        records = [record for record in complete.split("\n") if record]
+        for record in records[handled:]:
             handled += 1
-            with contextlib.suppress(json.JSONDecodeError):
-                row = json.loads(line)
-                print(
-                    f"[ANOMALY] {row.get('id')} [{row.get('severity')}] "
-                    f"{row.get('phase')}/{row.get('area')}: {row.get('summary')}",
-                    flush=True,
-                )
+            try:
+                row = json.loads(record)
+            except json.JSONDecodeError:
+                print(f"[watch] malformed record in {current.name}: {record[:120]!r}", flush=True)
+                continue
+            print(
+                f"[ANOMALY] {row.get('id')} [{row.get('severity')}] "
+                f"{row.get('phase')}/{row.get('area')}: {row.get('summary')}",
+                flush=True,
+            )
         time.sleep(0.4)
 
 
