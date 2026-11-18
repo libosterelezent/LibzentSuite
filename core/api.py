@@ -1441,10 +1441,16 @@ class ControlAPI:
         return out
 
     async def plugins_set_enabled(
-        self, account: str, plugin: str, enabled: bool, surface: str = ""
+        self, account: str, plugin: str, enabled: bool, surface: str = "api"
     ) -> dict[str, Any]:
         """Enable/disable a plugin on an account (lifecycle hooks fire)."""
         normalized = parse_bool(enabled, "enabled")
+        # fail closed BEFORE any state moves (PR review 2026-11-18):
+        # reconcile_plugin_cogs is silently no-op on an unknown account,
+        # so without this the audit row below was the only — false —
+        # witness that a toggle happened
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
         await self._plugins.set_enabled(account, plugin, normalized)
         # the command face follows the toggle NOW (assignment ∧ enabled)
         await self._accounts.reconcile_plugin_cogs(account)
