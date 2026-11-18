@@ -446,11 +446,10 @@ async def _live_log_window(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
         unsubscribe()
-        # if the window was cancelled, the cancellation propagates OUT
-        # (the caller's finally/teardown must see it)
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            raise asyncio.CancelledError
+        # window cancellation propagates NATURALLY after this finally:
+        # Python re-raises the pending CancelledError once the finally
+        # completes — no explicit re-raise needed (and none possible on
+        # 3.10 without Task.cancelling(), which is 3.11+)
     closing = f"--- live log closed ({rendered} lines shown; back on the CLI ---"
     if omitted_on_overflow and streamed.empty():
         return f"{closing} [{omitted_on_overflow} row(s) dropped at peak volume]"
