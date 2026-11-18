@@ -311,12 +311,20 @@ class _TerminalTriggerNursery:
         for task in tasks:
             task.cancel()
         if tasks:
-            # asyncio.wait absorbs each child's outcome; the SHIELD
-            # means a caller cancellation arriving DURING the wait
-            # cannot interrupt the reaping — the cleanup completes
-            # (every child reaped), and the cancellation propagates
-            # after the shield (PR review round 8: finish cleanup)
-            await asyncio.shield(asyncio.wait(tasks))
+            # asyncio.wait absorbs each child's outcome. The shield
+            # alone is NOT enough (PR #27 round 7 review): a caller
+            # cancellation surfaces at the shield IMMEDIATELY while
+            # the reap keeps running detached — shutdown would then
+            # march on and close the very dependencies the retained
+            # triggers are still unwinding against. Retain the join
+            # and FINISH it before the cancellation propagates.
+            reap = asyncio.ensure_future(asyncio.wait(tasks))
+            try:
+                await asyncio.shield(reap)
+            except asyncio.CancelledError:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reap
+                raise
 
 
 class Framework:
