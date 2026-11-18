@@ -419,6 +419,9 @@ class Harness:
             f"OWNER_USER_IDS={OWNER_ID}\n"
             f"PRIMARY_BOT_ID={PRIMARY_BOT_ID}\n"
         )
+        # 0600: the boot-time security audit warns on group/world-readable
+        # credential files, and the backfill now SURFACES that warning
+        env_file.chmod(0o600)
         self._stage_plugins(self.workdir / "plugins")
 
         self.world = SimWorld(responder_id=PRIMARY_BOT_ID, reply_delay=0.01)
@@ -448,6 +451,12 @@ class Harness:
             }
         )
         database = Database(str(self.workdir / "libzent.db"))
+        # ARMED BEFORE BUILD: the loop exception handler catches
+        # unretrieved task exceptions raised while booting — even when
+        # the boot still SUCCEEDS. The log/audit subscribers attach
+        # after (the services must exist), and the rows bootstrap
+        # already emitted are backfilled below.
+        self._arm_loop_handler()
         self.framework = await build(
             config_dir=str(config_dir),
             plugin_dir=str(self.workdir / "plugins"),
@@ -458,6 +467,7 @@ class Harness:
             env_file=str(env_file),
         )
         self._install_capture()
+        await self._replay_bootstrap_rows()
 
     @staticmethod
     def _stage_plugins(target: Path) -> None:
@@ -493,11 +503,82 @@ class Harness:
         if self.workdir is not None and not self._keep_workdir:
             shutil.rmtree(self.workdir, ignore_errors=True)
 
+    def _remove_workdir(self) -> None:
+        """Delete the disposable workdir (kept with --keep-workdir)."""
+        if self.workdir is not None and not self._keep_workdir:
+            shutil.rmtree(self.workdir, ignore_errors=True)
+
     # ------------------------------------------------------ anomaly capture
+    def _arm_loop_handler(self) -> None:
+        """Install the loop exception handler (unhandled task wreckage
+        becomes a CRITICAL finding instead of a stderr print). Runs
+        BEFORE build so bootstrap-time wreckage is captured too."""
+        loop = asyncio.get_running_loop()
+        self._prior_handler = loop.get_exception_handler()
+
+        def on_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            message = str(context.get("message") or "unhandled loop exception")
+            exc = context.get("exception")
+            detail = f"{type(exc).__name__}: {exc}" if exc is not None else ""
+            task = context.get("task") or context.get("future")
+            task_name = getattr(task, "get_name", lambda: "?")()
+            self.report(
+                severity="critical",
+                summary=f"unhandled asyncio exception ({message})",
+                evidence=[line for line in (message, detail, f"task={task_name}") if line],
+                expectation=(
+                    "every framework task retrieves or handles its exception "
+                    "(no 'Task exception was never retrieved' wreckage)"
+                ),
+                actual=(detail or message) + f" [task={task_name}]",
+                repro=f"{self._phase}/loop-exception",
+            )
+
+        loop.set_exception_handler(on_loop_exception)
+
+    async def _replay_bootstrap_rows(self) -> None:
+        """Backfill: rows the bootstrap itself emitted BEFORE the
+        subscribers could attach are still in the ring — classify them
+        so a SUCCESSFUL boot's anomalies become findings too."""
+        subscribed_at = time.time()
+        for row in await self.api.logs_tail(n=400):
+            if float(row.get("ts") or 0) >= subscribed_at:
+                continue  # live capture owns these; never double-report
+            verdict = classify_log_entry(
+                str(row.get("severity") or ""),
+                str(row.get("source") or ""),
+                str(row.get("message") or ""),
+                str(row.get("event") or "") or None,
+            )
+            if verdict is not None:
+                self.report(
+                    severity=verdict,
+                    summary=f"bootstrap row: {str(row.get('message'))[:160]}",
+                    evidence=[
+                        format_log_row(
+                            str(row.get("severity") or ""),
+                            str(row.get("source") or ""),
+                            str(row.get("message") or ""),
+                        )
+                    ],
+                    expectation="a successful bootstrap emits no ERROR rows or contract warnings",
+                    actual=format_log_row(
+                        str(row.get("severity") or ""),
+                        str(row.get("source") or ""),
+                        str(row.get("message") or ""),
+                    ),
+                    repro="boot/bootstrap-backfill",
+                )
+        # seed the audit evidence tail with what boot already recorded
+        for row in await self.api.audit_tail(n=AUDIT_TAIL_MAX):
+            self._audit_tail.append(
+                " ".join(f"{key}={value}" for key, value in sorted(row.items()))
+            )
+
     def _install_capture(self) -> None:
-        """Wire the parallel anomaly window: log subscriber, audit tail,
-        and the loop exception handler (unhandled task wreckage becomes
-        a CRITICAL finding instead of a stderr print)."""
+        """Wire the parallel anomaly window's subscribers: the log
+        classifier and the audit evidence tail (the loop exception
+        handler is armed separately, before build)."""
 
         def on_log(entry: LogEntry) -> None:
             severity = getattr(entry, "severity", "INFO")
@@ -535,29 +616,6 @@ class Harness:
         audit = self.framework.audit
         if audit is not None and hasattr(audit, "subscribe"):
             self._unsub_audit = audit.subscribe(on_audit)
-
-        loop = asyncio.get_running_loop()
-        self._prior_handler = loop.get_exception_handler()
-
-        def on_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-            message = str(context.get("message") or "unhandled loop exception")
-            exc = context.get("exception")
-            detail = f"{type(exc).__name__}: {exc}" if exc is not None else ""
-            task = context.get("task") or context.get("future")
-            task_name = getattr(task, "get_name", lambda: "?")()
-            self.report(
-                severity="critical",
-                summary=f"unhandled asyncio exception ({message})",
-                evidence=[line for line in (message, detail, f"task={task_name}") if line],
-                expectation=(
-                    "every framework task retrieves or handles its exception "
-                    "(no 'Task exception was never retrieved' wreckage)"
-                ),
-                actual=(detail or message) + f" [task={task_name}]",
-                repro=f"{self._phase}/loop-exception",
-            )
-
-        loop.set_exception_handler(on_loop_exception)
 
     def _detach_capture(self) -> None:
         for unsub in (self._unsub_log, self._unsub_audit):
