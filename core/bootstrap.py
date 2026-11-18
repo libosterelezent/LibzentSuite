@@ -310,14 +310,13 @@ class _TerminalTriggerNursery:
         tasks, self._tasks = list(self._tasks), set()
         for task in tasks:
             task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-        # yield once after the suppress loop: if the CALLER was cancelled
-        # while we were inside it, its pending cancellation surfaces at
-        # this next await point (Python's guarantee; on 3.10 there is no
-        # Task.cancelling() to check directly — PR review round 6)
-        await asyncio.sleep(0)
+        if tasks:
+            # asyncio.wait absorbs each child's outcome (cancelled or
+            # failed) without propagating ANY of their exceptions —
+            # while the CALLER's own cancellation surfaces naturally
+            # from the wait itself. This is the one await that needs
+            # no suppress at all (PR review round 6, final form).
+            await asyncio.wait(tasks)
 
 
 class Framework:
