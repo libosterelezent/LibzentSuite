@@ -360,6 +360,48 @@ class TerminalTriggerNurseryTests(unittest.IsolatedAsyncioTestCase):
         refused = nursery.spawn(_slow(), "chain-trigger-late")
         self.assertIsNone(refused)  # the gate closed
 
+    async def test_cancelled_aclose_finishes_the_reap_before_propagating(self) -> None:
+        """PR #27 round 7 review: the shield ALONE surfaced the caller's
+        cancellation immediately while the reap kept running detached —
+        shutdown then closed the very dependencies the retained trigger
+        was still unwinding against. The join must COMPLETE (children
+        terminal, cleanup tails done) before the cancellation
+        propagates."""
+        from core.bootstrap import _TerminalTriggerNursery
+
+        nursery = _TerminalTriggerNursery()
+        started = asyncio.Event()
+        cancel_delivered = asyncio.Event()
+        unwind_done = asyncio.Event()
+
+        async def _slow() -> list[str]:
+            started.set()
+            try:
+                await asyncio.Event().wait()  # parks until cancelled
+            except asyncio.CancelledError:
+                cancel_delivered.set()
+                await asyncio.sleep(0.01)  # the cleanup tail the reap owes
+                unwind_done.set()
+                raise
+            return []
+
+        task = nursery.spawn(_slow(), "chain-trigger-unwind")
+        assert task is not None
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+
+        owner = asyncio.create_task(nursery.aclose())
+        # deterministic: aclose has cancelled the children and is parked
+        # on the shielded join before we cancel IT
+        await asyncio.wait_for(cancel_delivered.wait(), timeout=5.0)
+        owner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+
+        # the cancellation surfaced only AFTER the child's cleanup tail
+        # ran — a detached reap would leave this unset
+        self.assertTrue(unwind_done.is_set())
+        self.assertTrue(task.done())
+
     async def test_done_task_exception_is_retrieved(self) -> None:
         from core.bootstrap import _TerminalTriggerNursery
 
