@@ -1874,26 +1874,47 @@ async def phase_simulation(h: Harness) -> None:
 
     # POSITIVE check at the CURRENT `--sim` default: main.py points the
     # runner at the workload fixtures (tests/fixtures/sim_plugins)
-    default_runner = SimulationRunner(plugin_dir=str(SCENARIO_FIXTURES))
-    try:
-        report = await asyncio.wait_for(
-            default_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S
+    # POSITIVE check through the CLI ENTRYPOINT — the exact command the
+    # operator types (``python main.py --sim export_basic``), so the
+    # default plugin dir, exit code, and summary line are all exercised
+    # as shipped rather than through the internal runner
+    async def run_cli_sim() -> tuple[int | None, str]:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(REPO_ROOT / "main.py"),
+            "--sim",
+            "export_basic",
+            cwd=str(REPO_ROOT),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
-        failures = list(report.get("failures") or [])
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=SCENARIO_BUDGET_S)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            raise
+        lines = out.decode("utf-8", errors="replace").strip().splitlines()
+        summary = next(
+            (line for line in lines if line.startswith("scenario")), lines[0] if lines else ""
+        )
+        return proc.returncode, summary
+
+    try:
+        returncode, summary_line = await run_cli_sim()
         h.expect(
-            not failures,
-            what="export_basic passes at the current --sim default (workload fixtures)",
-            expectation="scenario passes (main.py --sim default shape)",
-            actual=f"{len(failures)} failure(s): {failures[:3]}",
+            returncode == 0,
+            what="main.py --sim export_basic exits clean (the operator's command)",
+            expectation="exit 0 with a passing summary",
+            actual=f"exit={returncode} last line={summary_line!r}",
         )
     except asyncio.TimeoutError:
         h.expect(
             False,
-            what="export_basic respects its budget",
-            expectation="scenario returns in <=120s",
+            what="main.py --sim export_basic respects its budget",
+            expectation="returns in <=120s",
             actual="timed out",
         )
-
     # SEPARATE override case: an EXPLICIT --plugins override to the
     # production dir finds no exporter workload there — the scenario
     # must fail loudly, never pass vacuously
