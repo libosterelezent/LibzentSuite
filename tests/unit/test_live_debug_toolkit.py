@@ -158,6 +158,32 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(live_debug.classify_log_entry("error", "x", "y"), "major")
 
 
+class PhaseSelectionTests(unittest.TestCase):
+    """select_phases: validate first, registry order, no file side effects."""
+
+    def test_typo_is_rejected_before_any_findings_file_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(KeyError):
+                live_debug.select_phases(["typo"])
+            self.assertEqual(list(Path(tmp).iterdir()), [])  # nothing created
+
+    def test_argument_order_never_reorders_the_pass(self) -> None:
+        # --phase shutdown --phase accounts must still run accounts first
+        chosen = live_debug.select_phases(["shutdown", "accounts"])
+        self.assertEqual([phase.name for phase in chosen], ["accounts", "shutdown"])
+
+    def test_a_single_phase_runs_alone(self) -> None:
+        self.assertEqual(
+            [phase.name for phase in live_debug.select_phases(["rate-limits"])], ["rate-limits"]
+        )
+
+    def test_empty_selection_means_every_phase(self) -> None:
+        self.assertEqual(
+            [phase.name for phase in live_debug.select_phases([])],
+            [phase.name for phase in live_debug.PHASES],
+        )
+
+
 class PhaseRegistryTests(unittest.TestCase):
     def test_every_phase_name_resolves(self) -> None:
         for phase in live_debug.PHASES:

@@ -2009,6 +2009,20 @@ PHASES: tuple[Phase, ...] = (
 _PHASE_INDEX: dict[str, Phase] = {phase.name: phase for phase in PHASES}
 
 
+def select_phases(selected: Sequence[str]) -> list[Phase]:
+    """Validate EVERY name first (a typo must be rejected before any
+    findings file is created), then return the matching phases in
+    REGISTRY order — argument order never reorders the pass, so
+    ``--phase shutdown --phase accounts`` still runs accounts first.
+    A single name runs alone; an empty selection means every phase."""
+    unknown = [name for name in selected if name not in _PHASE_INDEX]
+    if unknown:
+        known = ", ".join(_PHASE_INDEX)
+        raise KeyError(f"unknown phase(s) {unknown} (known: {known})")
+    chosen = set(selected)
+    return [phase for phase in PHASES if phase.name in chosen] or list(PHASES)
+
+
 def phase_by_name(name: str) -> Phase:
     """Resolve one phase (KeyError names the known set — typo trap)."""
     try:
@@ -2039,9 +2053,9 @@ async def run_pass(
         f"run-{time.strftime('%Y%m%dT%H%M%S', time.localtime(now_ns / 1_000_000_000))}"
         f"{now_ns % 1_000_000_000:09d}-{uuid4().hex[:8]}"
     )
+    phases = select_phases(selected)  # validates BEFORE the findings file opens
     findings = FindingsWriter(findings_dir / f"{run_id}.jsonl")
     console = console or Console()
-    phases = [phase_by_name(name) for name in selected] or list(PHASES)
     summary: dict[str, Any] = {
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "phases": [],
