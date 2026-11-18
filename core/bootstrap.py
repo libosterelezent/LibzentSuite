@@ -311,12 +311,12 @@ class _TerminalTriggerNursery:
         for task in tasks:
             task.cancel()
         if tasks:
-            # asyncio.wait absorbs each child's outcome (cancelled or
-            # failed) without propagating ANY of their exceptions —
-            # while the CALLER's own cancellation surfaces naturally
-            # from the wait itself. This is the one await that needs
-            # no suppress at all (PR review round 6, final form).
-            await asyncio.wait(tasks)
+            # asyncio.wait absorbs each child's outcome; the SHIELD
+            # means a caller cancellation arriving DURING the wait
+            # cannot interrupt the reaping — the cleanup completes
+            # (every child reaped), and the cancellation propagates
+            # after the shield (PR review round 8: finish cleanup)
+            await asyncio.shield(asyncio.wait(tasks))
 
 
 class Framework:

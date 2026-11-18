@@ -441,10 +441,12 @@ async def _live_log_window(
         for task in owned:
             if task is not None:
                 task.cancel()
-        for task in owned:
-            if task is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+        if owned:
+            # shielded: a cancellation arriving DURING the child reaping
+            # cannot interrupt the cleanup — the children are reaped,
+            # the unsubscribe runs, and the cancellation propagates
+            # naturally after the shield (PR review round 8)
+            await asyncio.shield(asyncio.wait({t for t in owned if t is not None}))
         unsubscribe()
         # window cancellation propagates NATURALLY after this finally:
         # Python re-raises the pending CancelledError once the finally
