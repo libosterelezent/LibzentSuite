@@ -168,8 +168,12 @@ def _deliberate_row(severity: str, source: str, message: str, event: str | None)
     substring.
     """
     lowered = message.lower()
-    if event in ("AccountFailed", "AccountDisconnected"):
-        return "estop" in lowered
+    # the EXPECTED estop echo: the AccountDisconnected lifecycle record
+    # from the events source (the harness stops accounts on purpose).
+    # Matched by event name + source exactly — AccountFailed is NEVER
+    # expected (a real failure), and message words are not consulted
+    if event == "AccountDisconnected" and source == "events":
+        return True
     if severity == "ERROR":
         # the account manager's estop announcement is ERROR-loud BY
         # DESIGN: exact source + exact prefix, nothing broader

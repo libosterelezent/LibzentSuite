@@ -160,6 +160,33 @@ class ClassifierTests(unittest.TestCase):
             "major",
         )
 
+    def test_the_estop_disconnect_lifecycle_row_is_an_observation(self) -> None:
+        # the harness's deliberate estop echoes as this exact record:
+        # event name + events source, message words never consulted
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "WARNING", "events", "status='stopped' account='gamma'", event="AccountDisconnected"
+            ),
+            "observation",
+        )
+
+    def test_account_failed_is_never_an_observation(self) -> None:
+        # a failed account is a real failure even when the message
+        # mentions estop — the old substring match suppressed it
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "ERROR", "events", "estop-driven crash", event="AccountFailed"
+            ),
+            "major",
+        )
+        # wrong source: not the events lifecycle record, so the mention
+        # changes nothing — ordinary chatter classifies as None
+        self.assertIsNone(
+            live_debug.classify_log_entry(
+                "WARNING", "plugins", "estop mentioned here", event="AccountDisconnected"
+            )
+        )
+
     def test_scheduler_cancellation_receipts_are_observations(self) -> None:
         self.assertEqual(
             live_debug.classify_log_entry("WARNING", "scheduler", "task 7 was cancelled"),
