@@ -1440,12 +1440,23 @@ class ControlAPI:
         self._audit_mgmt("system", "mgmt:plugin.unloaded", surface, extra=f"plugin={plugin}")
         return out
 
-    async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> dict[str, Any]:
+    async def plugins_set_enabled(
+        self, account: str, plugin: str, enabled: bool, surface: str = ""
+    ) -> dict[str, Any]:
         """Enable/disable a plugin on an account (lifecycle hooks fire)."""
-        await self._plugins.set_enabled(account, plugin, parse_bool(enabled, "enabled"))
+        normalized = parse_bool(enabled, "enabled")
+        await self._plugins.set_enabled(account, plugin, normalized)
         # the command face follows the toggle NOW (assignment ∧ enabled)
         await self._accounts.reconcile_plugin_cogs(account)
-        return {"account": account, "plugin": plugin, "enabled": enabled}
+        # the command-surface mutation rides the mgmt trail (PR review
+        # 2026-11-18): the toggle adds/removes the plugin's chat commands
+        self._audit_mgmt(
+            account,
+            f"mgmt:plugin.{'enabled' if normalized else 'disabled'}",
+            surface,
+            extra=f"plugin={plugin}",
+        )
+        return {"account": account, "plugin": plugin, "enabled": normalized}
 
     async def plugins_settings(self, account: str) -> list[dict[str, Any]]:
         """Resolved settings per plugin for one account."""

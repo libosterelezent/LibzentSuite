@@ -1782,18 +1782,21 @@ class LiveLogWindowTests(unittest.IsolatedAsyncioTestCase):
                         "severity": "INFO",
                         "source": "test",
                         "message": "live-row",
-                        "account": None,
+                        "account": "alpha",
                         "plugin": None,
                         "event": None,
                     }
                 )
             )
-            # let the woken reader reschedule under ANY runner (the
-            # isolated-test loop coalesces zero-sleeps differently than
-            # a plain asyncio.run — the row must land before the close)
-            for _ in range(6):
-                await asyncio.sleep(0)
-            await asyncio.sleep(0.02)
+
+            # explicit synchronization on the OBSERVABLE (PR review:
+            # no yield loops, no wall-clock sleeps): wait until the row
+            # has actually rendered to the window's stream, then return
+            async def _row_rendered() -> None:
+                while "live-row" not in out.getvalue():
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(_row_rendered(), timeout=5.0)
             return "q"
 
         summary = await run_command(api, "log alpha --live", input_feed=feed, out=out)

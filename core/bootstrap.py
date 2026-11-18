@@ -263,6 +263,46 @@ def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple[float
     return interval, jmin, jmax
 
 
+class _TerminalTriggerNursery:
+    """Owns the independent terminal-trigger tasks (the re-entrancy fix
+    that took chain dispatch off the publisher's stack). PR review
+    2026-11-18: retention without an owner let a suspended trigger
+    resume AFTER its dependencies closed — spawn now refuses new work
+    once teardown begins, and aclose() cancels + awaits everything
+    retained BEFORE the shutdown steps below it run."""
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task[list[str]]] = set()
+        self._closing = False
+
+    def spawn(self, coro: Any, name: str) -> asyncio.Task[list[str]] | None:
+        """Start one trigger task; None (no work) once closing."""
+        if self._closing:
+            return None  # teardown: chain triggers stop being accepted
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._reap)
+        return task
+
+    @staticmethod
+    def _reap(task: asyncio.Task[list[str]]) -> None:
+        # retrieved always: an un-retrieved exception is the wreckage
+        # class this nursery exists to prevent
+        if not task.cancelled():
+            with contextlib.suppress(Exception):
+                task.exception()
+
+    async def aclose(self) -> None:
+        """Close the gate, then cancel + await every retained task."""
+        self._closing = True
+        tasks, self._tasks = list(self._tasks), set()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
 class Framework:
     """The fully wired stack (managers + api), built by :func:`build`."""
 
@@ -287,6 +327,7 @@ class Framework:
         plugin_data: Any = None,
         cooldown_resync_stop: Callable[[], Any] | None = None,
         claims_stderr: bool = False,
+        chain_triggers: _TerminalTriggerNursery | None = None,
     ) -> None:
         self.api = api
         self.bus = bus
@@ -310,6 +351,8 @@ class Framework:
         self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
+        #: owns the terminal-trigger tasks; shutdown closes it FIRST
+        self.chain_triggers = chain_triggers or _TerminalTriggerNursery()
 
         # this framework holds one CLAIM on the process-global stderr
         # pipeline — shutdown releases it (the last release stops)
@@ -336,6 +379,10 @@ class Framework:
             return
         self._shut_down = True
         steps = [
+            # FIRST: stop accepting + reap chain triggers — their steps
+            # send through the scheduler and publish on the bus, so they
+            # must be down before either drains (PR review 2026-11-18)
+            ("chain triggers", self.chain_triggers.aclose),
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
             # stop the reconciler's periodic pass BEFORE the drains so its
@@ -729,11 +776,12 @@ async def _assemble(
     # loop, which is the very stack publish_nowait dispatches on — inline
     # await deadlocks the run in 'running' (found live by the toolkit's
     # strengthened predicates, 2026-11-17; direct invoke_handler completed
-    # fine, isolating the re-entrancy).
-    _chain_trigger_tasks: set[asyncio.Task[list[str]]] = set()
+    # fine, isolating the re-entrancy). The NURSERY owns them: shutdown
+    # stops acceptance and reaps before dependencies close.
+    chain_triggers = _TerminalTriggerNursery()
 
     def _spawn_chain_trigger(event: TaskCompleted | TaskFailed, kind: str) -> None:
-        task = asyncio.create_task(
+        chain_triggers.spawn(
             chain_runtime.on_terminal(
                 TerminalTrigger(
                     account=event.account,
@@ -744,15 +792,6 @@ async def _assemble(
             ),
             name=f"chain-trigger-{kind}-{event.task_id}",
         )
-        _chain_trigger_tasks.add(task)
-
-        def _reap(t: asyncio.Task[list[str]]) -> None:
-            _chain_trigger_tasks.discard(t)
-            if not t.cancelled():
-                with contextlib.suppress(Exception):
-                    t.exception()  # retrieved: never "exception was never retrieved"
-
-        task.add_done_callback(_reap)
 
     async def _on_task_completed(event: TaskCompleted) -> None:
         _spawn_chain_trigger(event, "task_completed")
@@ -1025,4 +1064,5 @@ async def _assemble(
         plugin_state=plugin_state,
         cooldown_resync_stop=_stop_cooldown_resync_task,
         claims_stderr=stderr_claimed,
+        chain_triggers=chain_triggers,
     )

@@ -11,6 +11,7 @@ reconciliation never blindly replays.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -333,3 +334,43 @@ class WorkspaceReconcilerLoopTests(unittest.IsolatedAsyncioTestCase):
         # no pending-exception wreckage: cancelled OR clean, never failed
         if rec._task is not None:
             self.assertTrue(rec._task.cancelled() or rec._task.exception() is None)
+
+
+class TerminalTriggerNurseryTests(unittest.IsolatedAsyncioTestCase):
+    """The shutdown owner (PR review 2026-11-18): spawn refuses new work
+    once closing; aclose cancels AND awaits every retained task; a done
+    task's exception is retrieved (never 'was never retrieved')."""
+
+    async def test_spawn_refuses_after_close_and_tasks_are_reaped(self) -> None:
+        from core.bootstrap import _TerminalTriggerNursery
+
+        nursery = _TerminalTriggerNursery()
+        started = asyncio.Event()
+
+        async def _slow() -> list[str]:
+            started.set()
+            await asyncio.Event().wait()  # parks until cancelled
+            return []
+
+        task = nursery.spawn(_slow(), "chain-trigger-test")
+        assert task is not None
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        await nursery.aclose()
+        self.assertTrue(task.cancelled() or task.done())
+        refused = nursery.spawn(_slow(), "chain-trigger-late")
+        self.assertIsNone(refused)  # the gate closed
+
+    async def test_done_task_exception_is_retrieved(self) -> None:
+        from core.bootstrap import _TerminalTriggerNursery
+
+        nursery = _TerminalTriggerNursery()
+
+        async def _boom() -> list[str]:
+            raise RuntimeError("trigger exploded")
+
+        task = nursery.spawn(_boom(), "chain-trigger-boom")
+        assert task is not None
+        with contextlib.suppress(RuntimeError):
+            await task
+        # the nursery's reaper retrieved it: no warning wreckage
+        await nursery.aclose()

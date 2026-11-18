@@ -322,10 +322,25 @@ async def _live_log_window(
         _emit(_log_line(entry))
     streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
+    def _selected(entry: Any) -> bool:
+        """The SAME selection the initial tail applied: one account's
+        rows (or the suite's account-less rows for global-log), at the
+        requested severity (PR review 2026-11-18 — the stream used to
+        show EVERY entry regardless of the filters)."""
+        with contextlib.suppress(Exception):
+            row = entry.as_dict()
+            if account is not None and row.get("account") != account:
+                return False
+            if account is None and row.get("account"):
+                return False
+            return severity is None or row.get("severity") == severity
+        return False
+
     def _on_entry(entry: Any) -> None:
         # a live window must never break the log path
         with contextlib.suppress(Exception):
-            streamed.put_nowait(entry.as_dict())
+            if _selected(entry):
+                streamed.put_nowait(entry.as_dict())
 
     unsubscribe = svc.subscribe(_on_entry)
     rendered = len(entries)
@@ -356,8 +371,10 @@ async def _live_log_window(
             # stop signal exits the window exactly like a keypress would
             waits: list[asyncio.Future[Any]] = [feed_task, entry_task, stop_waiting]
             done, _pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            rendered_this_wait = False
             if entry_task in done:
                 rendered += 1
+                rendered_this_wait = True
                 _emit(_log_line(entry_task.result()))
             if feed_task in done:
                 # retrieve the outcome: a FAILED input task (the feed
@@ -373,7 +390,15 @@ async def _live_log_window(
                 if entry_task is not None and entry_task not in done:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait({entry_task}, timeout=0.05)
-                if entry_task is not None and entry_task.done() and not entry_task.cancelled():
+                if (
+                    entry_task is not None
+                    and entry_task.done()
+                    and not entry_task.cancelled()
+                    and not rendered_this_wait
+                ):
+                    # late completion only — the wait block above already
+                    # rendered a simultaneous completion (PR review:
+                    # the same row must not print twice)
                     rendered += 1
                     _emit(_log_line(entry_task.result()))
                 while not streamed.empty():
