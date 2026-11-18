@@ -16,6 +16,37 @@ nothing can ship until that hold is lifted; see
 
 ## [Unreleased]
 
+### Fixed
+- PR #27 review round 7 (2026-11-18), all nine findings:
+  `ControlAPI.plugins_set_enabled` now validates the account and
+  plugin BEFORE any state moves (an unknown account used to get a
+  success echo plus an audit row — reconcile was silently no-op), and
+  its `surface` default matches every sibling mutation (`"api"`);
+  `AccountManager.reconcile_plugin_cogs` fails closed on unknown
+  accounts and takes back cogs it freshly hosted when a `stop()`
+  lands mid-pass (the pre-await bot could leave a cog attached to a
+  disconnected client); `Framework.shutdown()` records cleanup
+  failures on `shutdown_failures` (the warnings died with the
+  detaching log bridge — a failing `database.close()` still read as a
+  graceful shutdown); the live-debug harness passes `db_path` so the
+  plugin-data side-car and the credential key stay in its disposable
+  workdir instead of the live `state/` (the same gap in the
+  integration/hardening test boots is closed with it); the harness's
+  `follow-burst` chain definition carries its required `name` and is
+  validated through `ChainRuntime.parse_definition` before persisting
+  (a nameless row could never match its trigger and blocked signal
+  intake workspace-wide); the chain probes' actor/follower roles are
+  split into `ldp_worker`/`ldp_follower` fixture plugins (the
+  follower's sends re-matched ldp_worker's own terminal trigger and
+  its handler re-emitted `chain-done` — the probe self-perpetuated
+  runs); `scripts/local-ci.sh` parses `--review` anywhere on the
+  command line (it was only checked as `$2`, so
+  `./local-ci.sh --review` skipped the review while still declaring
+  "safe to push") and scopes the persistent Python 3.10 venv to the
+  checkout with an flock through the 3.10 leg (two checkouts with
+  different lockfiles used to mutate one shared environment under
+  each other's running tests).
+
 ### Changed
 - Implemented contracts moved from `docs/plans/` into the binding
   architecture document (rev 4.0): the two-level data model (new §4a),
