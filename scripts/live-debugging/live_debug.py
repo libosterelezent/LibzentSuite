@@ -1790,8 +1790,8 @@ async def phase_observability(h: Harness) -> None:
 
 
 async def phase_simulation(h: Harness) -> None:
-    """The simulator surface itself: the facade verb + a healthy-baseline
-    scenario run over the repo's workload fixtures."""
+    """The simulator surface: the facade verb, the CURRENT --sim default
+    positively, and the production-dir override failing honestly."""
     from adapters.simulator import SimulationRunner
 
     scenarios = await h.step("simulation_list", h.api.simulation_list)
@@ -1802,16 +1802,18 @@ async def phase_simulation(h: Harness) -> None:
         expectation="export_basic among the six",
         actual=str(names),
     )
-    # production shape: a runner over the PRODUCTION plugin dir (what
-    # `main.py --sim` does today)
-    prod_runner = SimulationRunner(plugin_dir=str(REPO_ROOT / "plugins"))
+    # POSITIVE check at the CURRENT `--sim` default: main.py points the
+    # runner at the workload fixtures (tests/fixtures/sim_plugins)
+    default_runner = SimulationRunner(plugin_dir=str(SCENARIO_FIXTURES))
     try:
-        report = await asyncio.wait_for(prod_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S)
+        report = await asyncio.wait_for(
+            default_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S
+        )
         failures = list(report.get("failures") or [])
         h.expect(
             not failures,
-            what="export_basic passes with the production plugin dir",
-            expectation="scenario passes (main.py --sim shape)",
+            what="export_basic passes at the current --sim default (workload fixtures)",
+            expectation="scenario passes (main.py --sim default shape)",
             actual=f"{len(failures)} failure(s): {failures[:3]}",
         )
     except asyncio.TimeoutError:
@@ -1821,18 +1823,28 @@ async def phase_simulation(h: Harness) -> None:
             expectation="scenario returns in <=120s",
             actual="timed out",
         )
-    # healthy baseline: the workload fixtures the scenarios script against
-    fixture_runner = SimulationRunner(plugin_dir=str(SCENARIO_FIXTURES))
+    # SEPARATE override case: an EXPLICIT --plugins override to the
+    # production dir finds no exporter workload there — the scenario
+    # must fail loudly, never pass vacuously
+    prod_runner = SimulationRunner(plugin_dir=str(REPO_ROOT / "plugins"))
     try:
-        base = await asyncio.wait_for(fixture_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S)
+        override = await asyncio.wait_for(
+            prod_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S
+        )
+        override_failures = list(override.get("failures") or [])
+        h.expect(
+            bool(override_failures),
+            what="explicit production-dir override fails honestly (no workload)",
+            expectation="scenario reports its send failures, not a vacuous pass",
+            actual=f"{len(override_failures)} failure(s): {override_failures[:2]}",
+        )
     except asyncio.TimeoutError:
-        base = {"passed": False, "failures": ["timed out"], "summary": "timed out"}
-    h.expect(
-        bool(base.get("passed")),
-        what="export_basic passes over the sim workload fixtures",
-        expectation="scenario passes (baseline)",
-        actual=str(base.get("summary")),
-    )
+        h.expect(
+            False,
+            what="production-dir override respects its budget",
+            expectation="scenario returns in <=120s",
+            actual="timed out",
+        )
 
 
 async def phase_shutdown(h: Harness) -> None:

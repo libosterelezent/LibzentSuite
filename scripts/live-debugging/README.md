@@ -74,7 +74,7 @@ Open a second terminal with `--watch` to tail the findings file live
 | 10 | `presets` | workspace-presets | settings-template preset create/preview/apply (revision guard)/detach/stale-preview refusal; P8 reference-style definitions + execution start/checkpoint/resume |
 | 11 | `chains-signals` | chains-signals | chain definition (terminal trigger on `TaskCompleted`), A-acts-B-follows run + step execution, durable signal emission through the outbox, reconciler delivery (bounded wait over one 30 s sweep) firing the signal-triggered chain |
 | 12 | `observability` | audit-observability | account-filtered / global (`global-log`) / severity-filtered log tails, log stats, audit history incl. mgmt rows, bus lifecycle event rows |
-| 13 | `simulation` | simulator-scenarios | the `simulation_list` facade verb; `export_basic` with the PRODUCTION plugin dir (the `main.py --sim` shape) and over the repo's sim workload fixtures (baseline) |
+| 13 | `simulation` | simulator-scenarios | the `simulation_list` facade verb; `export_basic` at the CURRENT `--sim` default (the workload fixtures), plus an explicit production-dir `--plugins` override case that must fail honestly (no workload there) |
 | 14 | `shutdown` | framework | graceful ordered teardown with a no-new-anomalies check |
 
 The toolkit's workload fixture `plugins/ldp_worker/` (staged beside the
@@ -146,19 +146,21 @@ patching the framework:
    looks for the adapter's library Bot on `runtime.client._client`;
    the sim client has none, so cogs never host on sim boots. The
    harness hosts the cog itself to exercise the command face.
-6. **`main.py --sim` points the runner at `plugins/`** which no longer
-   carries the exporter workload (it moved to
-   `tests/fixtures/sim_plugins`) — every scenario fails there today.
-   The `simulation` phase reproduces this and separates it from the
-   healthy fixture-dir baseline.
-
-## Files
+6. **`--sim` with an explicit production `--plugins` override finds no
+   workload.** `main.py --sim` now defaults to
+   `tests/fixtures/sim_plugins` (where the exporter workload lives), but
+   pointing `--plugins plugins` at the production dir still leaves every
+   scenario without its workload. The `simulation` phase runs the
+   default positively and pins the override case to failing HONESTLY
+   (send failures reported, never a vacuous pass).
 7. **Cancelling an in-flight plugin send surfaces as a plugin-crash
    ERROR row** — tasks_cancel_matching aborts the queued task and the
    plugin await re-raises SchedulerError inside handle_event, which the
    isolation boundary logs as a plugin crash. Captured as a finding on
    every run; triage whether the task-ack seam should deliver
    cancellation as a distinct, catchable signal instead.
+
+## Files
 
 - `live_debug.py` — the runner (phases, capture, findings, watch).
 - `plugins/ldp_worker/` — the toolkit's workload fixture plugin.
