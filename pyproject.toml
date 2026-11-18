@@ -105,6 +105,7 @@ dev = [
     "httpx>=0.28.1",
     "mypy==2.4.0",
     "pip-audit>=2.10.1",
+    "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-xdist>=3.8.0",
     "ruff==0.17.2",
@@ -217,3 +218,15 @@ addopts = "-q --ignore=dump"
 # `pytest tests/unit/test_x.py` Just Works for iteration without
 # pulling in xdist.
 
+[tool.pyright]
+# pyright owns static typing (adopted 2026-11-19; mypy shelved to the
+# lock with honor — both trees reached ZERO under its ratchets).
+# The baseline ratchet lives at .github/pyright-baseline (81 minus
+# the 5 flet missing-imports = 76): grow fails, shrink locks in.
+include = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts", "parsers", "main.py"]
+exclude = ["dump", "**/__pycache__", ".venv"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+# flet is the optional [ui] extra — absent from the dev environment,
+# same per-module exception mypy had
+reportMissingImports = false

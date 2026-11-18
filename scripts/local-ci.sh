@@ -2,8 +2,14 @@
 # local-ci — run the FULL CI gate locally before pushing.
 #
 # Usage:
-#   ./scripts/local-ci.sh          # the full gate (lint, types, export, 3.10 suite, 3.13 suite+coverage, build)
-#   ./scripts/local-ci.sh quick    # lint + types + export-sync only (~1 min)
+#   ./scripts/local-ci.sh                 # the full gate (lint, types, export, 3.10 suite, 3.13 suite+coverage, build)
+#   ./scripts/local-ci.sh quick           # lint + types + export-sync only (~1 min)
+#   ./scripts/local-ci.sh --review        # full gate + CodeRabbit review running concurrent with the suites
+#
+# --review is an OPTION, not a mode: it parses anywhere on the command
+# line and requires the full gate (PR review 2026-11-18 — checking
+# only $2 let "./local-ci.sh --review" skip the review while the
+# verdict still said "safe to push").
 #
 # Mirrors .github/workflows/tests.yml exactly. CI must never see a
 # failure this script did not see first (owner rule, 2026-11-17 —
@@ -32,8 +38,21 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m OK  %s\033[0m\n' "$*"; }
 bad()  { printf '\033[31mFAIL %s\033[0m\n' "$*"; FAIL=1; }
 
-# Per-run scratch workspace: concurrent runs never share logs, the
-# export diff, or the 3.10 environment (CodeRabbit PR #25 review).
+# --review anywhere on the command line (PR review 2026-11-18); the
+# mode word keeps its historical first-position handling.
+REVIEW_FLAG=0
+for arg in "$@"; do
+  if [ "$arg" = "--review" ]; then REVIEW_FLAG=1; fi
+done
+if [ "$REVIEW_FLAG" -eq 1 ] && [ "${1:-}" = "quick" ]; then
+  echo "local-ci: --review needs the full gate (quick mode has no suites to review against)" >&2
+  exit 2
+fi
+
+# Per-run scratch workspace: concurrent runs never share logs or the
+# export diff (CodeRabbit PR #25 review). The 3.10 venv is the one
+# deliberate exception — checkout-scoped and lock-serialized, see
+# step 5/8 below (PR review 2026-11-18).
 RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
 trap 'rm -rf "$RUN_DIR"' EXIT
 
@@ -70,33 +89,16 @@ fi
 # One ratchet per tree. Exit status matters: 0 = clean run, 1 = errors
 # emitted, anything else = the run did not complete — its (possibly
 # empty) log must never count as zero errors.
-mypy_ratchet() {
-  local label="$1" baseline_file="$2" log status=0 errs base
-  log="$RUN_DIR/mypy-$label.log"
-  shift 2
-  "$UV_BIN" run --frozen mypy "$@" &> "$log" || status=$?
-  if [ "$status" -gt 1 ]; then
-    bad "mypy $label did not complete (exit $status) — count rejected"
-    tail -20 "$log"
-    return
-  fi
-  errs=$(grep -c "error:" "$log" || true)
-  base=$(<"$baseline_file")
-  echo "mypy $label errors: $errs (baseline: $base)"
-  if [ "$errs" -eq "$base" ]; then ok "$label == baseline"
-  else
-    # diagnostics BEFORE the exit trap cleans RUN_DIR — a failed gate
-    # must carry its own evidence (CodeRabbit pre-review 2026-11-17).
-    # `|| true`: an empty match must not kill the gate mid-verdict.
-    grep "error:" "$log" | head -20 || true
-    if [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
-    else bad "$label grew ($base -> $errs)"; fi
-  fi
-}
-
-step "4/8 Mypy ratchets — production + tests (split baselines)"
-mypy_ratchet production .github/mypy-baseline main.py core adapters database interfaces plugins benchmark scripts parsers
-mypy_ratchet tests .github/mypy-tests-baseline tests
+step "4/8 Pyright ratchet (errors must equal the baseline exactly)"
+"$UV_BIN" run --frozen pyright --outputjson \
+  core adapters database interfaces plugins benchmark scripts parsers main.py \
+  > "$RUN_DIR/pyright.json" 2>/dev/null || true  # pyright exits 1 on findings
+PYRIGHT_ERRS=$(python3 -c "import json; print(json.load(open('$RUN_DIR/pyright.json'))['summary']['errorCount'])" 2>/dev/null || echo "?")
+PYRIGHT_BASE=$(<.github/pyright-baseline)
+echo "pyright errors: $PYRIGHT_ERRS (baseline: $PYRIGHT_BASE)"
+if [ "$PYRIGHT_ERRS" -eq "$PYRIGHT_BASE" ]; then ok "pyright == baseline"
+elif [ "$PYRIGHT_ERRS" -lt "$PYRIGHT_BASE" ]; then bad "pyright improved — lower .github/pyright-baseline to $PYRIGHT_ERRS in this push"
+else bad "pyright grew ($PYRIGHT_BASE -> $PYRIGHT_ERRS)"; fi
 
 if [ "${1:-}" = "quick" ]; then
   step "quick mode — suites skipped"
@@ -109,7 +111,7 @@ fi
 # contract says both green before push, not sequential). The review
 # output lands in $RUN_DIR/review.ndjson.
 REVIEW_PID=""
-if [ "${2:-}" = "--review" ]; then
+if [ "$REVIEW_FLAG" -eq 1 ]; then
   step "0/8 CodeRabbit review (concurrent with the suites)"
   ("/home/libosterelezent/.local/bin/coderabbit" review --agent \
     --base-commit origin/master --fresh \
@@ -119,12 +121,20 @@ if [ "${2:-}" = "--review" ]; then
 fi
 
 step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
-# PERSISTENT venv (process speed, 2026-11-18): the isolated-per-run venv
-# resolved 90 packages from scratch EVERY gate — minutes of pure waste.
-# The persistent venv at /tmp/opencode/local-ci-venv310 is reused; uv
-# syncs it incrementally (changed deps only). The lock is frozen so
-# the environment is always exactly the lock's resolution.
-VENV310=/tmp/opencode/local-ci-venv310
+# PERSISTENT but CHECKOUT-SCOPED venv (PR review 2026-11-18): the
+# isolated-per-run venv resolved 90 packages from scratch EVERY gate —
+# minutes of pure waste — but one FIXED shared path let two checkouts
+# with different lockfiles mutate the same environment under each
+# other's running tests. The venv is named after THIS checkout's path,
+# and an flock held through the 3.10 leg serializes same-checkout
+# gates; different checkouts never contend. The lock is frozen so the
+# environment is always exactly the lock's resolution.
+VENV310="/tmp/opencode/local-ci-venv310-$(pwd | cksum | cut -d' ' -f1)"
+exec 9>"$VENV310.lock"
+if ! flock -n 9; then
+  echo "       another gate holds this checkout's 3.10 venv — waiting for it to finish..."
+  flock 9
+fi
 if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
   pytest tests/ -q --ignore=./tests/unit/test_rich_model.py -n auto --dist loadscope \
   > "$RUN_DIR/suite-310.log" 2>&1 \
@@ -140,6 +150,7 @@ else
   bad "3.10 suite — $reason"
   grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-310.log" | head -40 || true
 fi
+exec 9>&-  # release the checkout's 3.10 venv — the 3.13 leg uses the project .venv
 report_state_residue
 
 step "6/8 Full suite + coverage floor on 3.13"

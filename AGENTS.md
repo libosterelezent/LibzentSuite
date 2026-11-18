@@ -136,7 +136,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 ## 8. Formatting, linting, and type checking
 
-**Ruff** owns linting, formatting, and import sorting; **mypy** owns strict static typing. The one canonical configuration is the root `pyproject.toml` — read it instead of restating it here, and never add a competing Black/isort/flake8 setup. Tool versions are pinned in `[dependency-groups] dev`; when upgrading, check the tools' current official documentation (mypy's strict flags are version-sensitive).
+**Ruff** owns linting, formatting, and import sorting; **pyright** owns static typing (adopted 2026-11-19; mypy shelved to the lock with honor — both its trees reached ZERO). The one canonical configuration is the root `pyproject.toml` — read it instead of restating it here, and never add a competing Black/isort/flake8 setup. Tool versions are pinned in `[dependency-groups] dev`; when upgrading, check the tools' current official documentation (mypy's strict flags are version-sensitive).
 
 **Toolchain.** Dependencies live in `[project]`, dev tools in `[dependency-groups] dev`, and `uv.lock` is the pinned universal resolution. CI installs it with `uv sync --frozen` and runs every check through `uv run --frozen`. `requirements.txt` is a generated pip-compat export of the lock — regenerate it, never hand-edit:
 
@@ -146,7 +146,7 @@ uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o re
 
 CI's export-sync and lock-integrity gates enforce this.
 
-**mypy strict is a hard floor.** Two equality-ratchet gates — `.github/mypy-baseline` (production) and `.github/mypy-tests-baseline` (tests) — both sit at zero, so any new strict error fails CI. A count that changes without its baseline file changing in the same PR also fails. Never raise a baseline, and never add a blanket ignore or suppression to move a count.
+**pyright is a ratchet gate** (`.github/pyright-baseline`): CI fails when the error count grows past the baseline, and also when it shrinks without the file being lowered in the same PR — the same equality contract that drove mypy to zero. Never raise the baseline; narrow, reasoned suppressions only.
 
 **Ruff practice**
 

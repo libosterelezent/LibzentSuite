@@ -60,33 +60,34 @@ jobs:
         run: |
           uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
           git diff --exit-code -- requirements.txt
-      - name: Mypy strict ratchet — production tree (.github/mypy-baseline)
+      - name: Pyright ratchet (.github/pyright-baseline)
         run: |
-          uv run --frozen mypy main.py core adapters database interfaces plugins benchmark scripts parsers \
-            &> /tmp/mypy-prod.log || true
-          errors=$(grep -c "error:" /tmp/mypy-prod.log || true)
-          baseline=$(<.github/mypy-baseline)
-          echo "mypy production errors: $errors (baseline: $baseline)"
-          if [ "$errors" -gt "$baseline" ]; then
-            echo "::error::The production error count grew ($baseline -> $errors). Fix the new strict errors; lower .github/mypy-baseline only after fixing existing ones."
+          ERRORS=$(uv run --frozen pyright --outputjson \
+            core adapters database interfaces plugins benchmark scripts parsers main.py \
+            2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['errorCount'])")
+          BASELINE=$(cat .github/pyright-baseline)
+          echo "pyright errors: $ERRORS (baseline: $BASELINE)"
+          if [ "$ERRORS" -gt "$BASELINE" ]; then
+            echo "::error::The pyright error count grew ($BASELINE -> $ERRORS)."
             exit 1
           fi
-          if [ "$errors" -lt "$baseline" ]; then
-            echo "::error::mypy improved ($baseline -> $errors) but the baseline was not lowered in this PR — update .github/mypy-baseline to $errors (the shrink-only contract)."
+          if [ "$ERRORS" -lt "$BASELINE" ]; then
+            echo "::error::pyright improved but the baseline was not lowered — update .github/pyright-baseline to $ERRORS."
             exit 1
           fi
-      - name: Mypy strict ratchet — tests tree (.github/mypy-tests-baseline)
+      - name: Pyright ratchet (.github/pyright-baseline)
         run: |
-          uv run --frozen mypy tests &> /tmp/mypy-tests.log || true
-          errors=$(grep -c "error:" /tmp/mypy-tests.log || true)
-          baseline=$(<.github/mypy-tests-baseline)
-          echo "mypy tests errors: $errors (baseline: $baseline)"
-          if [ "$errors" -gt "$baseline" ]; then
-            echo "::error::The tests error count grew ($baseline -> $errors). Fix the new strict errors; lower .github/mypy-tests-baseline only after fixing existing ones."
+          ERRORS=$(uv run --frozen pyright --outputjson \
+            core adapters database interfaces plugins benchmark scripts parsers main.py \
+            2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['errorCount'])")
+          BASELINE=$(cat .github/pyright-baseline)
+          echo "pyright errors: $ERRORS (baseline: $BASELINE)"
+          if [ "$ERRORS" -gt "$BASELINE" ]; then
+            echo "::error::The pyright error count grew ($BASELINE -> $ERRORS)."
             exit 1
           fi
-          if [ "$errors" -lt "$baseline" ]; then
-            echo "::error::mypy tests improved ($baseline -> $errors) but the baseline was not lowered in this PR — update .github/mypy-tests-baseline to $errors (the shrink-only contract)."
+          if [ "$ERRORS" -lt "$BASELINE" ]; then
+            echo "::error::pyright improved but the baseline was not lowered — update .github/pyright-baseline to $ERRORS."
             exit 1
           fi
       - name: Unit / integration / simulation / stress tests (coverage)

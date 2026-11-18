@@ -374,6 +374,15 @@ class Framework:
         # pipeline — shutdown releases it (the last release stops)
         self._claims_stderr = claims_stderr
         self._shut_down = False
+        #: cleanup failures from the last :meth:`shutdown` — one
+        #: ``"step 'database' failed: ..."`` line per failing step.
+        #: shutdown() is fault-tolerant by design (every step runs, the
+        #: caller is never failed), and the root-logger warnings it
+        #: emits stop reaching the structured capture once the log
+        #: bridge detaches mid-teardown; this list is the durable
+        #: witness callers (the live-debug shutdown probe, operators)
+        #: can still read afterwards (PR review 2026-11-18).
+        self.shutdown_failures: list[str] = []
 
     async def shutdown(self) -> None:
         """Graceful: drain the scheduler, stop accounts, detach logging
@@ -390,10 +399,16 @@ class Framework:
         stdlib bridge is removed BEFORE database.close() — otherwise the
         bridge keeps ingesting stdlib lines into a service whose sink is a
         closed database (every write silently failing forever).
+
+        Cleanup failures are recorded on ``self.shutdown_failures``
+        (one line per failing step) in addition to the root-logger
+        warning — a caller cannot otherwise distinguish a clean
+        teardown from a warned one once the bridge is gone.
         """
         if self._shut_down:
             return
         self._shut_down = True
+        self.shutdown_failures = []
         steps = [
             # FIRST: stop accepting + reap chain triggers — their steps
             # send through the scheduler and publish on the bus, so they
@@ -435,16 +450,17 @@ class Framework:
             except asyncio.CancelledError as exc:
                 if interrupted is None:
                     interrupted = exc
-                    ROOT_LOGGER.warning(
-                        "shutdown step %r was cancelled (continuing teardown)", label
-                    )
+                self.shutdown_failures.append(f"step {label!r} was cancelled")
+                ROOT_LOGGER.warning("shutdown step %r was cancelled (continuing teardown)", label)
             except KeyboardInterrupt as exc:  # a second Ctrl-C / the
                 if interrupted is None:  # dashboard's exit signal landing
                     interrupted = exc  # mid-teardown must NOT skip the
+                    self.shutdown_failures.append(f"step {label!r} was interrupted")
                     ROOT_LOGGER.warning(  # remaining steps (db.close!)
                         "shutdown step %r interrupted (continuing teardown)", label
                     )
             except Exception as exc:
+                self.shutdown_failures.append(f"step {label!r} failed: {type(exc).__name__}: {exc}")
                 ROOT_LOGGER.warning(
                     "shutdown step %r failed: %s: %s", label, type(exc).__name__, exc
                 )
