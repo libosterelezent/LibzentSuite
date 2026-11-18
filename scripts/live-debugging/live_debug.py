@@ -700,6 +700,24 @@ class Harness:
                 return False
             await asyncio.sleep(POLL_S)
 
+    async def scan_for_secret(self, tokens: Sequence[str]) -> list[str]:
+        """Where the given secret values surface: EVERY field of every
+        structured log row and every audit row (the message alone was
+        not enough — structured context and audit content could carry a
+        leak the old probes missed). Returns location pointers like
+        ``log[12].account`` / ``audit[3].content`` — never the token
+        itself, so a finding cannot become the leak it reports."""
+        hits: list[str] = []
+        for index, row in enumerate(await self.api.logs_tail(n=400)):
+            for field, value in row.items():
+                if any(token in str(value) for token in tokens):
+                    hits.append(f"log[{index}].{field}")
+        for index, row in enumerate(await self.api.audit_tail(n=400)):
+            for field, value in row.items():
+                if any(token in str(value) for token in tokens):
+                    hits.append(f"audit[{index}].{field}")
+        return hits
+
     async def wait_quiet(
         self, channel: int = GUILD_CHANNEL, *, limit: float = QUIET_LIMIT_S
     ) -> None:
@@ -771,18 +789,18 @@ async def phase_boot(h: Harness) -> None:
         expectation="EnvImportReport dict",
         actual=str(import_status),
     )
-    # the synthetic tokens must never surface in logs or audit rows
+    # the synthetic tokens must never surface anywhere structured: every
+    # field of every log row AND every audit row
     synthetic_tokens = ("sim-token-alpha", "sim-token-beta", "sim-token-gamma")
-    leak_rows = [
-        row
-        for row in await h.api.logs_tail(n=400)
-        if any(token in str(row.get("message", "")) for token in synthetic_tokens)
-    ]
+    leaks = await h.step(
+        "full-field secret scan (logs + audit)",
+        lambda: h.scan_for_secret(synthetic_tokens),
+    )
     h.expect(
-        not leak_rows,
-        what="no credential material in structured logs",
-        expectation="tokens never appear in log rows",
-        actual=f"{len(leak_rows)} leaking row(s)",
+        not leaks,
+        what="no credential material in any structured field",
+        expectation="tokens never appear in any log/audit field",
+        actual=f"leaking fields: {leaks or None}",
     )
 
 
@@ -918,15 +936,16 @@ async def phase_credentials(h: Harness) -> None:
         expectation="mgmt:credential.* rows present",
         actual=f"{len(mgmt)} row(s)",
     )
-    # the rotated token must never surface anywhere
-    leak = [
-        r for r in await h.api.logs_tail(n=400) if "sim-token-alpha-2" in str(r.get("message", ""))
-    ]
+    # the rotated token must never surface in any structured field
+    rotated_leaks = await h.step(
+        "full-field secret scan (rotated token)",
+        lambda: h.scan_for_secret(("sim-token-alpha-2",)),
+    )
     h.expect(
-        not leak,
-        what="rotated token absent from logs",
+        not rotated_leaks,
+        what="rotated token absent from every log/audit field",
         expectation="no leak",
-        actual=f"{len(leak)} row(s)",
+        actual=f"leaking fields: {rotated_leaks or None}",
     )
 
 
