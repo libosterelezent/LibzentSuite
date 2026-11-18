@@ -276,6 +276,11 @@ class _LiveFlag:
         self.on = False
 
 
+#: the close-drain cap (PR review round 4): how many queued rows the
+#: window writes after 'q'/shutdown before reporting the remainder omitted
+_CLOSE_DRAIN_MAX_ROWS = 200
+
+
 def _strip_live(args: list[str]) -> _LiveFlag:
     """Pull the --live / -f switch out of a log verb's args."""
     flag = _LiveFlag(args)
@@ -320,7 +325,10 @@ async def _live_log_window(
     _emit(f"--- live log: {scope} — press q (or Enter) to return ---")
     for entry in entries:
         _emit(_log_line(entry))
-    streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    # bounded (PR review round 4): a burst must not queue unbounded
+    # rows that the close-drain would then write in one blocking run
+    streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=500)
+    omitted_on_overflow = 0
 
     def _selected(entry: Any) -> bool:
         """The SAME selection the initial tail applied: one account's
@@ -337,10 +345,15 @@ async def _live_log_window(
         return False
 
     def _on_entry(entry: Any) -> None:
-        # a live window must never break the log path
+        # a live window must never break the log path; a full queue
+        # DROPS the row (counted) rather than blocking the log emitter
+        nonlocal omitted_on_overflow
         with contextlib.suppress(Exception):
             if _selected(entry):
-                streamed.put_nowait(entry.as_dict())
+                try:
+                    streamed.put_nowait(entry.as_dict())
+                except asyncio.QueueFull:
+                    omitted_on_overflow += 1
 
     unsubscribe = svc.subscribe(_on_entry)
     rendered = len(entries)
@@ -401,9 +414,17 @@ async def _live_log_window(
                     # the same row must not print twice)
                     rendered += 1
                     _emit(_log_line(entry_task.result()))
-                while not streamed.empty():
+                # the close-drain is BOUNDED: a burst backlog must not
+                # turn the close into thousands of blocking writes, and
+                # a slow stream must never delay shutdown past the grace
+                drained = 0
+                while streamed.qsize() and drained < _CLOSE_DRAIN_MAX_ROWS:
                     rendered += 1
+                    drained += 1
                     _emit(_log_line(streamed.get_nowait()))
+                skipped = streamed.qsize() + omitted_on_overflow
+                if skipped:
+                    _emit(f"--- {skipped} row(s) omitted (window closing) ---")
                 break  # any input returns; shutdown returns
     finally:
         # cancel AND reap the WINDOW-OWNED tasks on every exit path —
@@ -419,7 +440,10 @@ async def _live_log_window(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
         unsubscribe()
-    return f"--- live log closed ({rendered} lines shown; back on the CLI ---"
+    closing = f"--- live log closed ({rendered} lines shown; back on the CLI ---"
+    if omitted_on_overflow and streamed.empty():
+        return f"{closing} [{omitted_on_overflow} row(s) dropped at peak volume]"
+    return closing
 
 
 async def _never() -> None:
