@@ -1549,17 +1549,31 @@ async def _ensure_workspace(h: Harness, name: str = "grind") -> None:
 
 
 async def phase_chains_signals(h: Harness) -> None:
-    """Chains + durable signals: terminal trigger, outbox, reconciler."""
+    """Chains + durable signals: terminal trigger, outbox, reconciler —
+    with a SECOND account (beta) as the eligible follower of alpha's
+    burst, so a completed run proves A-acts-B-follows, not self-follow."""
     await h.ensure_account("alpha", ["ping", "ldp_worker"])
     await _ensure_workspace(h, "grind")
+    # beta joins as the FOLLOWER: ldp_worker attached (the handler needs
+    # an active runtime) but with its OWN trigger word, so alpha's burst
+    # word never makes beta react. Both members stay eligible — pausing
+    # alpha would fence ALPHA's own sends at the dispatch guard — so the
+    # chain steps below route EXPLICITLY to beta: a completed run with
+    # target beta proves A-acts-B-follows, never self-follow
+    await h.ensure_account("beta", ["ldp_worker"])
+    await h.step(
+        "point beta's trigger word away from alpha's",
+        lambda: h.api.plugins_set_setting("beta", "ldp_worker", "trigger", "beta-standby"),
+    )
+    await h.step("beta joins grind", lambda: h.api.workspaces_add_account("beta", "grind"))
     repo = h.framework.database.workspaces
     definition = {
         "steps": [
             {
                 "position": 1,
                 "plugin": "ldp_worker",
-                "routing": "first_eligible",
-                "target": "",
+                "routing": "specific_account",
+                "target": "beta",
                 "on": {"task_action": "message", "plugin": "ldp_worker", "event": "task_completed"},
                 "gate": {},
                 "emit": "chain-done",
@@ -1587,14 +1601,34 @@ async def phase_chains_signals(h: Harness) -> None:
         expectation="a run id ABSENT from the baseline reaches status 'completed'",
         actual=f"new runs: {[(r.get('id'), r.get('status')) for r in fresh_runs] or 'none'}",
     )
+    # the follow-up must have executed on BETA — a completed run that
+    # alpha routed back to itself proves nothing about following
+    follow_run = next(
+        (
+            row
+            for row in fresh_runs
+            if row.get("chain_id") == chain_id and str(row.get("status")) == "completed"
+        ),
+        None,
+    )
+    follower = ""
+    if follow_run is not None:
+        steps = await repo.step_executions(str(follow_run.get("id")))
+        follower = next((str(step.get("target") or "") for step in steps), "")
+    h.expect(
+        follower == "beta",
+        what="the follow-up executed on the SECOND account (beta)",
+        expectation="completed follow-burst run routed to beta (alpha initiated the burst)",
+        actual=f"run={follow_run.get('id') if follow_run else None} target={follower!r}",
+    )
     signal_chain = {
         "name": "signal-followup",
         "steps": [
             {
                 "position": 1,
                 "plugin": "ldp_worker",
-                "routing": "first_eligible",
-                "target": "",
+                "routing": "specific_account",
+                "target": "beta",
                 "on": {"signal": "ldp_worker:chain-done"},
                 "gate": {},
                 "emit": "",
