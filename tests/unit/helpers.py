@@ -734,6 +734,14 @@ def fake_discord_sysmodules(lib_cls: Any) -> dict[str, Any]:
             async def process_commands(self, message: Any) -> None:
                 return None
 
+            async def get_context(self, message: Any) -> Any:
+                # the adapter's command-traffic check: context with no
+                # command means ordinary traffic (the DTO path continues)
+                return SimpleNamespace(command=None)
+
+            async def invoke(self, ctx: Any) -> None:
+                return None
+
         return BotStandIn
 
     commands_mod = types.ModuleType("discord.ext.commands")

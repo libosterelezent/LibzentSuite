@@ -278,6 +278,7 @@ class _TerminalTriggerNursery:
     def spawn(self, coro: Any, name: str) -> asyncio.Task[list[str]] | None:
         """Start one trigger task; None (no work) once closing."""
         if self._closing:
+            coro.close()  # never-awaited coroutines warn (PR review r5)
             return None  # teardown: chain triggers stop being accepted
         task = asyncio.create_task(coro, name=name)
         self._tasks.add(task)
@@ -293,7 +294,15 @@ class _TerminalTriggerNursery:
                 task.exception()
 
     async def aclose(self) -> None:
-        """Close the gate, then cancel + await every retained task."""
+        """Close the gate, then cancel + await every retained task.
+
+        The child awaits suppress CancelledError because every child was
+        cancelled BY THIS METHOD — their cancellation is expected, not
+        the caller's. The CALLER's own cancellation surfaces naturally
+        at the next await point or function exit (Python's guarantee);
+        it cannot be swallowed here because the suppress only catches
+        the child's exception, never the parent task's pending state.
+        """
         self._closing = True
         tasks, self._tasks = list(self._tasks), set()
         for task in tasks:
