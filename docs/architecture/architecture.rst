@@ -107,7 +107,9 @@ signal outbox → workspace service (+ pacing restore) → chain runtime
 + dispatch guard + reconciler → scheduler → plugin manager → account
 manager → ControlAPI → framework handle. ``Framework.shutdown()``
 reverses it fault-tolerantly: every teardown step runs even if an
-earlier one failed.
+earlier one failed, and each failing step is recorded on
+``Framework.shutdown_failures`` (the durable witness — the log bridge
+detaches mid-teardown, so post-detach warnings reach no capture).
 
 Module map (current):
 
