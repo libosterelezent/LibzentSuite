@@ -104,8 +104,28 @@ if [ "${1:-}" = "quick" ]; then
   exit "$FAIL"
 fi
 
+# full mode supports a --review flag: the CodeRabbit review runs
+# CONCURRENTLY with the suites (they are independent checks; the
+# contract says both green before push, not sequential). The review
+# output lands in $RUN_DIR/review.ndjson.
+REVIEW_PID=""
+if [ "${2:-}" = "--review" ]; then
+  step "0/8 CodeRabbit review (concurrent with the suites)"
+  ("/home/libosterelezent/.local/bin/coderabbit" review --agent \
+    --base-commit origin/master --fresh \
+    > "$RUN_DIR/review.ndjson" 2>&1) &
+  REVIEW_PID=$!
+  echo "       review running as PID $REVIEW_PID"
+fi
+
 step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
-if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
+# PERSISTENT venv (process speed, 2026-11-18): the isolated-per-run venv
+# resolved 90 packages from scratch EVERY gate — minutes of pure waste.
+# The persistent venv at /tmp/opencode/local-ci-venv310 is reused; uv
+# syncs it incrementally (changed deps only). The lock is frozen so
+# the environment is always exactly the lock's resolution.
+VENV310=/tmp/opencode/local-ci-venv310
+if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
   python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
   ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
 else
@@ -146,6 +166,17 @@ else
 fi
 
 step "8/8 Verdict"
+if [ -n "$REVIEW_PID" ]; then
+  echo "       waiting for the concurrent review (PID $REVIEW_PID)..."
+  wait "$REVIEW_PID" || true
+  if grep -q '"type":"finding"' "$RUN_DIR/review.ndjson" 2>/dev/null; then
+    FINDINGS=$(grep -c '"type":"finding"' "$RUN_DIR/review.ndjson")
+    echo -e "\033[31mREVIEW: $FINDINGS finding(s) — see $RUN_DIR/review.ndjson\033[0m"
+    FAIL=1
+  else
+    echo -e "\033[32mREVIEW: 0 findings\033[0m"
+  fi
+fi
 if [ "$FAIL" -eq 0 ]; then
   echo -e "\n\033[32mALL GATES GREEN — safe to push\033[0m"
 else
