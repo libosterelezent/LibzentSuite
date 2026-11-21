@@ -56,7 +56,14 @@ IMPORT_PREFIX = "$exporter "
 TRIGGER_WORD = "export"
 #: pacing used by pacing_respected and its verification tolerance (seconds)
 PACING_INTERVAL = 1.6
-PACING_TOLERANCE = 0.05
+#: pacing floor slack: interval minus this is the violation threshold. A
+#: REAL violation (limiter bypassed) lands 5-10x under the interval;
+#: the slack only absorbs load skew — one send delayed past its slot
+#: compresses the NEXT measured gap by exactly that delay (the timer
+#: fires from the scheduled instant, not the late actual one).
+#: 50ms absorbed nothing on a loaded gate box; 200ms still catches
+#: every real bypass with an order of magnitude to spare.
+PACING_TOLERANCE = 0.2
 #: simulated 429 wait and the tolerance when verifying the retry gap
 RETRY_AFTER = 0.8
 RETRY_TOLERANCE = 0.3
