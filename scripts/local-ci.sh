@@ -60,7 +60,12 @@ fi
 # deliberate exception — checkout-scoped and lock-serialized, see
 # step 5/8 below (PR review 2026-11-18).
 RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
-trap 'rm -rf "$RUN_DIR"' EXIT
+# Evidence survives a red gate (twice this session, the trap ate the
+# ONLY copy of the review stream and suite logs mid-diagnosis): a
+# failing run's artifacts are copied to the stable scratch area before
+# cleanup; a green run cleans up completely.
+KEEP_ON_FAIL=/tmp/opencode/local-ci-last-failed
+trap '[ "$FAIL" -eq 0 ] && rm -rf "$RUN_DIR" || { mkdir -p "$KEEP_ON_FAIL"; rm -rf "$KEEP_ON_FAIL"/*; cp -r "$RUN_DIR." "$KEEP_ON_FAIL/"; rm -rf "$RUN_DIR"; }' EXIT
 
 # state/ is live data. Snapshot before the suites so anything they
 # leave behind is REPORTED — bootstrap places credentials.key,
