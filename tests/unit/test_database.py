@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -574,6 +575,27 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
             self.assertGreaterEqual(snapshot, 1)
         # and kept servicing across the entire 20-writer phase
         self.assertGreater(progress, 20)
+        # parked DB-worker gate (the ratio's documented limitation,
+        # closed): a SQL function registered on the connection runs ON
+        # the aiosqlite worker thread. While it holds SQLite busy, the
+        # loop must keep servicing other tasks — a synchronous bridge
+        # would stall inside the call and the counter could not move.
+        async with self.db.connection.read() as conn:
+            await conn.create_function("hold_gate", 0, lambda: time.sleep(0.1))
+        gate_ticks = 0
+
+        async def gate_progressor() -> None:
+            nonlocal gate_ticks
+            while True:
+                await asyncio.sleep(0)
+                gate_ticks += 1
+
+        gate_task = asyncio.get_running_loop().create_task(gate_progressor())
+        try:
+            await self.db.connection.fetch_one("SELECT hold_gate()")
+        finally:
+            gate_task.cancel()
+        self.assertGreater(gate_ticks, 0)
 
 
 class TestConnectionRobustness(AsyncDatabaseTestCase):

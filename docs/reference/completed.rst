@@ -89,7 +89,7 @@ shrink without lowering the baseline also fails).
 runner (``-n auto --dist loadscope`` — each gate leg drops from
 ~7.5 minutes serial to ~2m45s; ``unittest discover`` retired).
 pyright takes static typing from mypy, which retired with both its
-trees at ZERO — re-adoption, if ever needed, is ``uv add mypy`` on
+trees at ZERO — re-adoption, if ever needed, is ``uv add --dev mypy``
 a clean tree. The pyright ratchet opened at 72 and marched to 0 in
 one campaign; the equality rule holds on both sides of zero.
 ``scripts/local-ci.sh`` is now the clean seven-step code-quality
