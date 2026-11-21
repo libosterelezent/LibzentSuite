@@ -82,6 +82,23 @@ nothing can ship until that hold is lifted; see
   unsubscribes before its shielded reap; a second cancellation cannot
   cancel the trigger-reap join; and the gate treats every
   non-`review_completed` terminal review status as a failure.
+- PR #27 round 9 (the post-push PR comments, 2026-11-21): the cog
+  reconcile rechecks the live enabled flag around each host — a
+  disable racing the `add_cog` await was invisible to the disable's
+  own reconcile pass (attach records the cog only after `add_cog`
+  returns), leaving the plugin's commands invocable; the live-debug
+  harness clears an ambient `LZ_MASTER_KEY` for the run (an operator
+  key broke the workdir key-sidecar expectation and encrypted
+  synthetic tokens under real key material); the gate creates the
+  lock parent directory before the flock redirection, runs the
+  concurrent review in its own session with the checkout-lock fd
+  closed (a stalled review's surviving child used to hold the next
+  gate's lock), signals the whole review process group on timeout,
+  and survives the stall branch with `REVIEW_EXIT` initialized; the
+  scheduler pressure probe waits for lanes blocked at the limiter
+  instead of a depth poll that returned instantly; and the pytest
+  configuration comment no longer describes the retired serial
+  `test_rich_model` fallback.
   Triaged: the CLI live-log window's synchronous
   `print` can block the loop on a stalled consumer pipe (pre-existing,
   interactive `--live` feature — bounded off-loop output is a design
