@@ -570,7 +570,9 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             await h.collector.wait_for(AccountConnected, 1)
             h.manager.get("alpha").runtime.client.drop("flaky")
             await asyncio.sleep(0.05)
-        await h.collector.wait_for(AccountConnected, 3)
+        # Recovery must COMPLETE, not complete in 2s: the default
+        # timeout dies under parallel-suite machine load.
+        await h.collector.wait_for(AccountConnected, 3, timeout=10.0)
         self.assertEqual(h.manager.get("alpha").runtime.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")
 

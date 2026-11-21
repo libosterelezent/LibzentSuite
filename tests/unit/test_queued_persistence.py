@@ -147,11 +147,11 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
 
     async def test_record_never_blocks_on_sqlite(self) -> None:
         """(b) With a SLOW repo being drained by the worker, 1000 record()
-        calls each stay under 2ms — the loop never waits on SQLite."""
+        calls average under 2ms — the loop never waits on SQLite."""
         import gc
 
         service = LogService()
-        repo = AsyncLogRepo(delay=0.05)  # each add costs 50ms on the worker
+        repo = AsyncLogRepo(delay=0.2)  # each add costs 200ms on the worker
         await service.start_persistence(repo, batch=10, interval=0.01)
         await asyncio.sleep(0.05)  # worker is inside a slow add right now
         for _i in range(100):  # warmup: logger cache, ring pages
@@ -172,11 +172,13 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         # loaded box must not fail the suite, but the average must hold.
         self.assertLess(elapsed / 1000, 0.002)
         # Hard per-call ceiling: ONE blocked-on-SQLite record() would cost
-        # >= 50ms here (the fake repo sleeps that long per add).
-        self.assertLess(worst, 0.02)
-        self.assertLess(elapsed, 2.0)  # blocking would cost ~50s here
+        # >= 200ms here. 100ms tolerates OS descheduling under the suite's
+        # parallel workers (observed 30ms call noise, 1s loop deschedules)
+        # while staying half the blocked signature.
+        self.assertLess(worst, 0.1)
+        self.assertLess(elapsed, 5.0)  # blocking would cost ~200s here
         with contextlib.redirect_stderr(io.StringIO()):
-            await service.stop_persistence(timeout=0.3)  # bounded: slow repo
+            await service.stop_persistence(timeout=0.5)  # bounded: slow repo
 
     async def test_overflow_drops_counted_ring_unaffected(self) -> None:
         """(c) Queue capped at 10_000 in-flight: the excess is dropped FROM
