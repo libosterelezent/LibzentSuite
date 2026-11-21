@@ -75,7 +75,9 @@ class LdpWorkerPlugin(PluginBase):
             return
         content = (event.content or "").strip()
         trigger = str(ctx.settings.get("trigger") or "ldp-go")
-        if not content.startswith(trigger):
+        # token boundary: "ldp-going 3" must not fire the "ldp-go"
+        # trigger (a bare startswith matched prefixes)
+        if content != trigger and not content.startswith(trigger + " "):
             return
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             LOG.warning("ldp_worker: ignoring non-owner trigger from %s", event.author_id)

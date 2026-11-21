@@ -162,12 +162,32 @@ class ClassifierTests(unittest.TestCase):
 
     def test_the_estop_disconnect_lifecycle_row_is_an_observation(self) -> None:
         # the harness's deliberate estop echoes as this exact record:
-        # event name + events source, message words never consulted
+        # event name + events source, message words never consulted —
+        # but ONLY while a disconnect-exercising phase is running
         self.assertEqual(
             live_debug.classify_log_entry(
-                "WARNING", "events", "status='stopped' account='gamma'", event="AccountDisconnected"
+                "WARNING",
+                "events",
+                "status='stopped' account='gamma'",
+                event="AccountDisconnected",
+                phase="accounts",
             ),
             "observation",
+        )
+
+    def test_an_unexpected_disconnect_is_never_an_observation(self) -> None:
+        # PR review: the downgrade used to apply in EVERY phase, so an
+        # ERROR-class AccountDisconnected no harness action can explain
+        # was masked (major -> observation)
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "ERROR",
+                "events",
+                "status='stopped' account='alpha'",
+                event="AccountDisconnected",
+                phase="rate-limits",
+            ),
+            "major",
         )
 
     def test_account_failed_is_never_an_observation(self) -> None:

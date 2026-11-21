@@ -155,7 +155,14 @@ _CONTRACT_WARNING_KEYWORDS = (
 )
 
 
-def _deliberate_row(severity: str, source: str, message: str, event: str | None) -> bool:
+#: phases whose scenarios deliberately stop/estop accounts — the estop
+#: disconnect echo is only "deliberate" while one of them is running
+_DISCONNECT_PHASES = frozenset({"accounts", "shutdown"})
+
+
+def _deliberate_row(
+    severity: str, source: str, message: str, event: str | None, phase: str | None = None
+) -> bool:
     """True for known-DELIBERATE loud rows — operator actions and staged
     failure paths that log WARNING/ERROR on purpose.
 
@@ -171,10 +178,14 @@ def _deliberate_row(severity: str, source: str, message: str, event: str | None)
     """
     lowered = message.lower()
     # the EXPECTED estop echo: the AccountDisconnected lifecycle record
-    # from the events source (the harness stops accounts on purpose).
-    # Matched by event name + source exactly — AccountFailed is NEVER
-    # expected (a real failure), and message words are not consulted
-    if event == "AccountDisconnected" and source == "events":
+    # from the events source — but ONLY while a phase that deliberately
+    # disconnects accounts is running (accounts' estop/stop/remove, the
+    # ordered shutdown). Downgrading it EVERYWHERE masked a disconnect
+    # no harness action can explain (PR review: downgrade only when
+    # expected). Matched by event name + source exactly —
+    # AccountFailed is NEVER expected (a real failure), and message
+    # words are not consulted.
+    if event == "AccountDisconnected" and source == "events" and phase in _DISCONNECT_PHASES:
         return True
     if severity == "ERROR":
         # the account manager's estop announcement is ERROR-loud BY
@@ -189,7 +200,7 @@ def _deliberate_row(severity: str, source: str, message: str, event: str | None)
 
 
 def classify_log_entry(
-    severity: str, source: str, message: str, event: str | None = None
+    severity: str, source: str, message: str, event: str | None = None, phase: str | None = None
 ) -> str | None:
     """Map one structured log row to a finding severity (None = not one).
 
@@ -198,11 +209,13 @@ def classify_log_entry(
     observation when deliberate, minor when the message reads like a
     contract violation (the keyword list), and nothing at all when it is
     ordinary operational chatter. INFO/DEBUG rows are never findings.
+    ``phase`` scopes the phase-dependent deliberate rules (the estop
+    disconnect echo) to phases that actually disconnect.
     """
     sev = (severity or "").upper()
     if sev not in ("ERROR", "WARNING"):
         return None
-    if _deliberate_row(sev, source, message, event):
+    if _deliberate_row(sev, source, message, event, phase):
         return "observation"
     if sev == "ERROR":
         return "major"
@@ -390,6 +403,9 @@ class Harness:
         self._prior_handler: Callable[[asyncio.AbstractEventLoop, dict[str, Any]], Any] | None = (
             None
         )
+        # armed only by _arm_loop_handler — teardown restores the loop
+        # handler iff this harness actually replaced it
+        self._handler_installed = False
         self._torn_down = False
         # framework handles (set by boot)
         self.workdir: Path | None = None
@@ -557,6 +573,7 @@ class Harness:
         BEFORE build so bootstrap-time wreckage is captured too."""
         loop = asyncio.get_running_loop()
         self._prior_handler = loop.get_exception_handler()
+        self._handler_installed = True
 
         def on_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
             message = str(context.get("message") or "unhandled loop exception")
@@ -591,6 +608,7 @@ class Harness:
                 str(row.get("source") or ""),
                 str(row.get("message") or ""),
                 str(row.get("event") or "") or None,
+                phase="boot",  # boot never disconnects: no echo here is expected
             )
             if verdict is not None:
                 self.report(
@@ -627,7 +645,7 @@ class Harness:
             source = str(getattr(entry, "source", "?"))
             message = str(getattr(entry, "message", ""))
             event = str(getattr(entry, "event", "") or "") or None
-            verdict = classify_log_entry(severity, source, message, event)
+            verdict = classify_log_entry(severity, source, message, event, phase=self._phase)
             if verdict is None:
                 return
             self.report(
@@ -665,12 +683,18 @@ class Harness:
                 with contextlib.suppress(Exception):
                     unsub()
         self._unsub_log = self._unsub_audit = None
-        with contextlib.suppress(RuntimeError):
-            loop = asyncio.get_event_loop_policy().get_event_loop()
-            if self._prior_handler is not None:
-                loop.set_exception_handler(self._prior_handler)
-            else:
-                loop.set_exception_handler(None)
+        # restore the loop handler ONLY if this harness installed one —
+        # a boot that failed before _arm_loop_handler leaves
+        # _prior_handler unset, and clearing unconditionally destroyed
+        # the CALLER's handler
+        if self._handler_installed:
+            with contextlib.suppress(RuntimeError):
+                loop = asyncio.get_event_loop_policy().get_event_loop()
+                if self._prior_handler is not None:
+                    loop.set_exception_handler(self._prior_handler)
+                else:
+                    loop.set_exception_handler(None)
+            self._handler_installed = False
 
     # -------------------------------------------------------------- report
     def report(
@@ -912,14 +936,16 @@ async def phase_boot(h: Harness) -> None:
         actual=str(import_status),
     )
     # the synthetic tokens must never surface anywhere structured: every
-    # field of every log row AND every audit row
+    # field of every log row AND every audit row. `== []` (not `not
+    # leaks`): a FAILED scan step returns None, and `not None` printed
+    # PASS on the run that never verified anything.
     synthetic_tokens = ("sim-token-alpha", "sim-token-beta", "sim-token-gamma")
     leaks = await h.step(
         "full-field secret scan (logs + audit)",
         lambda: h.scan_for_secret(synthetic_tokens),
     )
     h.expect(
-        not leaks,
+        leaks == [],
         what="no credential material in any structured field",
         expectation="tokens never appear in any log/audit field",
         actual=f"leaking fields: {leaks or None}",
@@ -1074,7 +1100,7 @@ async def phase_credentials(h: Harness) -> None:
         lambda: h.scan_for_secret(("sim-token-alpha-2",)),
     )
     h.expect(
-        not rotated_leaks,
+        rotated_leaks == [],  # None (failed scan) must not read as clean
         what="rotated token absent from every log/audit field",
         expectation="no leak",
         actual=f"leaking fields: {rotated_leaks or None}",
@@ -1363,9 +1389,9 @@ async def phase_tasks_scheduler(h: Harness) -> None:
     )
     cancelled_rows = [row for row in history_after or [] if row.get("status") == "cancelled"]
     h.expect(
-        n_cancelled >= 1 and len(cancelled_rows) >= 1,
+        n_cancelled >= 1 and n_cancelled == len(cancelled_rows),
         what="cancelled tasks are counted and persisted",
-        expectation="cancelled count matches persisted rows",
+        expectation="verb count EQUALS the persisted cancelled rows (a count or persistence regression breaks the equality)",
         actual=f"verb={n_cancelled} rows={len(cancelled_rows)}",
     )
     final_ticks = [m for m in h.world.messages_of(GUILD_CHANNEL) if m.startswith("ldp tick")]
@@ -1671,7 +1697,8 @@ async def phase_presets(h: Harness) -> None:
     h.expect(
         execution_id.startswith("exec-")
         and "alpha" in (checkpointed or {}).get("completed", [])
-        and (resume_view or {}).get("completed") == ["alpha"],
+        and (resume_view or {}).get("completed") == ["alpha"]
+        and (resume_view or {}).get("pending") == [],
         what="execution lifecycle: start → checkpoint → resume",
         expectation="completed=[alpha] and pending=[]",
         actual=f"start={exec_started} checkpoint={checkpointed} resume={resume_view}",
@@ -2033,9 +2060,13 @@ async def phase_simulation(h: Harness) -> None:
         )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=SCENARIO_BUDGET_S)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # timeout OR operator interruption: either way the child is
+            # killed and reaped before the exception propagates — an
+            # unreaped simulator process outlives the cancelled phase
             proc.kill()
-            await proc.communicate()
+            with contextlib.suppress(asyncio.CancelledError, ProcessLookupError):
+                await proc.communicate()
             raise
         lines = out.decode("utf-8", errors="replace").strip().splitlines()
         summary = next(

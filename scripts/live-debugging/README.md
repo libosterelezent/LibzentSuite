@@ -167,7 +167,11 @@ patching the framework:
    plugin await re-raises SchedulerError inside handle_event, which the
    isolation boundary logs as a plugin crash. Captured as a finding on
    every run; triage whether the task-ack seam should deliver
-   cancellation as a distinct, catchable signal instead.
+   cancellation as a distinct, catchable signal instead. **Expected
+   exit code for a current full pass: 1** — this known finding is
+   major-class, so `echo $?` reads 1 even while every step passes;
+   the run summary's per-phase steps and the findings file distinguish
+   it from a real failure.
 
 ## Files
 
