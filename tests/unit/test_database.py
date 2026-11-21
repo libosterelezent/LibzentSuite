@@ -526,49 +526,50 @@ class TestTransactions(AsyncDatabaseTestCase):
 class TestConcurrentWriters(AsyncDatabaseTestCase):
     async def test_twenty_writers_no_busy(self) -> None:
         """20 parallel writers on ONE connection: serialized by the write
-        lock, all rows land, and the event loop never stalls (aiosqlite
-        runs SQLite on its worker thread, off the loop)."""
-        loop = asyncio.get_running_loop()
-        tick_period = 0.002
-        stalls: list[float] = []
-        last = loop.time()
+        lock, all rows land, and the event loop keeps servicing other
+        tasks while SQLite churns (aiosqlite runs SQLite on its worker
+        thread, off the loop). Deterministic: a progress counter proves
+        loop servicing — synchronous writes would starve it to exactly
+        zero during the write phase. A loaded machine delays everything
+        equally and changes the count not at all."""
+        progress = 0
+        first_completion_progress: int | None = None
         done = asyncio.Event()
 
-        async def ticker() -> None:
-            nonlocal last
-            try:
-                while not done.is_set():
-                    await asyncio.sleep(tick_period)
-                    now = loop.time()
-                    stalls.append(now - last - tick_period)
-                    last = now
-            except asyncio.CancelledError:
-                return
+        async def progressor() -> None:
+            nonlocal progress
+            while not done.is_set():
+                await asyncio.sleep(0)
+                progress += 1
 
         async def writer(i: int) -> None:
+            nonlocal first_completion_progress
             await self.db.kv.set(f"k{i}", str(i))
             await self.db.account_settings.set("alpha", f"key{i}", i)
+            if first_completion_progress is None:
+                first_completion_progress = progress
 
         await self.db.accounts.add("alpha")
-        ticker_task = loop.create_task(ticker())
+        progressor_task = asyncio.get_running_loop().create_task(progressor())
         try:
             await asyncio.gather(*(writer(i) for i in range(20)))
         finally:
             done.set()
-            ticker_task.cancel()
-            await asyncio.gather(ticker_task, return_exceptions=True)
+            await progressor_task
 
         # all writes landed (no SQLITE_BUSY ate any of them)
         for i in range(20):
             self.assertEqual(await self.db.kv.get(f"k{i}"), str(i))
             settings = await self.db.account_settings.get("alpha")
             self.assertEqual(settings[f"key{i}"], i)
-        # the loop stayed responsive while SQLite churned; 1.5s tolerates
-        # OS descheduling under the suite's parallel workers (observed
-        # 0.56s noise) while still catching on-loop write serialization
-        self.assertLess(
-            max(stalls or [0.0]), 1.5, f"max loop stall {max(stalls or [0.0]) * 1000:.1f}ms"
-        )
+        # the loop serviced other tasks while the FIRST write was still
+        # in flight — zero means the writes ran synchronously on the loop
+        snapshot = first_completion_progress
+        self.assertIsNotNone(snapshot)
+        if snapshot is not None:
+            self.assertGreaterEqual(snapshot, 1)
+        # and kept servicing across the entire 20-writer phase
+        self.assertGreater(progress, 20)
 
 
 class TestConnectionRobustness(AsyncDatabaseTestCase):

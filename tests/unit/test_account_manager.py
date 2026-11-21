@@ -563,15 +563,17 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.supervisor)
 
     async def test_repeated_drops_backoff_recovers(self) -> None:
+        """Two drops, each landing only while CONNECTED — count-aware
+        waits sequence them, so drop N+1 can never race reconnect N.
+        Recovery must COMPLETE; the 10s bound is a hang guard against a
+        dead supervisor, not a latency expectation."""
         h = make_manager(settings=_fast_reconnect_settings())
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
-        for _ in range(2):
-            await h.collector.wait_for(AccountConnected, 1)
+        for connect_no in (1, 2):
+            await h.collector.wait_for(AccountConnected, connect_no)
+            await asyncio.sleep(0)  # let post-emit state settle
             h.manager.get("alpha").runtime.client.drop("flaky")
-            await asyncio.sleep(0.05)
-        # Recovery must COMPLETE, not complete in 2s: the default
-        # timeout dies under parallel-suite machine load.
         await h.collector.wait_for(AccountConnected, 3, timeout=10.0)
         self.assertEqual(h.manager.get("alpha").runtime.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")

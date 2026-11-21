@@ -14,7 +14,6 @@ import asyncio
 import contextlib
 import io
 import sqlite3
-import time
 import unittest
 from typing import Any
 
@@ -26,15 +25,28 @@ from core.task_scheduler import TaskScheduler
 
 # ----------------------------------------------------------------- fakes
 class AsyncLogRepo:
-    """Counting LogRepository: records every awaited add, optional delay."""
+    """Counting LogRepository: records every awaited add."""
 
-    def __init__(self, delay: float = 0.0) -> None:
+    def __init__(self) -> None:
         self.added: list[dict[str, Any]] = []
-        self.delay = delay
 
     async def add(self, entry: dict[str, Any]) -> None:
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        self.added.append(dict(entry))
+
+
+class ParkedLogRepo:
+    """Gate-holding LogRepository: add() parks until released — the
+    deterministic stand-in for an arbitrarily slow database. A blocked
+    record path hangs against it; a non-blocking one never notices."""
+
+    def __init__(self) -> None:
+        self.added: list[dict[str, Any]] = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def add(self, entry: dict[str, Any]) -> None:
+        self.entered.set()
+        await self.release.wait()
         self.added.append(dict(entry))
 
 
@@ -146,39 +158,38 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e["message"] for e in repo.added], [f"m{i}" for i in range(200)])
 
     async def test_record_never_blocks_on_sqlite(self) -> None:
-        """(b) With a SLOW repo being drained by the worker, 1000 record()
-        calls average under 2ms — the loop never waits on SQLite."""
-        import gc
-
+        """(b) Deterministic non-blocking proof: with the drain worker
+        PARKED inside repo.add() — it returns only when released — 1000
+        record() calls must all complete. A record path that ever waited
+        on SQLite would hang against the parked repo, not merely run
+        slow. The wait_for bounds are hang guards, not measurements."""
         service = LogService()
-        repo = AsyncLogRepo(delay=0.2)  # each add costs 200ms on the worker
+        repo = ParkedLogRepo()
         await service.start_persistence(repo, batch=10, interval=0.01)
-        await asyncio.sleep(0.05)  # worker is inside a slow add right now
-        for _i in range(100):  # warmup: logger cache, ring pages
-            service.record("INFO", "lat", "warmup")
-        gc.collect()
-        gc.disable()  # a GC pause is environment noise, not record() cost
-        try:
-            t0 = time.perf_counter()
-            worst = 0.0
+        # the worker parks on the PRIME record; the blast then proves
+        # record() never waits on the parked drain it can see
+        service.record("INFO", "lat", "prime")
+        await asyncio.wait_for(repo.entered.wait(), timeout=5.0)
+
+        def blast() -> None:
             for i in range(1000):
-                call_start = time.perf_counter()
                 service.record("INFO", "lat", f"m{i}")
-                worst = max(worst, time.perf_counter() - call_start)
-            elapsed = time.perf_counter() - t0
-        finally:
-            gc.enable()
-        # The 2ms budget as a MEAN: a single OS descheduling hiccup on a
-        # loaded box must not fail the suite, but the average must hold.
-        self.assertLess(elapsed / 1000, 0.002)
-        # Hard per-call ceiling: ONE blocked-on-SQLite record() would cost
-        # >= 200ms here. 100ms tolerates OS descheduling under the suite's
-        # parallel workers (observed 30ms call noise, 1s loop deschedules)
-        # while staying half the blocked signature.
-        self.assertLess(worst, 0.1)
-        self.assertLess(elapsed, 5.0)  # blocking would cost ~200s here
+
+        # off-loop: a blocking record() surfaces as a TimeoutError here
+        # instead of freezing the event loop with it
+        await asyncio.wait_for(asyncio.to_thread(blast), timeout=5.0)
+        stats = service.stats()
+        self.assertEqual(stats["entries"], 1001)  # ring took every record
+        self.assertEqual(stats["dropped"], 0)  # 1000 << the 10_000 cap
+        self.assertEqual(repo.added, [])  # still parked: nothing drained
+
+        repo.release.set()
         with contextlib.redirect_stderr(io.StringIO()):
-            await service.stop_persistence(timeout=0.5)  # bounded: slow repo
+            await service.stop_persistence(timeout=5.0)
+        self.assertEqual(len(repo.added), 1001)  # exactly-once, in order
+        self.assertEqual(
+            [e["message"] for e in repo.added], ["prime"] + [f"m{i}" for i in range(1000)]
+        )
 
     async def test_overflow_drops_counted_ring_unaffected(self) -> None:
         """(c) Queue capped at 10_000 in-flight: the excess is dropped FROM
