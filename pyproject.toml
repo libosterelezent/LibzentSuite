@@ -213,10 +213,10 @@ testpaths = ["tests"]
 addopts = "-q --ignore=dump"
 
 # The distribution strategy lives in the RUNNER (local-ci.sh, CI), not
-# here: the bulk runs parallel (-n auto --dist loadscope), and one
-# timing-sensitive file (test_rich_model.py — CPU-contention-sensitive
-# cancellation tests) runs serially after. Keeping addopts bare means
-# `pytest tests/unit/test_x.py` Just Works for iteration without
+# here: the full suite runs parallel (-n auto --dist loadscope) — the
+# serial-unittest fallback for test_rich_model.py was retired with the
+# click-cancellation isolation fix (2026-11-19); keeping addopts bare
+# means `pytest tests/unit/test_x.py` Just Works for iteration without
 # pulling in xdist.
 
 [tool.pyright]
