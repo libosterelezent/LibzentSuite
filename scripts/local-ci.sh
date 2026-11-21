@@ -4,8 +4,8 @@
 # Usage:
 #   ./scripts/local-ci.sh                 # the full gate (lint, types, export, 3.10 suite, 3.13 suite+coverage, build)
 #   ./scripts/local-ci.sh quick           # lint + types + export-sync only (~1 min)
-#   ./scripts/local-ci.sh --review        # full gate + CodeRabbit review running concurrent with the suites
 #
+<<<<<<< Updated upstream
 # --review is an OPTION, not a mode: it parses anywhere on the command
 # line and requires the full gate (PR review 2026-11-18 — checking
 # only $2 let "./local-ci.sh --review" skip the review while the
@@ -338,3 +338,5 @@ else
   echo -e "\n\033[31mGATES RED — DO NOT PUSH\033[0m"
 fi
 exit "$FAIL"
+=======
+>>>>>>> Stashed changes
