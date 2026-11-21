@@ -440,7 +440,13 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
                     channel_id=GUILD_CHANNEL,
                     content=f"hi-{account}",
                 )
-            for _ in range(200):  # 4 sends on a 2.0s group clock land ~t=6s
+            # poll to the 4th message with a deadline, not a fixed
+            # iteration count: 4 paced sends on the 2.0s group clock
+            # land ~t=6s, and instrumentation load can stretch that —
+            # the loop exits the moment the last one lands
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 20.0
+            while loop.time() < deadline:
                 await asyncio.sleep(0.05)
                 if len(stack.world.messages_of(GUILD_CHANNEL)) >= 4:
                     break
