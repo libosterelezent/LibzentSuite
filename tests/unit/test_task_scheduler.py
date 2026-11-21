@@ -61,8 +61,11 @@ class FakeLimiter:
         self.acquire_order.append(account)
         if self.gate is not None and not self.gate.is_set():
             self.blocked_count += 1
-            await self.gate.wait()
-            self.blocked_count -= 1
+            try:
+                await self.gate.wait()
+            finally:
+                # cancellation must not leave a parked acquire counted
+                self.blocked_count -= 1
         return FakeGrant(
             action=action,
             account=account,
