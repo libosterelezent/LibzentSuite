@@ -104,6 +104,6 @@ reviews:
 knowledge_base:
   opt_out: false
   learnings:
-    repository: true
+    scope: local
   issues:
-    repository: true
+    scope: local
