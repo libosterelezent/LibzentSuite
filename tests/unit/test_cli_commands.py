@@ -1460,13 +1460,19 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         class SlowStatusApi(FakeApi):
             async def status(self) -> dict[str, Any]:
                 await asyncio.sleep(0.05)
+                # deterministic mid-command stop (was call_later(0.02),
+                # which raced the command's start under instrumentation
+                # load). The sleep(0) yields so the repl's stop_wait
+                # future RESOLVES before its loop-top check — the exact
+                # promptless-exit interleaving the test pins.
+                stop.set()
+                await asyncio.sleep(0)
                 return await super().status()
 
         api = SlowStatusApi()
         out = io.StringIO()
         stop = asyncio.Event()
         repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out, stop_event=stop)
-        asyncio.get_running_loop().call_later(0.02, stop.set)
         await asyncio.wait_for(repl.run(), timeout=5)
         text = out.getvalue()
         self.assertTrue(called(api, "status"))
