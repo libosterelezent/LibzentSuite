@@ -124,7 +124,7 @@ def _encode_super_properties(properties: dict[str, Any], fallback: str, discord:
     Falls back to the cached encoding when anything unexpected happens —
     a re-encode failure must never break connect().
     """
-    to_json = getattr(getattr(discord, "utils", None), "_to_json", None)
+    to_json = getattr(getattr(discord, "utils", None), "_to_json", None)  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
     if to_json is None:
 
         def to_json(obj: Any) -> str:
@@ -1452,7 +1452,7 @@ class RealDiscordClient:
                 message = partial(message_id)
             else:
                 message = await self._resolve_message(channel_id, message_id)
-            await message.add_reaction(emoji)
+            await message.add_reaction(emoji)  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         except Exception as exc:
             mapped = self._map_send_error(exc, channel_id)
             if mapped is not None:

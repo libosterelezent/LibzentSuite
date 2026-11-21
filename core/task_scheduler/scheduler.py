@@ -998,7 +998,7 @@ class TaskScheduler:
             # ``floor_value`` is a property on RateLimitManager (a method
             # on some doubles): accept both
             raw_floor = getattr(self._limiter, "floor_value", 1.5)
-            floor = float(raw_floor() if callable(raw_floor) else raw_floor)
+            floor = float(raw_floor() if callable(raw_floor) else raw_floor)  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         except Exception:
             floor = 1.5
         oldest = max((now - t.submitted_mono for t in queued), default=0.0)

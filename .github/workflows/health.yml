@@ -77,7 +77,7 @@ jobs:
             echo
             echo "To adopt (AGENTS.md §8 order matters):"
             echo "1. \`uv lock --upgrade\`"
-            echo "2. \`uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt\`"
+            echo "2. \`uv export --locked --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt\`"
             echo "3. run the suite, then commit lock + export together"
           } > /tmp/issue-body.md
           existing=$(gh issue list --state open --search "in:title dependency updates available" --json number --jq 'length')

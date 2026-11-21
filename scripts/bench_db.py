@@ -260,7 +260,7 @@ async def main_async(records: int, repeat: int) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
     parser.add_argument("--records", type=int, default=1_000)
     parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()

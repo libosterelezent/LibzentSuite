@@ -112,10 +112,14 @@ class FakeSender:
             if kind == "ok":
                 return outcome[1] if outcome[1] is not None else self._message(task)
             if kind == "sleep":
-                await asyncio.sleep(outcome[1])
+                delay = outcome[1]
+                assert delay is not None
+                await asyncio.sleep(delay)
                 return self._message(task)
             if kind == "raise":
-                raise outcome[1]
+                exc = outcome[1]
+                assert exc is not None
+                raise exc
             raise AssertionError(f"unknown scripted outcome {outcome!r}")
         finally:
             self.inflight[task.account] -= 1
@@ -355,11 +359,15 @@ class TestLanes(SchedulerTestBase):
         gate = self.limiter.block_acquires()
         low = self.scheduler.submit("alpha", "p", "message", priority=Priority.LOW)
         high = self.scheduler.submit("beta", "p", "message", priority=Priority.HIGH)
-        await self.settle(0.1)
+        self.assertTrue(
+            await self.wait_until(lambda: len(self.limiter.acquire_order) == 2)
+        )
         # the shared grant gate lets the HIGH task enter limiter.acquire first
         self.assertEqual(self.limiter.acquire_order, ["beta", "alpha"])
         gate.set()
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(lambda: low.status == "completed" and high.status == "completed")
+        )
         self.assertEqual(low.status, "completed")
         self.assertEqual(high.status, "completed")
 
@@ -400,7 +408,12 @@ class TestCancel(SchedulerTestBase):
         self.assertEqual(task.status, "cancelled")  # immediate, no worker ran it
 
         gate.set()  # the parked worker wakes and aborts at its checkpoint
-        await self.settle(0.1)
+        self.assertTrue(
+            await self.wait_until(
+                lambda: len(self.repo.add_calls) == 1
+                and len(self.recorder.of(TaskCancelled)) == 1
+            )
+        )
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(len(self.recorder.of(TaskCancelled)), 1)
         self.assertEqual(len(self.repo.add_calls), 1)
@@ -461,7 +474,13 @@ class TestRetry(SchedulerTestBase):
     async def test_retry_on_server_rate_limit(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", channel_id=1, retries=2)
         self.sender.outcomes.append(("raise", ServerRateLimit(2.0, True)))
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(
+                lambda: len(self.limiter.reports) == 1
+                and len(self.sender.calls) == 2
+                and len(self.audit.calls) == 1
+            )
+        )
 
         self.assertEqual(self.limiter.reports, [("alpha", "message", 2.0, True)])
         self.assertEqual(len(self.sender.calls), 2)  # failed once, retried, succeeded
@@ -474,7 +493,7 @@ class TestRetry(SchedulerTestBase):
     async def test_retry_on_connection_error(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", retries=1)
         self.sender.outcomes.append(("raise", ConnectionError("socket exploded")))
-        await self.settle(0.2)
+        self.assertTrue(await self.wait_until(lambda: task.status == "completed"))
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.attempts, 1)
         self.assertEqual(self.sleeps, [])  # NO scheduler delay — limiter paces
@@ -492,7 +511,9 @@ class TestRetry(SchedulerTestBase):
                 ("raise", ConnectionError("boom 3")),
             ]
         )
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(lambda: task.attempts == 3 and task.status == "completed")
+        )
         self.assertEqual(self.sleeps, [])  # zero scheduler sleeps
         self.assertEqual(task.attempts, 3)
         self.assertEqual(task.status, "completed")
@@ -568,7 +589,9 @@ class TestRetry(SchedulerTestBase):
         not the caller's budget, paces it)."""
         task = self.scheduler.submit("alpha", "p", "message", retries=0)
         self.sender.outcomes.append(("raise", ServerRateLimit(1.0, True)))
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(lambda: task.status == "completed" and len(self.sender.calls) == 2)
+        )
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 2)  # failed once, retried
         self.assertEqual(task.attempts, 1)
@@ -743,7 +766,7 @@ class TestStopSingleFlight(SchedulerTestBase):
         await owner
         self.scheduler.start()  # after completion: re-arm works
         late = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(lambda: late.status == "completed"))
         self.assertEqual(late.status, "completed")
 
     async def test_joining_stop_runs_no_second_sweep_after_rearm(self) -> None:
@@ -795,7 +818,13 @@ class TestExactlyOnceRaces(SchedulerTestBase):
         # terminal tasks must be skipped (no double terminal, no lost audit)
         self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 0)
         self.assertFalse(self.scheduler.cancel(task.id))
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(
+                lambda: len(self.repo.add_calls) == 1
+                and len(self.audit.calls) == 1
+                and len(self.recorder.of(TaskCompleted)) == 1
+            )
+        )
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.repo.add_calls), 1)
         self.assertEqual(len(self.audit.calls), 1)
@@ -996,7 +1025,11 @@ class TestHistoryAndStats(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")
         self.scheduler.submit("alpha", "p", "dm", user_id=7)
         self.scheduler.submit("alpha", "p", "poke")
-        await self.settle(0.2)
+        self.assertTrue(
+            await self.wait_until(
+                lambda: len(self.repo.add_calls) == 3 and len(self.audit.calls) == 2
+            )
+        )
         self.assertEqual([c["action"] for c in self.audit.calls], ["message", "dm"])
         self.assertEqual(len(self.repo.add_calls), 3)  # history records everything
 
@@ -1039,7 +1072,7 @@ class TestValidation(SchedulerTestBase):
             self.scheduler.submit("alpha", "p", "message", channel_id=1)
         self.scheduler.start()
         task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(lambda: task.status == "completed"))
         self.assertEqual(task.status, "completed")
 
     def test_constructor_rejects_bad_config(self) -> None:
@@ -1140,7 +1173,9 @@ class TestFailedStopHardening(SchedulerTestBase):
         hold.set()
         with self.assertRaises(asyncio.CancelledError):
             await owner
-        await self.settle(0.1)
+        self.assertTrue(
+            await self.wait_until(lambda: t1.is_terminal and t2.status == "cancelled")
+        )
 
         self.assertTrue(t1.is_terminal)  # abort drove it terminal
         self.assertEqual(t2.status, "cancelled")  # NOT left for a respawn
@@ -1151,7 +1186,7 @@ class TestFailedStopHardening(SchedulerTestBase):
 
         self.scheduler.start()  # explicit re-arm retires the fault
         late = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(lambda: late.status == "completed"))
         self.assertEqual(late.status, "completed")
 
     async def test_cancelled_running_task_duration_uses_wall_clock(self) -> None:
@@ -1206,7 +1241,7 @@ class TestLaneContainment(SchedulerTestBase):
         # the lane itself survives for the next task
         scheduler_seam._run_task = orig_run
         nxt = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(lambda: nxt.status == "completed"))
         self.assertEqual(nxt.status, "completed")
 
 
@@ -1233,7 +1268,9 @@ class TestPreSendFailureNoAudit(SchedulerTestBase):
         self.assertTrue(await self.wait_until(lambda: t1.is_terminal))
         limiter_seam.acquire = cancelling
         t2 = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.1)
+        # the history ROW trails the in-memory status flip — wait for
+        # the record itself (the file's own doctrine), not the status
+        self.assertTrue(await self.wait_until(lambda: len(self.repo.add_calls) == 2))
 
         self.assertEqual(t1.status, "failed")
         assert t1.error is not None

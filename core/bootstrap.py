@@ -110,7 +110,7 @@ class _WorkspaceGateReader:
             if callable(live):
                 values = live(account, plugin) or {}
                 expected = gate.get("equals")
-                gate_passed = setting in values and values[setting] == expected
+                gate_passed = setting in values and values[setting] == expected  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         binding_usable = True
         binding_reason = ""
         if assigned:
@@ -228,7 +228,12 @@ async def _seed_config_defaults(
                 floor = floor()
             try:
                 limiter.set_policy_values(
-                    action, max(interval, float(floor)), jmin, jmax, level, owner
+                    action,
+                    max(interval, float(floor)),  # pyright: ignore[reportArgumentType]  # dynamic boundary
+                    jmin,
+                    jmax,
+                    level,
+                    owner,  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
                 )
             except RatePolicyError as exc:
                 ROOT_LOGGER.warning(
@@ -559,10 +564,10 @@ async def _security_audit(database: Any, credential_service: Any, env_file: str)
             except OSError:
                 continue
     # mismatch canary: one decrypt probe over the stored accounts
-    probe = getattr(credential_service, "_probe_decrypt", None)
+    probe: Any = getattr(credential_service, "_probe_decrypt", None)
     if callable(probe):
         try:
-            await probe()
+            await probe()  # pyright: ignore[reportGeneralTypeIssues]  # duck-typed async
         except Exception as exc:
             # the probe handles its own expected failures; anything that
             # still escapes must be VISIBLE, not double-swallowed

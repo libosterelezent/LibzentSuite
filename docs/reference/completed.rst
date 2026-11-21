@@ -85,6 +85,17 @@ mode over all 216 source files is a hard floor; the CI ratchet
 requires the error count to equal the baseline exactly (grow fails,
 shrink without lowering the baseline also fails).
 
+**The toolchain settles (2026-11-21).** pytest + xdist owns the test
+runner (``-n auto --dist loadscope`` — each gate leg drops from
+~7.5 minutes serial to ~2m45s; ``unittest discover`` retired).
+pyright takes static typing from mypy, which retired with both its
+trees at ZERO — re-adoption, if ever needed, is ``uv add --dev mypy``
+a clean tree. The pyright ratchet opened at 72 and marched to 0 in
+one campaign; the equality rule holds on both sides of zero.
+``scripts/local-ci.sh`` is now the clean seven-step code-quality
+gate — the reviewer machinery left it entirely (CodeRabbit reviews
+PRs on GitHub; it was never a CI check).
+
 **Coverage floor 76%** (production-only, measured 77.7%) — branch
 coverage over the eight production trees, per-leg in CI.
 

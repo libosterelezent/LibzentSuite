@@ -168,19 +168,27 @@ class PluginServices(Protocol):
         contract from its side).
         """
 
+        raise NotImplementedError
+
     async def send_dm(
         self, user_id: int, content: str, *, priority: Priority = Priority.LOW
     ) -> None:
         """Send a DM to a user id through the task pipeline
         (fire-and-await-ack — see :meth:`send_message`)."""
 
+        raise NotImplementedError
+
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user."""
+
+        raise NotImplementedError
 
     async def add_reaction(
         self, channel_id: int, message_id: int, emoji: str, *, priority: Priority = Priority.NORMAL
     ) -> None:
         """React to a message through the paced pipeline (kakerareact)."""
+
+        raise NotImplementedError
 
     async def click_button(
         self,
@@ -192,6 +200,8 @@ class PluginServices(Protocol):
     ) -> None:
         """Click a message component by custom_id (kakeraloot) — paced and
         audited like a send."""
+
+        raise NotImplementedError
 
     async def fetch_user(self, user_id: int) -> Any:
         """Resolve a user (cached per account in the database); None when
@@ -212,17 +222,27 @@ class PluginServices(Protocol):
         restarts keep the correct remaining time. Returns the cooldown row.
         """
 
+        raise NotImplementedError
+
     async def cooldown_remaining(self, key: str) -> float:
         """Seconds left on a cooldown (0.0 when none/expired)."""
+
+        raise NotImplementedError
 
     async def cooldown_active(self, key: str) -> bool:
         """True when a cooldown is currently active for this key."""
 
+        raise NotImplementedError
+
     async def cooldown_clear(self, key: str) -> bool:
         """Remove one cooldown; True when it existed."""
 
+        raise NotImplementedError
+
     async def cooldown_list(self) -> list[dict[str, Any]]:
         """Every ACTIVE cooldown of this account+plugin, soonest first."""
+
+        raise NotImplementedError
 
     async def state_get(self, key: str, default: Any = None) -> Any:
         """Read one persisted value from this account+plugin scope."""
@@ -234,16 +254,22 @@ class PluginServices(Protocol):
         """Delete one value from this account+plugin scope; True when it
         existed."""
 
+        raise NotImplementedError
+
     async def wait_for_message(
         self, check: Callable[[MessageReceived], bool], timeout: float
     ) -> MessageReceived | None:
         """Wait for one matching inbound message; None on timeout."""
+
+        raise NotImplementedError
 
     async def collect_messages(
         self, check: Callable[[MessageReceived], bool], idle_timeout: float
     ) -> list[MessageReceived]:
         """Collect matching inbound messages until ``idle_timeout`` passes
         with no new match (port of the audited container semantics)."""
+
+        raise NotImplementedError
 
     # ------------------------------------------------ plugin profiles (P3)
     # The profile lifecycle: bound to THIS (account, plugin) by the
@@ -292,6 +318,8 @@ class PluginServices(Protocol):
         the seam the facade implements (audit finding #10, 2026-11-15)
         is visible to every plugin author and to the checker."""
 
+        raise NotImplementedError
+
     def validate_channel(self, channel_id: int) -> None:
         """Raise :class:`core.errors.TargetGone` when the channel is not
         usable for this account (call BEFORE sending — flow safety)."""
@@ -299,21 +327,31 @@ class PluginServices(Protocol):
     def describe_channel(self, channel_id: int) -> str:
         """Human-readable channel label (``#name`` / DM partner)."""
 
+        raise NotImplementedError
+
     @property
     def credentials(self) -> Credentials:
         """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
+
+        raise NotImplementedError
 
     @property
     def account(self) -> str:
         """Account name this facade belongs to."""
 
+        raise NotImplementedError
+
     @property
     def plugin(self) -> str:
         """Plugin name this facade was created for."""
 
+        raise NotImplementedError
+
     @property
     def settings(self) -> dict[str, Any]:
         """Resolved settings of this (account, plugin) pair."""
+
+        raise NotImplementedError
 
 
 __all__ = ["PluginBase", "PluginContext", "PluginServices"]

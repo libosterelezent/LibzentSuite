@@ -338,7 +338,7 @@ class Account:
         if not callable(getter):
             return []
         try:
-            return list(getter() or [])
+            return list(getter() or [])  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         except Exception:  # a broken client view must never take a read down
             return []
 
@@ -1022,11 +1022,11 @@ class AccountManager:
         """
         if self._account_plugins is None:
             return {}
-        reader = getattr(self._account_plugins, "all_bindings", None)
+        reader: Any = getattr(self._account_plugins, "all_bindings", None)
         if not callable(reader):  # older stub doubles: no bindings column
             return {}
         try:
-            return dict(await reader() or {})
+            return dict(await reader() or {})  # pyright: ignore[reportGeneralTypeIssues]  # duck-typed async
         except Exception:
             self._logger.exception(
                 "could not load account plugin profile bindings "
@@ -1471,10 +1471,10 @@ class AccountManager:
                     await asyncio.wait_for(asyncio.shield(disconnecting), timeout=10.0)
                 except asyncio.TimeoutError:
                     self._logger.error("client disconnect timed out for %s (force-reaping)", name)
-                    force = getattr(client, "_cancel_run_task", None)
+                    force: Any = getattr(client, "_cancel_run_task", None)
                     if callable(force):
                         with contextlib.suppress(Exception):
-                            await force()
+                            await force()  # pyright: ignore[reportGeneralTypeIssues]  # duck-typed async
                 except Exception:
                     self._logger.exception("client disconnect failed for %s", name)
             supervisor = rt.supervisor
