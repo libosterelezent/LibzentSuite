@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,14 +29,13 @@ class FakeServices:
         pass
 
 
-def make_manager() -> PluginManager:
+def make_manager(plugin_dir: str | Path = "tests/fixtures/plugins") -> PluginManager:
     return PluginManager(
         EventBus(),
         logging.getLogger("t"),
         SettingsManager(EventBus(), logging.getLogger("t"), global_layer={}),
-        plugin_dir="tests/fixtures/plugins",
+        plugin_dir=str(plugin_dir),
     )
-
 
 class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_reload_restores_accounts(self) -> None:
@@ -93,23 +94,30 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
 
     async def test_reload_failure_preserves_live_state(self) -> None:
         # H3/seam 2.5: a broken re-import must NOT tear down the working
-        # copy — validation happens before any detach
-        mgr = make_manager()
-        mgr.discover()
-        await mgr.attach_account("alpha", allowed={"probe"})
-        await mgr.activate_account("alpha", FakeServices())
-        bad = mgr._loader._dir / "probe" / "__init__.py"
-        good = bad.read_text()
-        bad.write_text("def broken(:\n")
-        try:
-            from core.errors import PluginError
+        # copy — validation happens before any detach. Runs on a TMP COPY
+        # of the fixture tree: writing broken source into the SHARED
+        # checked-in fixture raced every other worker's discover() under
+        # -n auto (the CI flake: "invalid syntax (__init__.py, line 1)").
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp)
+            shutil.copytree(Path("tests/fixtures/plugins"), plugin_dir, dirs_exist_ok=True)
+            mgr = make_manager(plugin_dir=plugin_dir)
+            mgr.discover()
+            await mgr.attach_account("alpha", allowed={"probe"})
+            await mgr.activate_account("alpha", FakeServices())
+            bad = plugin_dir / "probe" / "__init__.py"
+            good = bad.read_text()
+            bad.write_text("def broken(:\n")
+            try:
+                from core.errors import PluginError
 
-            with self.assertRaises(PluginError):
-                # discover fails; reload must propagate WITHOUT teardown
-                await mgr.reload_plugin("__rescan__")
-        finally:
-            bad.write_text(good)
-        rt = mgr._accounts["alpha"]["probe"]
+                with self.assertRaises(PluginError):
+                    # discover fails; reload must propagate WITHOUT teardown
+                    await mgr.reload_plugin("__rescan__")
+            finally:
+                bad.write_text(good)
+            rt = mgr._accounts["alpha"]["probe"]
+            self.assertTrue(rt.active, "failed rescan must not deactivate")
         self.assertTrue(rt.active, "failed rescan must not deactivate")
 
 
