@@ -1424,3 +1424,48 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added, ["PingCog"])
         self.assertEqual(removed, ["PingCog"])
         self.assertEqual(host.hosted_plugins("alpha"), set())
+
+    async def test_reconcile_takes_back_a_cog_disabled_mid_host(self) -> None:
+        """PR review 2026-11-21: a disable landing while host_cog's
+        add_cog await is in flight cannot be handled by the disable's
+        OWN reconcile (attach records the cog only after add_cog
+        returns, so its unhost loop sees nothing) — THIS pass must
+        recheck the flag after hosting and take the cog back off."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {"ping": NS(instance=NS(COG=PingCog), enabled=True)},
+        }
+        added, removed = [], []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+                entered.set()
+                await release.wait()  # the disable lands in this window
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        async def disable_mid_host() -> None:
+            await entered.wait()
+            h.plugins._accounts["alpha"]["ping"].enabled = False
+            release.set()
+
+        await asyncio.gather(h.manager.reconcile_plugin_cogs("alpha"), disable_mid_host())
+
+        # hosted once, taken straight back off; nothing stays invocable
+        self.assertEqual(added, ["PingCog"])
+        self.assertEqual(removed, ["PingCog"])
+        self.assertEqual(host.hosted_plugins("alpha"), set())
