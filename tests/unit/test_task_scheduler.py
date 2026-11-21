@@ -816,6 +816,8 @@ class TestExactlyOnceRaces(SchedulerTestBase):
         self.assertTrue(await self.wait_until(lambda: task.status == "completed"))
         # sweep the task between its terminal transition and the audit emit:
         # terminal tasks must be skipped (no double terminal, no lost audit)
+        self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 0)
+        self.assertFalse(self.scheduler.cancel(task.id))
         self.assertTrue(
             await self.wait_until(
                 lambda: len(self.repo.add_calls) == 1

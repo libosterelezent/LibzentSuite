@@ -531,7 +531,11 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
         thread, off the loop). Deterministic: a progress counter proves
         loop servicing — synchronous writes would starve it to exactly
         zero during the write phase. A loaded machine delays everything
-        equally and changes the count not at all."""
+        equally and changes the count not at all. Catches the full
+        regression (writes running synchronously on the loop); does NOT
+        bound how long a yield-free section between two awaits may run —
+        that needs a parked DB-worker gate, left as the documented
+        limitation of the ratio technique."""
         progress = 0
         first_completion_progress: int | None = None
         done = asyncio.Event()

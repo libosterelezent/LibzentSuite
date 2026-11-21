@@ -162,7 +162,9 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         PARKED inside repo.add() — it returns only when released — 1000
         record() calls must all complete. A record path that ever waited
         on SQLite would hang against the parked repo, not merely run
-        slow. The wait_for bounds are hang guards, not measurements."""
+        slow. The wait_for bounds are hang guards, not measurements: on
+        timeout the finally block releases the park, so a regression
+        FAILS the test instead of hanging the suite's teardown."""
         service = LogService()
         repo = ParkedLogRepo()
         await service.start_persistence(repo, batch=10, interval=0.01)
@@ -176,21 +178,28 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
                 service.record("INFO", "lat", f"m{i}")
 
         # off-loop: a blocking record() surfaces as a TimeoutError here
-        # instead of freezing the event loop with it
-        await asyncio.wait_for(asyncio.to_thread(blast), timeout=5.0)
-        stats = service.stats()
-        self.assertEqual(stats["entries"], 1001)  # ring took every record
-        self.assertEqual(stats["dropped"], 0)  # 1000 << the 10_000 cap
-        self.assertEqual(repo.added, [])  # still parked: nothing drained
+        # instead of freezing the event loop with it. to_thread runs the
+        # callable on the default executor — cancelling the await does
+        # NOT stop that thread — so the producer is shielded and the
+        # finally block joins it after releasing the park
+        producer = asyncio.create_task(asyncio.to_thread(blast))
+        try:
+            await asyncio.wait_for(asyncio.shield(producer), timeout=5.0)
+            stats = service.stats()
+            self.assertEqual(stats["entries"], 1001)  # ring took every record
+            self.assertEqual(stats["dropped"], 0)  # 1000 << the 10_000 cap
+            self.assertEqual(repo.added, [])  # still parked: nothing drained
+        finally:
+            repo.release.set()
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(producer, timeout=5.0)
+            with contextlib.redirect_stderr(io.StringIO()):
+                await service.stop_persistence(timeout=5.0)
 
-        repo.release.set()
-        with contextlib.redirect_stderr(io.StringIO()):
-            await service.stop_persistence(timeout=5.0)
         self.assertEqual(len(repo.added), 1001)  # exactly-once, in order
         self.assertEqual(
             [e["message"] for e in repo.added], ["prime"] + [f"m{i}" for i in range(1000)]
         )
-
     async def test_overflow_drops_counted_ring_unaffected(self) -> None:
         """(c) Queue capped at 10_000 in-flight: the excess is dropped FROM
         PERSISTENCE, counted in stats()['dropped']; ring/counters keep
