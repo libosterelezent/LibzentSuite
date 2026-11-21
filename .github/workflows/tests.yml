@@ -58,7 +58,7 @@ jobs:
             && echo "ruff format clean"
       - name: requirements.txt export sync (the AGENTS.md §8 contract)
         run: |
-          uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
+          uv export --locked --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
           git diff --exit-code -- requirements.txt
       - name: Pyright ratchet (.github/pyright-baseline)
         run: |
