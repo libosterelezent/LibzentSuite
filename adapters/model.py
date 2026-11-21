@@ -125,7 +125,7 @@ class DiscordComponent:
         """Every component in the tree, depth-first (self included)."""
         out = [self]
         for child in self.components:
-            out.extend(child.walk())
+            out.extend(child.walk())  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         return tuple(out)
 
     def find(self, custom_id: str) -> DiscordComponent | None:

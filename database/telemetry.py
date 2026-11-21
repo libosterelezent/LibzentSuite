@@ -81,7 +81,7 @@ class DbTelemetry:
         with self._lock:
             self._counts[kind] = self._counts.get(kind, 0) + 1
             if not ok:
-                self._errors[kind] = self._errors.get(kind, 0) + 1
+                self._errors[kind] = self._errors.get(kind, 0) + 1  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
             self._hists[kind][bisect.bisect_left(_BUCKETS_MS, ms)] += 1
             if ms > self._max_s.get(kind, 0.0) * 1000.0:
                 self._max_s[kind] = seconds

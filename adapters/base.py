@@ -118,6 +118,8 @@ class DiscordClient(Protocol):
         exclusively from this.
         """
 
+        raise NotImplementedError
+
 
 @runtime_checkable
 class ClientFactory(Protocol):

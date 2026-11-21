@@ -250,10 +250,10 @@ class SettingsManager:
                 self._logger.exception("could not load plugin settings layer")
                 self._account_plugin = {}
         if self._account_repo is not None:
-            listing = getattr(self._account_repo, "list_accounts", None)
+            listing: Any = getattr(self._account_repo, "list_accounts", None)
             if callable(listing):
                 try:  # best-effort like the layers above: a locked read
-                    names = await listing() or []  # must not fail the boot
+                    names = await listing() or []  # must not fail the boot  # pyright: ignore[reportGeneralTypeIssues]  # duck-typed async
                 except Exception:
                     self._logger.exception("could not load account settings layer")
                     names = []
@@ -395,9 +395,9 @@ class SettingsManager:
                 f"unknown setting (supports: {sorted(defs)})",
             )
         old = self._account_plugin.get(account, {}).get(plugin, {}).get(key)
-        delete = getattr(self._plugin_repo, "delete_setting", None)
+        delete: Any = getattr(self._plugin_repo, "delete_setting", None)
         if callable(delete):
-            await delete(account, plugin, key)
+            await delete(account, plugin, key)  # pyright: ignore[reportGeneralTypeIssues]  # duck-typed async
         elif self._plugin_repo is not None:
             self._logger.warning(
                 "plugin repository cannot delete settings "

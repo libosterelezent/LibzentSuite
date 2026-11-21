@@ -1466,9 +1466,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         # bounded (PR review round 10): a regression that skips add_cog
         # entirely would park disable_mid_host on `entered` forever —
         # the test must FAIL, not hang (wait_for cancels both on timeout)
-        participants = asyncio.gather(
-            h.manager.reconcile_plugin_cogs("alpha"), disable_mid_host()
-        )
+        participants = asyncio.gather(h.manager.reconcile_plugin_cogs("alpha"), disable_mid_host())
         await asyncio.wait_for(participants, timeout=10.0)
 
         # hosted once, taken straight back off; nothing stays invocable

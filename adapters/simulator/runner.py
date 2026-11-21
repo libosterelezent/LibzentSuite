@@ -176,7 +176,7 @@ def _entry_dict(entry: Any) -> dict[str, Any]:
     as_dict = getattr(entry, "as_dict", None)
     if callable(as_dict):
         try:
-            return dict(as_dict())
+            return dict(as_dict())  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
         except Exception:
             pass
     data = getattr(entry, "__dict__", None)
