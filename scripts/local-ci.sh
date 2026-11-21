@@ -164,24 +164,23 @@ report_state_residue
 step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
-# PARALLEL coverage (process speed, 2026-11-19): coverage's --parallel-mode
-# writes per-worker data files that `coverage combine` merges — the
-# 3.13 leg drops from ~8 min serial to ~2.5 min parallel, same floor.
-# CONCURRENT-GATE SAFETY (pre-push round): the data files live under
-# COVERAGE_FILE in THIS run's scratch dir — the repo-root .coverage
-# let one gate `rm -f`/clobber another's in-flight data (a clobbered
-# read measured 0.0% and failed the floor) — and the leg holds the
-# checkout flock: two gates must not mutate the project .venv under
-# each other's running suites either.
+# PARALLEL coverage via pytest-cov (process speed, 2026-11-19):
+# pytest-cov forwards coverage into every xdist worker and merges the
+# data itself — plain `coverage run --parallel-mode` measured ONLY the
+# orchestrating master (xdist workers are separate unmeasured
+# processes; the report read 0.0% and failed the floor).
+# CONCURRENT-GATE SAFETY (pre-push round): the data file lives under
+# COVERAGE_FILE in THIS run's scratch dir — a repo-root .coverage let
+# one gate clobber another's data — and the leg holds the checkout
+# flock: two gates must not mutate the project .venv under each
+# other's running suites either.
 exec 9>"$VENV310.lock"
 if ! flock -n 9; then
   echo "       another gate holds this checkout's suites — waiting for the 3.13 leg..."
   flock 9
 fi
-if COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage run --parallel-mode -m pytest tests/ -n auto --dist loadscope \
+if COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 pytest tests/ --cov -n auto --dist loadscope \
   > "$RUN_DIR/suite-313.log" 2>&1 \
-  && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage combine \
-  >> "$RUN_DIR/suite-313.log" 2>&1 \
   && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
   ok "3.13 suite: $(grep "passed" "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
