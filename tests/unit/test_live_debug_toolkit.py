@@ -162,8 +162,10 @@ class ClassifierTests(unittest.TestCase):
 
     def test_the_estop_disconnect_lifecycle_row_is_an_observation(self) -> None:
         # the harness's deliberate estop echoes as this exact record:
-        # event name + events source, message words never consulted —
-        # but ONLY while a disconnect-exercising phase is running
+        # event name + events source + the EXPECTED account, message
+        # words never consulted beyond the account field — but ONLY
+        # while a disconnect-exercising phase runs for an account it
+        # named (here: gamma is the one being stopped)
         self.assertEqual(
             live_debug.classify_log_entry(
                 "WARNING",
@@ -171,6 +173,7 @@ class ClassifierTests(unittest.TestCase):
                 "status='stopped' account='gamma'",
                 event="AccountDisconnected",
                 phase="accounts",
+                expected_disconnects=frozenset({"gamma"}),
             ),
             "observation",
         )
@@ -186,6 +189,24 @@ class ClassifierTests(unittest.TestCase):
                 "status='stopped' account='alpha'",
                 event="AccountDisconnected",
                 phase="rate-limits",
+                expected_disconnects=frozenset({"gamma"}),
+            ),
+            "major",
+        )
+
+    def test_a_disconnect_of_the_wrong_account_stays_major(self) -> None:
+        # the LATER scoping (PR review, same day): even inside a
+        # disconnect-exercising phase, an account the harness did NOT
+        # stop disconnecting is a finding — the phase-wide downgrade
+        # masked alpha while gamma was the one being estopped
+        self.assertEqual(
+            live_debug.classify_log_entry(
+                "ERROR",
+                "events",
+                "status='stopped' account='alpha'",
+                event="AccountDisconnected",
+                phase="accounts",
+                expected_disconnects=frozenset({"gamma"}),
             ),
             "major",
         )

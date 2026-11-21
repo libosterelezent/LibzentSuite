@@ -160,8 +160,19 @@ _CONTRACT_WARNING_KEYWORDS = (
 _DISCONNECT_PHASES = frozenset({"accounts", "shutdown"})
 
 
+def _message_account(message: str) -> str | None:
+    """The ``account='<name>'`` field of a lifecycle row, if present."""
+    match = re.search(r"account='([^']+)'", message)
+    return match.group(1) if match else None
+
+
 def _deliberate_row(
-    severity: str, source: str, message: str, event: str | None, phase: str | None = None
+    severity: str,
+    source: str,
+    message: str,
+    event: str | None,
+    phase: str | None = None,
+    expected_disconnects: frozenset[str] = frozenset(),
 ) -> bool:
     """True for known-DELIBERATE loud rows — operator actions and staged
     failure paths that log WARNING/ERROR on purpose.
@@ -178,14 +189,20 @@ def _deliberate_row(
     """
     lowered = message.lower()
     # the EXPECTED estop echo: the AccountDisconnected lifecycle record
-    # from the events source — but ONLY while a phase that deliberately
-    # disconnects accounts is running (accounts' estop/stop/remove, the
-    # ordered shutdown). Downgrading it EVERYWHERE masked a disconnect
-    # no harness action can explain (PR review: downgrade only when
-    # expected). Matched by event name + source exactly —
-    # AccountFailed is NEVER expected (a real failure), and message
-    # words are not consulted.
-    if event == "AccountDisconnected" and source == "events" and phase in _DISCONNECT_PHASES:
+    # from the events source — but ONLY for the ACCOUNT the harness is
+    # deliberately stopping, while a disconnect-exercising phase runs
+    # (accounts' estop/stop/remove, the ordered shutdown). A phase-wide
+    # downgrade masked a disconnect of an account no harness action can
+    # explain (PR review: scope to the expected account). Matched by
+    # event name + source exactly — AccountFailed is NEVER expected (a
+    # real failure); message words are not consulted beyond the
+    # account field.
+    if (
+        event == "AccountDisconnected"
+        and source == "events"
+        and phase in _DISCONNECT_PHASES
+        and _message_account(message) in expected_disconnects
+    ):
         return True
     if severity == "ERROR":
         # the account manager's estop announcement is ERROR-loud BY
@@ -200,7 +217,12 @@ def _deliberate_row(
 
 
 def classify_log_entry(
-    severity: str, source: str, message: str, event: str | None = None, phase: str | None = None
+    severity: str,
+    source: str,
+    message: str,
+    event: str | None = None,
+    phase: str | None = None,
+    expected_disconnects: frozenset[str] = frozenset(),
 ) -> str | None:
     """Map one structured log row to a finding severity (None = not one).
 
@@ -209,13 +231,14 @@ def classify_log_entry(
     observation when deliberate, minor when the message reads like a
     contract violation (the keyword list), and nothing at all when it is
     ordinary operational chatter. INFO/DEBUG rows are never findings.
-    ``phase`` scopes the phase-dependent deliberate rules (the estop
-    disconnect echo) to phases that actually disconnect.
+    ``phase`` and ``expected_disconnects`` scope the phase-dependent
+    deliberate rules (the estop disconnect echo) to phases that actually
+    disconnect and to the accounts they named.
     """
     sev = (severity or "").upper()
     if sev not in ("ERROR", "WARNING"):
         return None
-    if _deliberate_row(sev, source, message, event, phase):
+    if _deliberate_row(sev, source, message, event, phase, expected_disconnects):
         return "observation"
     if sev == "ERROR":
         return "major"
@@ -412,6 +435,11 @@ class Harness:
         # expectation) AND encrypt the synthetic tokens under the
         # operator's real key material (PR review 2026-11-21)
         self._prior_master_key: str | None = os.environ.pop("LZ_MASTER_KEY", None)
+        # accounts a phase is DELIBERATELY stopping — the estop-echo
+        # downgrade applies to these only, never the whole phase (PR
+        # review: scope expected disconnects to the account being
+        # stopped)
+        self._expected_disconnects: set[str] = set()
         self._torn_down = False
         # framework handles (set by boot)
         self.workdir: Path | None = None
@@ -577,6 +605,12 @@ class Harness:
             shutil.rmtree(self.workdir, ignore_errors=True)
 
     # ------------------------------------------------------ anomaly capture
+    def mark_disconnect_expected(self, *accounts: str) -> None:
+        """Name the accounts a phase is about to stop deliberately —
+        their AccountDisconnected echo classifies as an observation;
+        every other account's disconnect stays a finding."""
+        self._expected_disconnects.update(accounts)
+
     def _arm_loop_handler(self) -> None:
         """Install the loop exception handler (unhandled task wreckage
         becomes a CRITICAL finding instead of a stderr print). Runs
@@ -655,7 +689,14 @@ class Harness:
             source = str(getattr(entry, "source", "?"))
             message = str(getattr(entry, "message", ""))
             event = str(getattr(entry, "event", "") or "") or None
-            verdict = classify_log_entry(severity, source, message, event, phase=self._phase)
+            verdict = classify_log_entry(
+                severity,
+                source,
+                message,
+                event,
+                phase=self._phase,
+                expected_disconnects=frozenset(self._expected_disconnects),
+            )
             if verdict is None:
                 return
             self.report(
@@ -1013,6 +1054,9 @@ async def phase_accounts(h: Harness) -> None:
         lambda: h.api.accounts_add({"name": "gamma", "credential": "sim-token-gamma"}),
     )
     await h.step("start gamma", lambda: h.api.accounts_start("gamma"))
+    # mid-estop bookkeeping first: gamma's disconnect echo is the
+    # EXPECTED one (an observation); any other account's stays major
+    h.mark_disconnect_expected("gamma")
     estop = await h.step("emergency-stop gamma", lambda: h.api.accounts_emergency_stop("gamma"))
     h.expect(
         isinstance(estop, dict) and estop.get("stop_initiated") is True,
@@ -2125,6 +2169,12 @@ async def phase_simulation(h: Harness) -> None:
 
 async def phase_shutdown(h: Harness) -> None:
     """Graceful teardown of the whole stack (the ordered contract)."""
+    # stop_all disconnects EVERY account: each one's echo is expected
+    # here (and only here) — marked before the rows can arrive
+    for row in await h.api.accounts_list():
+        name = row.get("name")
+        if isinstance(name, str):
+            h.mark_disconnect_expected(name)
     counts_before = h._findings.counts()
     errors_before = counts_before.get("major", 0) + counts_before.get("critical", 0)
     await h.step("framework.shutdown", h.framework.shutdown)
