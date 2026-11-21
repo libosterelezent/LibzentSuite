@@ -146,7 +146,7 @@ if ! flock -n 9; then
   flock 9
 fi
 if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --exact --python 3.10 \
-  pytest tests/ -q -n auto --dist loadscope \
+  pytest tests/ -n auto --dist loadscope \
   > "$RUN_DIR/suite-310.log" 2>&1; then
   ok "3.10 suite: $(grep -E "passed" "$RUN_DIR/suite-310.log" | tail -1)"
 else
@@ -165,14 +165,24 @@ step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
 # PARALLEL coverage (process speed, 2026-11-19): coverage's --parallel-mode
-# writes per-worker .coverage.* files that `coverage combine` merges — the
-# 3.13 leg drops from ~8 min serial to ~2.5 min parallel, same floor
-rm -f .coverage .coverage.*
-if "$UV_BIN" run --frozen --python 3.13 coverage run --parallel-mode -m pytest tests/ -q -n auto --dist loadscope \
+# writes per-worker data files that `coverage combine` merges — the
+# 3.13 leg drops from ~8 min serial to ~2.5 min parallel, same floor.
+# CONCURRENT-GATE SAFETY (pre-push round): the data files live under
+# COVERAGE_FILE in THIS run's scratch dir — the repo-root .coverage
+# let one gate `rm -f`/clobber another's in-flight data (a clobbered
+# read measured 0.0% and failed the floor) — and the leg holds the
+# checkout flock: two gates must not mutate the project .venv under
+# each other's running suites either.
+exec 9>"$VENV310.lock"
+if ! flock -n 9; then
+  echo "       another gate holds this checkout's suites — waiting for the 3.13 leg..."
+  flock 9
+fi
+if COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage run --parallel-mode -m pytest tests/ -n auto --dist loadscope \
   > "$RUN_DIR/suite-313.log" 2>&1 \
-  && "$UV_BIN" run --frozen --python 3.13 coverage combine \
+  && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage combine \
   >> "$RUN_DIR/suite-313.log" 2>&1 \
-  && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
+  && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
   ok "3.13 suite: $(grep "passed" "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
   # tests and coverage fail separately: the suite log carries
@@ -184,6 +194,7 @@ else
   bad "3.13 suite/coverage — $reason"
   grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-313.log" | head -30 || true
 fi
+exec 9>&-  # release — the build leg shares nothing mutable
 report_state_residue
 
 step "7/8 Build (sdist + wheel)"
