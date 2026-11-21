@@ -322,8 +322,12 @@ class _TerminalTriggerNursery:
             try:
                 await asyncio.shield(reap)
             except asyncio.CancelledError:
+                # a SECOND cancellation must not cancel the join itself
+                # (a bare await propagates into it); the children were
+                # already cancelled above, so the join is bounded by
+                # their unwind — finish it bounded, then propagate.
                 with contextlib.suppress(asyncio.CancelledError):
-                    await reap
+                    await asyncio.wait({reap}, timeout=5.0)
                 raise
 
 
