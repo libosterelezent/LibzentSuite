@@ -320,7 +320,18 @@ class _TerminalTriggerNursery:
             # and FINISH it before the cancellation propagates.
             reap = asyncio.ensure_future(asyncio.wait(tasks))
             try:
-                await asyncio.shield(reap)
+                # the NORMAL join is bounded too (final pre-push
+                # review): this is shutdown's FIRST step — a cancelled
+                # trigger whose cleanup ignores its cancellation must
+                # not pin it before accounts and database.close() ever
+                # run. The budget cancels the shield, not the reap.
+                await asyncio.wait_for(asyncio.shield(reap), timeout=5.0)
+            except asyncio.TimeoutError:
+                if not reap.done():
+                    ROOT_LOGGER.warning(
+                        "terminal trigger reap exceeded the 5s join budget; "
+                        "shutdown continues around it"
+                    )
             except asyncio.CancelledError:
                 # a SECOND cancellation must not cancel the join itself
                 # (a bare await propagates into it); the children were
