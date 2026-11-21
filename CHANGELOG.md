@@ -99,6 +99,16 @@ nothing can ship until that hold is lifted; see
   instead of a depth poll that returned instantly; and the pytest
   configuration comment no longer describes the retired serial
   `test_rich_model` fallback.
+- The round-9 gate's converged review: the terminal-trigger reap's
+  NORMAL join is bounded too (the 5s budget covered only the
+  cancelled-caller branch — a trigger cleanup that ignored its
+  cancellation pinned shutdown's first step before
+  `database.close()` ever ran); a completed review carrying
+  `unreviewedFileCount` or a failed `outcome` fails the gate instead
+  of reading "0 findings"; and the estop-echo downgrade is scoped to
+  the account the harness named (`mark_disconnect_expected`) — a
+  wrong account's ERROR-class disconnect during the accounts phase
+  is a major again, not an observation.
   Triaged: the CLI live-log window's synchronous
   `print` can block the loop on a stalled consumer pipe (pre-existing,
   interactive `--live` feature — bounded off-loop output is a design
