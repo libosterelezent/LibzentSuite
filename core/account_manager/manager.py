@@ -2594,6 +2594,12 @@ class AccountManager:
         def _went_stale() -> bool:
             return self._stop_landed(runtime) or runtime.generation != generation
 
+        def _still_enabled(plugin_name: str) -> bool:
+            # LIVE flag read: the runtime objects in the view are the
+            # live ones — a disable that lands mid-pass must be seen
+            # here (PR review 2026-11-21)
+            return bool(getattr(runtimes.get(plugin_name), "enabled", True))
+
         for plugin_name in hosted - current:
             try:
                 await self._plugin_manager.unhost_cog(name, plugin_name)
@@ -2606,8 +2612,18 @@ class AccountManager:
             facade = self.services_for(name, plugin_name)
             try:
                 if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
+                    if not _still_enabled(plugin_name):
+                        # disabled while an earlier host's await ran:
+                        # skip — the disable's own reconcile cannot
+                        # unhost this cog (attach records it only after
+                        # add_cog returns)
+                        continue
                     await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
                     freshly_hosted.append(plugin_name)
+                    if not _still_enabled(plugin_name):
+                        # disabled DURING this host: same blindness on
+                        # the disable side — take it straight back off
+                        await self._plugin_manager.unhost_cog(name, plugin_name)
                 else:
                     cog_host.rebind_paced(name, plugin_name, facade)
             except Exception as exc:
