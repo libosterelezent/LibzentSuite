@@ -62,6 +62,11 @@ fi
 # early steps. The lock file lives beside the persistent 3.10 venv
 # (same checkout-scoped name).
 VENV310="/tmp/opencode/local-ci-venv310-$(pwd | cksum | cut -d' ' -f1)"
+# the lock parent must exist BEFORE the redirection opens the lock file
+# (PR review 2026-11-21): /tmp/opencode is not guaranteed on other
+# machines, and a failed redirection under set -e kills the gate at
+# line one of the lock section
+mkdir -p "$(dirname "$VENV310")"
 exec 9>"$VENV310.lock"
 if ! flock -n 9; then
   echo "       another gate holds this checkout — waiting for it to finish..."
@@ -135,15 +140,21 @@ fi
 # contract says both green before push, not sequential). The review
 # output lands in $RUN_DIR/review.ndjson.
 REVIEW_PID=""
+REVIEW_EXIT=0  # initialized here: the stall branch must not read it unset (PR review 2026-11-21)
 if [ "$REVIEW_FLAG" -eq 1 ]; then
   if [ ! -x "$CR_BIN" ]; then
     echo "local-ci: --review needs the coderabbit CLI — looked on PATH and at $HOME/.local/bin/coderabbit" >&2
     exit 2
   fi
   step "0/8 CodeRabbit review (concurrent with the suites)"
-  ("$CR_BIN" review --agent \
+  # setsid: the review leads its own session, so the stall path can
+  # signal the whole PROCESS GROUP — killing only the subshell left the
+  # coderabbit child running. fd 9 (the checkout lock) is closed inside:
+  # an inherited lock fd let a stalled review block the NEXT gate's
+  # flock until it died on its own (PR review 2026-11-21).
+  setsid bash -c 'exec 9>&-; exec "$1" review --agent \
     --base-commit origin/master --fresh \
-    > "$RUN_DIR/review.ndjson" 2>&1) &
+    > "$2" 2>&1' _ "$CR_BIN" "$RUN_DIR/review.ndjson" &
   REVIEW_PID=$!
   echo "       review running as PID $REVIEW_PID"
 fi
@@ -221,13 +232,15 @@ if [ -n "$REVIEW_PID" ]; then
     REVIEW_WAITED=$((REVIEW_WAITED + 10))
   done
   if kill -0 "$REVIEW_PID" 2>/dev/null; then
-    kill "$REVIEW_PID" 2>/dev/null || true
+    # signal the review's whole SESSION (setsid made it a group
+    # leader): the subshell-only kill left the coderabbit child alive
+    kill -- -"$REVIEW_PID" 2>/dev/null || true
     sleep 2
-    kill -9 "$REVIEW_PID" 2>/dev/null || true
+    kill -9 -- -"$REVIEW_PID" 2>/dev/null || true
     echo -e "\033[31mREVIEW: stalled past 900s — killed; no review verdict (rerun the gate)\033[0m"
     FAIL=1
+    REVIEW_EXIT=124  # skip the parse below: a partial stream is not a verdict
   else
-    REVIEW_EXIT=0
     wait "$REVIEW_PID" || REVIEW_EXIT=$?
   fi
   if [ "$REVIEW_EXIT" -ne 0 ]; then
