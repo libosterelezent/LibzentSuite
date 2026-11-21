@@ -68,7 +68,21 @@ nothing can ship until that hold is lifted; see
   dir and the leg holds the checkout flock (two gates used to clobber
   the one repo-root `.coverage`, and `rm -f .coverage.*` could delete
   the other's in-flight worker data — a clobbered read measured 0.0%
-  and failed the floor). Triaged: the CLI live-log window's synchronous
+  and failed the floor). A second fresh review over the grown range
+  (19 findings: 12 fixed, 7 triaged) hardened the same surfaces: the
+  3.13 suite leg measures its xdist workers through pytest-cov (plain
+  parallel-mode coverage saw only the orchestrating master — 0.0%
+  against the floor, CI included); the harness's estop-echo downgrade
+  is phase-scoped (an ERROR-class disconnect nothing requested is a
+  major again, not an observation); failed scan steps no longer print
+  PASS; the cancel probe compares verb count to persisted rows by
+  equality; teardown restores the loop handler only if it installed
+  one; an interrupted simulator subprocess is killed and reaped; the
+  trigger word matches at a token boundary; the live window
+  unsubscribes before its shielded reap; a second cancellation cannot
+  cancel the trigger-reap join; and the gate treats every
+  non-`review_completed` terminal review status as a failure.
+  Triaged: the CLI live-log window's synchronous
   `print` can block the loop on a stalled consumer pipe (pre-existing,
   interactive `--live` feature — bounded off-loop output is a design
   change deferred to its own pass); the fail-closed toggle test's
