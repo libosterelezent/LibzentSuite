@@ -1440,10 +1440,29 @@ class ControlAPI:
         self._audit_mgmt("system", "mgmt:plugin.unloaded", surface, extra=f"plugin={plugin}")
         return out
 
-    async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> dict[str, Any]:
+    async def plugins_set_enabled(
+        self, account: str, plugin: str, enabled: bool, surface: str = "api"
+    ) -> dict[str, Any]:
         """Enable/disable a plugin on an account (lifecycle hooks fire)."""
-        await self._plugins.set_enabled(account, plugin, parse_bool(enabled, "enabled"))
-        return {"account": account, "plugin": plugin, "enabled": enabled}
+        normalized = parse_bool(enabled, "enabled")
+        # fail closed BEFORE any state moves (PR review 2026-11-18):
+        # reconcile_plugin_cogs is silently no-op on an unknown account,
+        # so without this the audit row below was the only — false —
+        # witness that a toggle happened
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        await self._plugins.set_enabled(account, plugin, normalized)
+        # the command face follows the toggle NOW (assignment ∧ enabled)
+        await self._accounts.reconcile_plugin_cogs(account)
+        # the command-surface mutation rides the mgmt trail (PR review
+        # 2026-11-18): the toggle adds/removes the plugin's chat commands
+        self._audit_mgmt(
+            account,
+            f"mgmt:plugin.{'enabled' if normalized else 'disabled'}",
+            surface,
+            extra=f"plugin={plugin}",
+        )
+        return {"account": account, "plugin": plugin, "enabled": normalized}
 
     async def plugins_settings(self, account: str) -> list[dict[str, Any]]:
         """Resolved settings per plugin for one account."""
@@ -2083,10 +2102,21 @@ class ControlAPI:
 
     # ------------------------------------------------------------------- logs
     async def logs_tail(
-        self, n: int = 100, account: str | None = None, severity: str | None = None
+        self,
+        n: int = 100,
+        account: str | None = None,
+        severity: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
-        """Structured log tail (dashboard Logs page + CLI 'logs')."""
-        return self._logs.tail(n, account=account, severity=severity)
+        """Structured log tail (dashboard Logs page + CLI).
+
+        ``account`` selects one client's logs (``log <account>``);
+        ``without_account`` selects the suite's OWN rows — framework
+        entries that carry no account context (``global-log``).
+        """
+        return self._logs.tail(
+            n, account=account, severity=severity, without_account=without_account
+        )
 
     def logs_service(self) -> LogService:
         """The live service (dashboard WS subscribes to this)."""

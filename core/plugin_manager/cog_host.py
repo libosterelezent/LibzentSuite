@@ -7,7 +7,8 @@ and assignment ∧ enabled gating becomes add_cog/remove_cog — the
 library's own hot-reload IS the rebuild mechanism.
 
 What the host provides a plugin cog (all injected — plugins never
-import adapters):
+import adapters; the client itself rides the toolbox, owner-locked
+2026-11-17):
   - `ctx.services`     — the paced PluginServices facade (loops ride
     ctx.services.send_message; ctx.send stays library-native and is
     for COMMAND RESPONSES ONLY — the documented discipline)
@@ -124,6 +125,21 @@ class CogServices:
         to."""
         self._paced = paced
 
+    def bind_client(self, client: Any) -> None:
+        """Bind the account's library client — the owner-locked direct
+        connection (2026-11-17): the toolbox carries the client the cog
+        is hosted on, per (account, plugin). The framework's value is
+        orchestration + multi-account isolation, not capability
+        mediation; the paced facade stays as the law for coordinated
+        writes, and this is the raw reach plugin authorship deserves."""
+        self._client = client
+
+    @property
+    def client(self) -> Any:
+        """The account's library client (None before attach binds one)
+        — the Mudabot-grade direct reach, account-scoped by construction."""
+        return getattr(self, "_client", None)
+
 
 class PluginCogHost:
     """Builds and manages plugin cog instances per (account, plugin).
@@ -202,6 +218,7 @@ class PluginCogHost:
         lift it onto ``ctx.services`` (roadmap #4)."""
         services = self.services_for(account, plugin)
         services.bind_paced(paced)
+        services.bind_client(bot)  # the direct connection (owner lock)
         cog = cog_class(services=services)
         await bot.add_cog(cog)
         self._cogs[(account, plugin)] = cog

@@ -1659,6 +1659,7 @@ class TaskScheduler:
                         duration_s=row["duration_s"],
                         summary=summary or "",
                         plugin=task.plugin,  # W4: the chain trigger's key
+                        action=task.action,  # the trigger's second key
                     )
                 )
             elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
@@ -1669,6 +1670,7 @@ class TaskScheduler:
                         error=error or status,
                         error_kind=self._error_kind(error or ""),
                         plugin=task.plugin,  # W4: the chain trigger's key
+                        action=task.action,  # the trigger's second key
                     )
                 )
             elif status == STATUS_CANCELLED:

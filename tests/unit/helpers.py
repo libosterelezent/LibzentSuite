@@ -693,3 +693,78 @@ __all__ = [
     "make_manager",
     "make_task",
 ]
+
+
+def fake_discord_sysmodules(lib_cls: Any) -> dict[str, Any]:
+    """The fake discord world for sys.modules patching — Bot included.
+
+    The adapter ALWAYS builds ext.commands.Bot now (the construction
+    fork is gone), so every stub world needs a minimal
+    ``discord.ext.commands``: a Bot stand-in riding the lib-client stub
+    (READY/park lifecycle inherited) plus the cog/check/before_invoke
+    seams the command layer installs, the prefix callables the dynamic
+    resolver reads, and the error types on_command_error filters on.
+    All three keys must ride the SAME patch.dict — from-imports resolve
+    through sys.modules and patch.dict restores the whole set.
+    """
+    import types
+
+    def _make_bot_stand_in(base: Any) -> Any:
+        class BotStandIn(base):  # type: ignore[misc]  # per-test Any base
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.cogs: dict[str, Any] = {}
+                self._checks: list[Any] = []
+
+            def add_check(self, func: Any) -> None:
+                self._checks.append(func)
+
+            _before_invoke: Any = None
+
+            def before_invoke(self, coro: Any) -> Any:
+                self._before_invoke = coro
+                return coro
+
+            async def add_cog(self, cog: Any) -> None:
+                self.cogs[type(cog).__name__] = cog
+
+            async def remove_cog(self, name: str) -> None:
+                self.cogs.pop(name, None)
+
+            async def process_commands(self, message: Any) -> None:
+                return None
+
+            async def get_context(self, message: Any) -> Any:
+                # the adapter's command-traffic check: context with no
+                # command means ordinary traffic (the DTO path continues)
+                return SimpleNamespace(command=None)
+
+            async def invoke(self, ctx: Any) -> None:
+                return None
+
+        return BotStandIn
+
+    commands_mod = types.ModuleType("discord.ext.commands")
+    commands_mod.Bot = _make_bot_stand_in(lib_cls)  # type: ignore[attr-defined]
+    commands_mod.when_mentioned = (  # type: ignore[attr-defined]
+        lambda bot, message: []
+    )
+    commands_mod.when_mentioned_or = (  # type: ignore[attr-defined]
+        lambda *prefixes: lambda bot, message: []
+    )
+    commands_mod.CommandNotFound = (  # type: ignore[attr-defined]
+        type("CommandNotFound", (Exception,), {})
+    )
+    commands_mod.CheckFailure = (  # type: ignore[attr-defined]
+        type("CheckFailure", (Exception,), {})
+    )
+    ext_mod = types.ModuleType("discord.ext")
+    ext_mod.commands = commands_mod  # type: ignore[attr-defined]
+    discord_mod = types.ModuleType("discord")
+    discord_mod.Client = lib_cls  # type: ignore[attr-defined]
+    discord_mod.DMChannel = type("DMChannel", (), {})  # type: ignore[attr-defined]
+    return {
+        "discord": discord_mod,
+        "discord.ext": ext_mod,
+        "discord.ext.commands": commands_mod,
+    }

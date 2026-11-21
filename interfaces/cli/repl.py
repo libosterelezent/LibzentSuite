@@ -25,7 +25,10 @@ import contextlib
 import shlex
 import sys
 import threading
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
 
 from core.errors import DOMAIN_ERRORS, SchedulerError, UnsafePolicyError
 
@@ -144,7 +147,10 @@ class Repl:
                 line = get.result()
                 if not line:  # EOF
                     break
-                if not await self.execute(line.strip()):
+                # bounded commands finish despite stop (the documented
+                # graceful contract); the UNBOUNDED live-log window
+                # observes shutdown itself via stop_wait threading
+                if not await self.execute(line.strip(), input_feed=lines.get, stop_wait=stop_wait):
                     break
         except KeyboardInterrupt:
             pass  # Ctrl-C anywhere ends the session cleanly
@@ -157,10 +163,18 @@ class Repl:
             self._write("bye.")
             self.running = False
 
-    async def execute(self, line: str) -> bool:
+    async def execute(
+        self,
+        line: str,
+        *,
+        input_feed: Callable[[], Coroutine[Any, Any, str]] | None = None,
+        stop_wait: Any = None,
+    ) -> bool:
         """Run one command line; returns False when the REPL should exit."""
         try:
-            text = await run_command(self.api, line)
+            text = await run_command(
+                self.api, line, input_feed=input_feed, out=self._out, stop_wait=stop_wait
+            )
             if text:
                 self._write(text)
         except QuitRequested:

@@ -5,8 +5,9 @@ Public surface: PluginManager (+ PluginRuntime). The loader lives in
 contract in ``core.plugin_base`` (PluginBase/PluginContext/
 PluginServices), and the process-wide seam hub in
 ``core.plugin_manager.commands`` (SelfCommandHub — bind/unbind +
-api_provider/access). The command face IS the cog surface now:
-framework verbs ride FrameworkVerbsCog, plugins declare COG classes.
+access). The command face IS the plugin cog surface (owner call
+2026-11-17): framework verbs no longer ride the accounts; plugins
+declare COG classes, hosted per (account, plugin) while attached.
 """
 
 from .commands import COMMAND_HUB, SelfCommandHub

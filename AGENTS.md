@@ -2,7 +2,7 @@
 
 Binding instructions for AI coding agents working anywhere in this repository. LibzentSuite is a game-agnostic, multi-account Discord flow-orchestration framework: a framework core, pluggable plugins and parser packs, and three interfaces — CLI, FastAPI core API, Flet UI — that all sit on one `ControlAPI` facade.
 
-These rules do not replace the current source code, the tests, or the architecture contracts (`docs/architecture/architecture.md`, `docs/architecture/integration.md`). Where they disagree with the code, follow §1.6.
+These rules do not replace the current source code, the tests, or the architecture contracts (`docs/architecture/architecture.rst`, `docs/architecture/integration.rst`). Where they disagree with the code, follow §1.6.
 
 ## Quick reference
 
@@ -34,7 +34,7 @@ python3 main.py --sim pacing_respected                         # whole stack ove
 1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and contracts; trace behavior end to end when it crosses layers. Don't infer current behavior from stale comments or old plans.
 2. **Solve the requested problem completely — and no more.** Make the smallest coherent change that fixes the root cause, with the tests and docs that make it understandable and verifiable. No unrelated refactors inside a fix.
 3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the one application facade for the CLI, the FastAPI core API, and the Flet UI. Extend it (and its tests) when a feature legitimately needs a shared operation; never add a second business-logic path to avoid touching it.
-4. **Keep plugins modular — Core Engine (framework) → Driver (plugins).** The framework provides capabilities; plugins use them live through `PluginServices`. Plugins never touch Discord clients directly: the framework services are the authoritative middleware, for security. The framework itself makes no self-initiated Discord API calls — every call is a plugin action through the paced pipeline.
+4. **Keep plugins modular — Core Engine (framework) → Driver (plugins).** The framework provides orchestration and multi-account isolation; plugins drive it live. Plugin cogs receive their account's library client DIRECTLY through the injected toolbox (owner-locked 2026-11-17 — the framework's value is pacing law + coordination, not capability mediation), and the paced `PluginServices` pipeline remains the law for coordinated outbound actions. The framework itself makes no self-initiated Discord API calls — every call is a plugin action.
 5. **Preserve safety and data semantics.** Never bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits to simplify a feature or its UI. Outbound actions flow `PluginServices` → `TaskScheduler` → `RateLimitManager` → `AccountManager.send_hook` → Discord client: the strictest pacing wins, the safety floor only rises, and server 429s always earn paced retries. Accounts stay isolated unless a workspace deliberately couples them (shared pacing clock, chains).
 6. **Prefer verified behavior to assumptions.** Separate confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision; resolve minor technical details yourself when they change neither product behavior nor a public contract.
 7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and docs. Change the smallest set of related files, preserve unrelated work, and never rewrite unrelated user changes.
@@ -87,7 +87,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 | Location | Role | Rules |
 | --- | --- | --- |
-| `AGENTS.md`, `docs/architecture/architecture.md`, `docs/architecture/integration.md` | Agent guidance and the binding engineering/architecture contracts | The only places for them. Verify against the code; fix or report stale contracts. |
+| `AGENTS.md`, `docs/architecture/architecture.rst`, `docs/architecture/integration.rst` | Agent guidance and the binding engineering/architecture contracts | The only places for them. Verify against the code; fix or report stale contracts. |
 | `docs/design/`, `docs/plans/` | Subsystem design specs and plans: locked decisions and intended direction (workspace design, data-management adoption, the Flet UI design contract, …) | Read the one for the subsystem you touch. If code and spec disagree, surface it (§1.6) instead of picking silently. |
 | rest of `docs/`, `README.md`, `CHANGELOG.md` | User-facing description, the roadmap (`docs/roadmap.md`), and history | Descriptive only — no coding rules, agent instructions, linting policy, or behavioral mandates. |
 | `knowledgebase/` | Technical reference and project history | Local-only (gitignored, absent from a fresh clone). Append-only. No rules. |
@@ -114,7 +114,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 ## 6. Public contracts, architecture, and UI
 
-- Read `docs/architecture/architecture.md` (ownership and boundaries) and `docs/architecture/integration.md` (the current inter-module contract) first. When they look stale, verify them against the code, don't perpetuate a known contradiction, and propose the correction.
+- Read `docs/architecture/architecture.rst` (ownership and boundaries) and `docs/architecture/integration.rst` (the current inter-module contract) first. When they look stale, verify them against the code, don't perpetuate a known contradiction, and propose the correction.
 - `core.api.ControlAPI` stays the shared facade for the CLI, the FastAPI core API (`interfaces/api/`), and the Flet UI (`interfaces/ui/`). When a feature needs a new shared operation, add it there and update the implementation, every interface, and the tests together.
 - UI work follows the owner's Flet UI design contract, `docs/plans/flet_ui_design_contract.md`. Layout, navigation, component structure, and interaction flow may change without changing backend behavior; a previous page list or implementation is not a standing requirement unless the task or a current contract reaffirms it.
 - Specify each component: purpose, inputs/outputs, interaction states (disabled, loading, success, failure), validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a markup trick or the presence of a comment.
@@ -136,7 +136,7 @@ Use `@dataclass` when a class mainly represents structured data with named field
 
 ## 8. Formatting, linting, and type checking
 
-**Ruff** owns linting, formatting, and import sorting; **mypy** owns strict static typing. The one canonical configuration is the root `pyproject.toml` — read it instead of restating it here, and never add a competing Black/isort/flake8 setup. Tool versions are pinned in `[dependency-groups] dev`; when upgrading, check the tools' current official documentation (mypy's strict flags are version-sensitive).
+**Ruff** owns linting, formatting, and import sorting; **pyright** owns static typing (adopted 2026-11-19; mypy shelved to the lock with honor — both its trees reached ZERO). The one canonical configuration is the root `pyproject.toml` — read it instead of restating it here, and never add a competing Black/isort/flake8 setup. Tool versions are pinned in `[dependency-groups] dev`; when upgrading, check the tools' current official documentation (mypy's strict flags are version-sensitive).
 
 **Toolchain.** Dependencies live in `[project]`, dev tools in `[dependency-groups] dev`, and `uv.lock` is the pinned universal resolution. CI installs it with `uv sync --frozen` and runs every check through `uv run --frozen`. `requirements.txt` is a generated pip-compat export of the lock — regenerate it, never hand-edit:
 
@@ -146,7 +146,7 @@ uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o re
 
 CI's export-sync and lock-integrity gates enforce this.
 
-**mypy strict is a hard floor.** Two equality-ratchet gates — `.github/mypy-baseline` (production) and `.github/mypy-tests-baseline` (tests) — both sit at zero, so any new strict error fails CI. A count that changes without its baseline file changing in the same PR also fails. Never raise a baseline, and never add a blanket ignore or suppression to move a count.
+**pyright is a ratchet gate** (`.github/pyright-baseline`): CI fails when the error count grows past the baseline, and also when it shrinks without the file being lowered in the same PR — the same equality contract that drove mypy to zero. Never raise the baseline; narrow, reasoned suppressions only.
 
 **Ruff practice**
 

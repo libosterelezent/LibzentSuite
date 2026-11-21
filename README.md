@@ -405,10 +405,11 @@ compare; DB worker telemetry.
 
 ## Management surfaces
 
-- CLI: `accounts|credentials|plugins|workspaces|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
-- Self-commands: framework verbs (`pg`, `say`, `help`, `prefixrate`,
-  `adminlist`, `adminperms`, `adminprefix`) + every plugin-declared
-  `COMMANDS` verb — gated per account by the admin-panel access lists
+- CLI: `accounts|credentials|plugins|workspaces|ratelimit|cooldowns|tasks|simulation|log|global-log|audit|estop|status|help|quit` (logs are a choice: `log <account>` for one client's tail, `global-log` for the suite's own — the console stays quiet at WARNING unless `LIBZENT_CONSOLE_LEVEL` says otherwise; `--live` on either verb switches to the live log window — any keypress returns to the CLI)
+- Self-commands: the attached plugins' COG verbs ONLY (the framework
+  verbs left the accounts, 2026-11-17 — framework control from chat is
+  retired pending a replacement design; the CLI owns it meanwhile) —
+  gated per account by the admin-panel access lists
 - Mention prefix (`mention` prefix mode of the same self-command layer —
   same access gate, replies paced)
 
@@ -418,8 +419,11 @@ will expose the same surface over REST + WebSocket.
 ## Documentation
 
 - `docs/roadmap.md` — the active plan and decision records
-- `docs/design/workspace-design.md` — the workspace unification spec (18 locked
-  decisions; the architecture's foundation)
+- `docs/architecture/architecture.rst` — the binding architecture
+  contract (the implemented structure, including the 18 locked
+  workspace decisions)
+- `docs/plans/` — planned and in-progress contracts only (the Flet UI
+  design contract, the pivot audit)
 - `knowledgebase/` — deep knowledge base (handwritten guides + generated
   read-only reference; `generated/*.json` is gitignored). Start at
   `knowledgebase/README.md`; the complete surface reference is

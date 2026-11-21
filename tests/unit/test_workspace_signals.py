@@ -46,6 +46,26 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
         pending = await self.db.signals.pending(10)
         self.assertEqual([s.signal_id for s in pending], [signal_id])
 
+    async def test_bind_delivery_late_wires_an_unwired_outbox(self) -> None:
+        """The bootstrap order fix (live-debugging toolkit 2026-11-17):
+        the outbox is constructed before its consumer exists, with
+        deliver=None — bind_delivery is the promised late wiring, and
+        an unwired outbox sweeps as a no-op rather than crashing."""
+        unwired_outbox = SignalOutbox(self.db.signals, deliver=None)  # the bootstrap shape
+        signal_id = await unwired_outbox.accept("A", "grinder", "claim_done")
+        unwired = await unwired_outbox.deliver_pending()  # deliver=None: no-op
+        self.assertEqual((unwired["delivered"], unwired["failed"], unwired["dead"]), (0, 0, 0))
+        late: list[str] = []
+
+        async def _deliver(signal: SignalIdentity) -> None:
+            late.append(signal.signal_id)
+
+        unwired_outbox.bind_delivery(_deliver)
+        wired = await unwired_outbox.deliver_pending()
+        self.assertEqual(wired["delivered"], 1)
+        self.assertEqual(late, [signal_id])  # THE pending signal, by identity
+        self.assertEqual(await self.db.signals.pending(10), [])
+
     async def test_delivery_acks_and_retries(self) -> None:
         signal_id = await self.outbox.accept("A", "grinder", "claim_done")
         self.fail_next = 1  # first sweep fails, second delivers

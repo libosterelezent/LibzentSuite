@@ -2556,29 +2556,105 @@ class AccountManager:
         # rebind retained toolboxes to fresh facades (services_for
         # reuses the cache the activation factory filled, so commands
         # and events share one live view; rebind never mints cogs).
-        cog_host = getattr(self._plugin_manager, "cog_host", None)
-        if cog_host is not None:
-            current = set(getattr(self._plugin_manager, "_accounts", {}).get(name, {}))
-            hosted = cog_host.hosted_plugins(name)
-            # the bot rides Account.runtime.client._client (the adapter's
-            # library Bot) — Account itself carries no client field
-            runtime = getattr(rt, "runtime", None) if rt is not None else None
-            bot = getattr(getattr(runtime, "client", None), "_client", None)
-            for plugin_name in hosted - current:
-                try:
-                    await self._plugin_manager.unhost_cog(name, plugin_name)
-                except Exception as exc:
-                    self._logger.debug("cog unhost failed for %s/%s: %s", name, plugin_name, exc)
-            for plugin_name in current:
-                facade = self.services_for(name, plugin_name)
-                try:
-                    if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
-                        await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
-                    else:
-                        cog_host.rebind_paced(name, plugin_name, facade)
-                except Exception as exc:
-                    self._logger.debug("cog reconcile failed for %s/%s: %s", name, plugin_name, exc)
+        await self.reconcile_plugin_cogs(name)
         return activated
+
+    async def reconcile_plugin_cogs(self, name: str) -> None:
+        """Sync hosted cogs with the account's ENABLED plugin set.
+
+        The C2 contract is assignment AND enabled: a disabled plugin is
+        unhosted (its commands stop being invocable), a newly enabled
+        one is hosted when the bot exists, retained ones rebind to
+        fresh facades. Called from _attach_plugins AND from the
+        enable/disable verb — a toggle must not wait for the next
+        attach to move the command face (CodeRabbit PR review 2026-11-17).
+        Fails closed on an unknown account: nothing to reconcile and no
+        side effects (PR review 2026-11-18). Best-effort by
+        construction: every failure is a debug line, never a failed verb.
+        """
+        cog_host = getattr(self._plugin_manager, "cog_host", None)
+        rt = self._accounts.get(name)
+        if cog_host is None or rt is None:
+            return
+        runtimes = getattr(self._plugin_manager, "_accounts", {}).get(name, {})
+        # ENABLED only — the disabled half of the contract
+        current = {p for p, r in runtimes.items() if getattr(r, "enabled", True)}
+        hosted = cog_host.hosted_plugins(name)
+        runtime = rt.runtime
+        # the bot rides Account.runtime.client._client (the adapter's
+        # library Bot) — Account itself carries no client field
+        bot = getattr(getattr(runtime, "client", None), "_client", None)
+        # PR review 2026-11-18: a stop() can land inside any await below
+        # and hosting onto the pre-await bot would leave a cog attached
+        # to a client stop() already discarded (rt.client = None). The
+        # generation capture mirrors _attach_plugins — _stop_landed
+        # guards the equivalent activation window there.
+        generation = runtime.generation
+
+        def _went_stale() -> bool:
+            return self._stop_landed(runtime) or runtime.generation != generation
+
+        def _still_enabled(plugin_name: str) -> bool:
+            # LIVE view, fail closed for REMOVALS (PR review round 10):
+            # the captured ``runtimes`` dict goes stale across the host
+            # awaits — a plugin REMOVED in place vanishes from the
+            # manager's current mapping, and a re-attach REPLACES the
+            # mapping wholesale. An absent ACCOUNT view is the
+            # duck-typed-double case (cannot judge — the same
+            # default-True the ``current`` set's computation uses); an
+            # absent PLUGIN in a live view is a removal: fail closed.
+            live = getattr(self._plugin_manager, "_accounts", {}).get(name)
+            if live is None:
+                return True
+            runtime_view = live.get(plugin_name)
+            if runtime_view is None:
+                return False
+            return bool(getattr(runtime_view, "enabled", True))
+
+        for plugin_name in hosted - current:
+            try:
+                await self._plugin_manager.unhost_cog(name, plugin_name)
+            except Exception as exc:
+                self._logger.debug("cog unhost failed for %s/%s: %s", name, plugin_name, exc)
+        freshly_hosted: list[str] = []
+        for plugin_name in current:
+            if _went_stale():
+                break
+            facade = self.services_for(name, plugin_name)
+            try:
+                if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
+                    if not _still_enabled(plugin_name):
+                        # disabled while an earlier host's await ran:
+                        # skip — the disable's own reconcile cannot
+                        # unhost this cog (attach records it only after
+                        # add_cog returns)
+                        continue
+                    await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
+                    freshly_hosted.append(plugin_name)
+                    if not _still_enabled(plugin_name):
+                        # disabled DURING this host: same blindness on
+                        # the disable side — take it straight back off
+                        await self._plugin_manager.unhost_cog(name, plugin_name)
+                else:
+                    cog_host.rebind_paced(name, plugin_name, facade)
+            except Exception as exc:
+                self._logger.debug("cog reconcile failed for %s/%s: %s", name, plugin_name, exc)
+        if freshly_hosted and _went_stale():
+            # stop() landed mid-pass: the cogs hosted above attached to
+            # a bot that stop has since disconnected — take them back
+            # off and host nothing further
+            self._logger.warning(
+                "stop landed during cog reconcile of %s; unhosting %d freshly hosted cog(s)",
+                name,
+                len(freshly_hosted),
+            )
+            for hosted_name in freshly_hosted:
+                try:
+                    await self._plugin_manager.unhost_cog(name, hosted_name)
+                except Exception as exc:
+                    self._logger.debug(
+                        "stale-rollback unhost failed for %s/%s: %s", name, hosted_name, exc
+                    )
 
     def _allowed_plugins(self, name: str) -> set[str]:
         """The account's DIRECT plugin assignments — NEVER None.

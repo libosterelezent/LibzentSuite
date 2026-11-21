@@ -112,14 +112,26 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
             gate = scheduler._limiter.block_acquires()
             for i in range(10):
                 scheduler.submit(f"acct{i % 3}", "roll", "message", channel_id=100, content="x")
-            await asyncio.sleep(0.05)
+            # poll for LANES BLOCKED AT THE LIMITER, not depth: depth is
+            # 10 the instant the synchronous submits return, so a depth
+            # poll never yields and the assertions ran before any lane
+            # had blocked (PR review 2026-11-21). Three blocked acquires
+            # prove one lane per account is parked on the gate.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 5.0
+            while scheduler._limiter.blocked_count < 3 and loop.time() < deadline:
+                await asyncio.sleep(0.01)
             pressure = scheduler.pressure()
             self.assertEqual(pressure["depth"], 10)
             self.assertGreaterEqual(scheduler.stats()["queued_depth_hwm"], 10)
             self.assertIn(pressure["level"], ("ELEVATED", "PRESSURED", "CRITICAL"))
             self.assertEqual(pressure["accounts"], 3)
             gate.set()
-            await asyncio.sleep(0.3)
+            # poll the drain too — the fixed 300ms raced the paced
+            # sends under load
+            deadline = loop.time() + 15.0
+            while scheduler.stats()["queued"] and loop.time() < deadline:
+                await asyncio.sleep(0.05)
             stats = scheduler.stats()
             self.assertEqual(stats["queued"], 0)  # all drained
             self.assertGreaterEqual(stats["wait_p50_s"], 0.0)

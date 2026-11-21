@@ -1279,3 +1279,199 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         # the fresh facade is bound on the retained-new toolbox
         toolbox = host.services_for("alpha", "ping")
         self.assertIsNotNone(toolbox.paced)
+
+    async def test_reconcile_honors_the_enabled_half(self) -> None:
+        """assignment ∧ ENABLED (CodeRabbit PR review 2026-11-17): a
+        disabled runtime is never hosted; a hosted plugin whose flag
+        flips is unhosted on the next reconcile — the toggle verb
+        calls it, so the command face moves without waiting for an
+        attach."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {
+                "ping": NS(instance=NS(COG=PingCog), enabled=True),
+                "sleepy": NS(instance=NS(COG=PingCog), enabled=False),
+            },
+        }
+        added, removed = [], []
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        await h.manager.reconcile_plugin_cogs("alpha")
+        self.assertEqual(host.hosted_plugins("alpha"), {"ping"})  # sleepy never hosted
+        # now disable ping: the toggle-path reconcile unhosts it
+        h.plugins._accounts["alpha"]["ping"].enabled = False
+        await h.manager.reconcile_plugin_cogs("alpha")
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+        self.assertEqual(removed, ["PingCog"])
+
+    async def test_reconcile_unknown_account_is_fail_closed(self) -> None:
+        """PR review 2026-11-18: an unknown account reconciles NOTHING —
+        no exception, no side effects. The facade validates first; this
+        guard is for internal callers (without it the loops ran over an
+        empty runtime view and the call silently "succeeded")."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        # the plugin-manager side "knows" the account — only the
+        # account registry does not: the reconcile must still no-op
+        h.plugins._accounts = {
+            "ghost": {"ping": NS(instance=NS(COG=PingCog), enabled=True)},
+        }
+
+        await h.manager.reconcile_plugin_cogs("ghost")  # must not raise
+
+        self.assertEqual(host.hosted_plugins("ghost"), set())
+
+    async def test_reconcile_rolls_back_hosting_when_stop_lands_mid_pass(self) -> None:
+        """stop() racing the host awaits (PR review 2026-11-18): a cog
+        hosted onto a bot that stop has since disconnected (rt.client
+        already None) is taken back off, and nothing further is hosted —
+        the generation-capture mirror of _attach_plugins' _stop_landed
+        guard."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {
+                "ping": NS(instance=NS(COG=PingCog), enabled=True),
+                "second": NS(instance=NS(COG=PingCog), enabled=True),
+            },
+        }
+        added, removed = [], []
+        runtime = h.manager._accounts["alpha"].runtime
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+                # stop() lands WHILE the host await is in flight
+                runtime.stop_requested = True
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        await h.manager.reconcile_plugin_cogs("alpha")
+
+        # ping hosted, then rolled back; "second" was never hosted
+        self.assertEqual(added, ["PingCog"])
+        self.assertEqual(removed, ["PingCog"])
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+
+    async def test_reconcile_rolls_back_hosting_when_generation_moves(self) -> None:
+        """The same rollback for the OTHER staleness arm: a newer
+        stop/estop/remove bumped the generation during the host await
+        (stop_requested may already have been observed and cleared by
+        the newer start)."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {
+                "ping": NS(instance=NS(COG=PingCog), enabled=True),
+                "second": NS(instance=NS(COG=PingCog), enabled=True),
+            },
+        }
+        added, removed = [], []
+        runtime = h.manager._accounts["alpha"].runtime
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+                # a newer lifecycle op invalidates this pass mid-await
+                runtime.generation += 1
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        await h.manager.reconcile_plugin_cogs("alpha")
+
+        self.assertEqual(added, ["PingCog"])
+        self.assertEqual(removed, ["PingCog"])
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+
+    async def test_reconcile_takes_back_a_cog_disabled_mid_host(self) -> None:
+        """PR review 2026-11-21: a disable landing while host_cog's
+        add_cog await is in flight cannot be handled by the disable's
+        OWN reconcile (attach records the cog only after add_cog
+        returns, so its unhost loop sees nothing) — THIS pass must
+        recheck the flag after hosting and take the cog back off."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {"ping": NS(instance=NS(COG=PingCog), enabled=True)},
+        }
+        added, removed = [], []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+                entered.set()
+                await release.wait()  # the disable lands in this window
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        async def disable_mid_host() -> None:
+            await entered.wait()
+            h.plugins._accounts["alpha"]["ping"].enabled = False
+            release.set()
+
+        # bounded (PR review round 10): a regression that skips add_cog
+        # entirely would park disable_mid_host on `entered` forever —
+        # the test must FAIL, not hang (wait_for cancels both on timeout)
+        participants = asyncio.gather(
+            h.manager.reconcile_plugin_cogs("alpha"), disable_mid_host()
+        )
+        await asyncio.wait_for(participants, timeout=10.0)
+
+        # hosted once, taken straight back off; nothing stays invocable
+        self.assertEqual(added, ["PingCog"])
+        self.assertEqual(removed, ["PingCog"])
+        self.assertEqual(host.hosted_plugins("alpha"), set())

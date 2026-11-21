@@ -31,8 +31,12 @@ reviews:
     account-scoped read/write must carry its full ownership scope in
     the SQL predicate. Credential handling (core/credential_service,
     core/credentials) and the FastAPI auth gate (interfaces/api) are
-    sensitive. The paced send pipeline is the safety floor — a raw
-    client send bypassing ctx.services is a blocker.
+    sensitive. The paced send pipeline is the safety floor for
+    COORDINATED outbound action. NOTE (owner-locked 2026-11-17): plugin
+    cogs receive their account's library client DIRECTLY through the
+    toolbox (CogServices.client) — that access is the documented
+    contract, NOT a finding; what stays a blocker is bypassing pacing
+    for framework-coordinated sends (the facade remains the law).
 
   auto_review:
     enabled: true
@@ -71,11 +75,13 @@ reviews:
     - path: "plugins/**"
       instructions: >-
         The plugin contract: COG is the command face, settings are
-        Setting manifests. Proactive sends (loops, timers, event
-        reactions) go ONLY through ctx.services (the paced pipeline)
-        — a raw client send is a review blocker. Command RESPONSES
-        are the one documented exception: they ride ctx.send
-        (the C1 discipline the framework's own cog follows).
+        Setting manifests. The toolbox's `client` (the account's
+        library client, owner-locked 2026-11-17) is the direct
+        connection — reviewing its EXISTENCE is out of scope.
+        COORDINATED proactive sends (loops, timers, event reactions)
+        ride ctx.services (the paced pipeline); command RESPONSES ride
+        ctx.send. Flag paced-path bypasses for coordinated traffic,
+        not the client reference itself.
     - path: "tests/**"
       instructions: >-
         Tests assert externally observable contracts. Flag weakened
@@ -98,6 +104,6 @@ reviews:
 knowledge_base:
   opt_out: false
   learnings:
-    repository: true
+    scope: local
   issues:
-    repository: true
+    scope: local

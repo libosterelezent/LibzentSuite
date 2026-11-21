@@ -21,6 +21,7 @@ from adapters.simulator.client import SimClient
 from adapters.simulator.world import SimWorld
 from core.bootstrap import build
 from core.credentials import Credentials
+from core.errors import AccountError
 from database.db import Database
 
 OWNER_ID = 1001
@@ -95,18 +96,30 @@ class Stack:
             }
         )
         self.db = Database(db_path if db_path is not None else ":memory:")
+        self._db_path = db_path
         self.framework: Any = None  # set by boot() (build is async)
         self._extra = extra_accounts
         self._plugin_dir = plugin_dir
 
     async def boot(self) -> Stack:
         """``build()`` is async now (aiosqlite database layer)."""
+        # db_path must follow the database (PR review 2026-11-18):
+        # build() locates the plugin-data side-car AND the credential
+        # key from db_path's parent — leaving it on the default put
+        # :memory: runs' side-cars in the repo root (a leaked
+        # plugin-data.db + credentials.key) and file runs' in state/.
+        sidecar_path = (
+            self._db_path
+            if self._db_path is not None
+            else str(Path(self.config_dir) / "sidecars" / "libzent.db")
+        )
         self.framework = await build(
             config_dir=str(self.config_dir),
             plugin_dir=str(self._plugin_dir),
             client_factory=self._client_factory,
             credentials=self.credentials,
             database=self.db,
+            db_path=sidecar_path,
             quiet=True,
         )
         # Seed credentials for the sim accounts (database-only resolution —
@@ -264,6 +277,32 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
                 await stack2.stop()
 
 
+class TestPluginToggleFailsClosed(unittest.IsolatedAsyncioTestCase):
+    """PR review 2026-11-18: the toggle validates BEFORE any state moves.
+    reconcile_plugin_cogs no-ops silently on an unknown account, so
+    without the up-front checks an unknown name produced a success echo
+    plus an audit row for an account that does not exist."""
+
+    async def test_unknown_account_rejected_without_audit(self) -> None:
+        stack = await Stack().boot()
+        try:
+            with self.assertRaises(AccountError):
+                await stack.framework.api.plugins_set_enabled("ghost", PROBE, False)
+            audit = await stack.framework.api.audit_tail(n=50, account="ghost")
+            self.assertEqual(audit, [])
+        finally:
+            await stack.stop()
+
+    async def test_unknown_plugin_rejected(self) -> None:
+        stack = await Stack().boot()
+        try:
+            await stack.framework.api.accounts_add({"name": "alpha", "plugins": [PROBE]})
+            with self.assertRaises(ValueError):
+                await stack.framework.api.plugins_set_enabled("alpha", "no-such-plugin", False)
+        finally:
+            await stack.stop()
+
+
 class TestEmergencyStop(unittest.IsolatedAsyncioTestCase):
     async def test_global_estop_halts_everything(self) -> None:
         stack = await Stack().boot()
@@ -401,7 +440,13 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
                     channel_id=GUILD_CHANNEL,
                     content=f"hi-{account}",
                 )
-            for _ in range(200):  # 4 sends on a 2.0s group clock land ~t=6s
+            # poll to the 4th message with a deadline, not a fixed
+            # iteration count: 4 paced sends on the 2.0s group clock
+            # land ~t=6s, and instrumentation load can stretch that —
+            # the loop exits the moment the last one lands
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 20.0
+            while loop.time() < deadline:
                 await asyncio.sleep(0.05)
                 if len(stack.world.messages_of(GUILD_CHANNEL)) >= 4:
                     break

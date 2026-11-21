@@ -2,7 +2,7 @@
 
 The active queue and the historical record of what shipped. Design
 decisions live alongside in `docs/design/`; binding contracts in
-`docs/architecture/architecture.md` + `architecture/integration.md`;
+`docs/architecture/architecture.rst` + `architecture/integration.md`;
 deep studies under `docs/plans/`. Completed items keep their summaries
 in `docs/reference/completed.rst` and their full detail in the local
 `knowledgebase/` (AGENTS.md rule 8).
@@ -75,11 +75,11 @@ structure is tested and waiting.
 
 ## Open Ideas (unscheduled)
 
+[ ] Framework control from accounts — the replacement method for the
+    retired chat verbs (admin/prefix/help management) — owner design
+    pending (removed 2026-11-17; the CLI/API own it meanwhile).
 [ ] Metric rollup wiring — the opt-in global view over
     AccountPluginData (store + local view shipped; aggregation missing).
-[ ] The scheduler timeout test's timing flake — the final event
-    assertion races the deferred TaskFailed publish (pre-existing;
-    verified on unmodified HEAD).
 
 ---
 

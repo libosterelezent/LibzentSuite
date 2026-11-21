@@ -54,12 +54,18 @@ class FakeLimiter:
         self.acquire_order: list[str] = []
         self.reports: list[tuple[str, str, float, bool]] = []
         self.gate: asyncio.Event | None = None
+        self.blocked_count = 0  # acquires currently parked on the gate
 
     async def acquire(self, action: str, account: str, plugin: str, priority: int) -> FakeGrant:
         self.acquire_calls.append((action, account, plugin, int(priority)))
         self.acquire_order.append(account)
         if self.gate is not None and not self.gate.is_set():
-            await self.gate.wait()
+            self.blocked_count += 1
+            try:
+                await self.gate.wait()
+            finally:
+                # cancellation must not leave a parked acquire counted
+                self.blocked_count -= 1
         return FakeGrant(
             action=action,
             account=account,
@@ -270,6 +276,9 @@ class TestLifecycle(SchedulerTestBase):
         )
         completed = self.recorder.of(TaskCompleted)[0]
         self.assertEqual(completed.task_id, task.id)
+        # the mechanical chain trigger's second key (live-debugging
+        # toolkit 2026-11-17: blank in production, chains never matched)
+        self.assertEqual((completed.plugin, completed.action), ("exporter", "message"))
         self.assertGreaterEqual(completed.duration_s, 0.0)
         assert task.result_summary is not None
         self.assertIn("DiscordMessage", task.result_summary)
@@ -285,7 +294,10 @@ class TestLifecycle(SchedulerTestBase):
         self.limiter.wait_s = 0.25
         self.limiter.jitter_s = 0.1
         task = self.scheduler.submit("alpha", "p", "message", channel_id=9, content="x")
-        await self.settle()
+        # the audit row lands in the task's finish TAIL — a wall-clock
+        # settle raced it under load (distributed 3.10 runs read 0 rows);
+        # the row's presence is the deterministic completion barrier
+        await self.wait_until(lambda: len(self.audit.calls) >= 1)
         self.assertEqual(task.grant_wait_ms, 250.0)
         self.assertEqual(task.grant_jitter_ms, 100.0)
         self.assertEqual(len(self.audit.calls), 1)
@@ -489,23 +501,29 @@ class TestRetry(SchedulerTestBase):
     async def test_no_retry_on_flow_blocked(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", retries=5)
         self.sender.outcomes.append(("raise", FlowBlocked("alpha", "channel gone")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "failed")
+        # wait for the transition and the publish, not the clock — a
+        # settle raced the terminal tail under distributed load (the
+        # third gate flake of this class in this file)
+        self.assertTrue(await self.wait_until(lambda: task.status == "failed"))
         assert task.error is not None
         self.assertIn("channel gone", task.error)
         self.assertIn("FlowBlocked", task.error)
         self.assertEqual(task.attempts, 0)
         self.assertEqual(len(self.sender.calls), 1)
         self.assertEqual(self.sleeps, [])
+        self.assertTrue(
+            await self.wait_until(
+                lambda: [e.task_id for e in self.recorder.of(TaskFailed)] == [task.id]
+            )
+        )
         failed = self.recorder.of(TaskFailed)
-        self.assertEqual([e.task_id for e in failed], [task.id])
         self.assertIn("channel gone", failed[0].error)
 
     async def test_no_retry_on_unexpected_exception(self) -> None:
         task = self.scheduler.submit("alpha", "p", "poke", retries=3)
         self.sender.outcomes.append(("raise", KeyError("no such channel")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "failed")
+        # same race shape as its FlowBlocked sibling — wait, don't settle
+        self.assertTrue(await self.wait_until(lambda: task.status == "failed"))
         assert task.error is not None
         self.assertIn("KeyError", task.error)
         self.assertEqual(len(self.sender.calls), 1)
@@ -1042,8 +1060,17 @@ class TestFailedStopHardening(SchedulerTestBase):
         all land even though _apply_terminal already removed the task."""
         gate = asyncio.Event()
         orig_add = self.repo.add
+        entries = 0
+        t1_parked = asyncio.Event()  # t1's completed-tail reached the write
+        t2_parked = asyncio.Event()  # the abort spawned t2's cancelled-tail
 
         async def blocked_add(entry: dict[str, Any]) -> int:
+            nonlocal entries
+            entries += 1
+            if entries == 1:
+                t1_parked.set()
+            elif entries == 2:
+                t2_parked.set()
             await gate.wait()  # simulate a slow aiosqlite write
             return await orig_add(entry)
 
@@ -1051,15 +1078,22 @@ class TestFailedStopHardening(SchedulerTestBase):
         repo_seam.add = blocked_add
         t1 = self.scheduler.submit("alpha", "p", "message")
         t2 = self.scheduler.submit("alpha", "p", "message")  # queued behind
-        await self.settle(0.02)  # t1 completed, its tail parked on the gate
+        # PROVE t1 completed and its history tail is parked on the gate
+        # before the stop exists: a wall-clock settle here let the abort
+        # win the race under load (the 3.10 leg's distributed run) and
+        # LEGITIMATELY cancel t1 — the wrong interleaving for this test
+        await asyncio.wait_for(t1_parked.wait(), timeout=5.0)
 
         owner = asyncio.create_task(self.scheduler.stop(drain=False, timeout=0.0))
-        await asyncio.sleep(0.05)  # owner parked: t1 terminal, row not landed
+        # PROVE the abort cancelled t2 and spawned its terminal tail —
+        # both history writes are in flight when the owner is cancelled
+        await asyncio.wait_for(t2_parked.wait(), timeout=5.0)
         owner.cancel()
         gate.set()  # DB becomes responsive again
         with self.assertRaises(asyncio.CancelledError):
             await owner
-        await self.settle(0.1)
+        # the shielded tails persist both rows without their owner
+        await self.wait_until(lambda: len(self.repo.add_calls) >= 2)
 
         self.assertEqual(t1.status, "completed")
         self.assertEqual(t2.status, "cancelled")

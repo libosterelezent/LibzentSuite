@@ -139,6 +139,8 @@ class _WorkspaceGateReader:
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .workspace.models import SignalIdentity
+
 ROOT_LOGGER = logging.getLogger("libzent")
 
 
@@ -261,6 +263,94 @@ def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple[float
     return interval, jmin, jmax
 
 
+class _TerminalTriggerNursery:
+    """Owns the independent terminal-trigger tasks (the re-entrancy fix
+    that took chain dispatch off the publisher's stack). PR review
+    2026-11-18: retention without an owner let a suspended trigger
+    resume AFTER its dependencies closed — spawn now refuses new work
+    once teardown begins, and aclose() cancels + awaits everything
+    retained BEFORE the shutdown steps below it run."""
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task[list[str]]] = set()
+        self._closing = False
+
+    def spawn(self, coro: Any, name: str) -> asyncio.Task[list[str]] | None:
+        """Start one trigger task; None (no work) once closing."""
+        if self._closing:
+            coro.close()  # never-awaited coroutines warn (PR review r5)
+            return None  # teardown: chain triggers stop being accepted
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._reap)
+        return task
+
+    def _reap(self, task: asyncio.Task[list[str]]) -> None:
+        # remove from the retained set AND log the failure at the task
+        # boundary (invisible failures are exactly the "exception was
+        # never retrieved" class this nursery exists to prevent)
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            ROOT_LOGGER.warning("terminal trigger task failed: %s", exc, exc_info=exc)
+
+    async def aclose(self) -> None:
+        """Close the gate, then cancel + await every retained task.
+
+        The child awaits suppress CancelledError because every child was
+        cancelled BY THIS METHOD — their cancellation is expected, not
+        the caller's. The CALLER's own cancellation surfaces naturally
+        at the next await point or function exit (Python's guarantee);
+        it cannot be swallowed here because the suppress only catches
+        the child's exception, never the parent task's pending state.
+        """
+        self._closing = True
+        tasks, self._tasks = list(self._tasks), set()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            # asyncio.wait absorbs each child's outcome. The shield
+            # alone is NOT enough (PR #27 round 7 review): a caller
+            # cancellation surfaces at the shield IMMEDIATELY while
+            # the reap keeps running detached — shutdown would then
+            # march on and close the very dependencies the retained
+            # triggers are still unwinding against. Retain the join
+            # and FINISH it before the cancellation propagates.
+            reap = asyncio.ensure_future(asyncio.wait(tasks))
+            try:
+                # the NORMAL join is bounded too (final pre-push
+                # review): this is shutdown's FIRST step — a cancelled
+                # trigger whose cleanup ignores its cancellation must
+                # not pin it before accounts and database.close() ever
+                # run. The budget cancels the shield, not the reap.
+                await asyncio.wait_for(asyncio.shield(reap), timeout=5.0)
+            except asyncio.TimeoutError:
+                if not reap.done():
+                    ROOT_LOGGER.warning(
+                        "terminal trigger reap exceeded the 5s join budget; "
+                        "shutdown continues around it"
+                    )
+            except asyncio.CancelledError:
+                # a SECOND cancellation must not cancel the join itself
+                # (a bare await propagates into it); the children were
+                # already cancelled above, so the join is bounded by
+                # their unwind — finish it bounded, then propagate.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({reap}, timeout=5.0)
+                if not reap.done():
+                    # pathological: a cancelled trigger ignored its
+                    # cancellation for the whole budget. Shutdown MUST
+                    # still terminate — but not silently: the witness
+                    # may outlive the dependencies closing below.
+                    ROOT_LOGGER.warning(
+                        "terminal trigger reap still running after the 5s join "
+                        "budget; shutdown continues around it"
+                    )
+                raise
+
+
 class Framework:
     """The fully wired stack (managers + api), built by :func:`build`."""
 
@@ -285,6 +375,7 @@ class Framework:
         plugin_data: Any = None,
         cooldown_resync_stop: Callable[[], Any] | None = None,
         claims_stderr: bool = False,
+        chain_triggers: _TerminalTriggerNursery | None = None,
     ) -> None:
         self.api = api
         self.bus = bus
@@ -308,11 +399,22 @@ class Framework:
         self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
+        #: owns the terminal-trigger tasks; shutdown closes it FIRST
+        self.chain_triggers = chain_triggers or _TerminalTriggerNursery()
 
         # this framework holds one CLAIM on the process-global stderr
         # pipeline — shutdown releases it (the last release stops)
         self._claims_stderr = claims_stderr
         self._shut_down = False
+        #: cleanup failures from the last :meth:`shutdown` — one
+        #: ``"step 'database' failed: ..."`` line per failing step.
+        #: shutdown() is fault-tolerant by design (every step runs, the
+        #: caller is never failed), and the root-logger warnings it
+        #: emits stop reaching the structured capture once the log
+        #: bridge detaches mid-teardown; this list is the durable
+        #: witness callers (the live-debug shutdown probe, operators)
+        #: can still read afterwards (PR review 2026-11-18).
+        self.shutdown_failures: list[str] = []
 
     async def shutdown(self) -> None:
         """Graceful: drain the scheduler, stop accounts, detach logging
@@ -329,11 +431,21 @@ class Framework:
         stdlib bridge is removed BEFORE database.close() — otherwise the
         bridge keeps ingesting stdlib lines into a service whose sink is a
         closed database (every write silently failing forever).
+
+        Cleanup failures are recorded on ``self.shutdown_failures``
+        (one line per failing step) in addition to the root-logger
+        warning — a caller cannot otherwise distinguish a clean
+        teardown from a warned one once the bridge is gone.
         """
         if self._shut_down:
             return
         self._shut_down = True
+        self.shutdown_failures = []
         steps = [
+            # FIRST: stop accepting + reap chain triggers — their steps
+            # send through the scheduler and publish on the bus, so they
+            # must be down before either drains (PR review 2026-11-18)
+            ("chain triggers", self.chain_triggers.aclose),
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
             # stop the reconciler's periodic pass BEFORE the drains so its
@@ -370,16 +482,17 @@ class Framework:
             except asyncio.CancelledError as exc:
                 if interrupted is None:
                     interrupted = exc
-                    ROOT_LOGGER.warning(
-                        "shutdown step %r was cancelled (continuing teardown)", label
-                    )
+                self.shutdown_failures.append(f"step {label!r} was cancelled")
+                ROOT_LOGGER.warning("shutdown step %r was cancelled (continuing teardown)", label)
             except KeyboardInterrupt as exc:  # a second Ctrl-C / the
                 if interrupted is None:  # dashboard's exit signal landing
                     interrupted = exc  # mid-teardown must NOT skip the
+                    self.shutdown_failures.append(f"step {label!r} was interrupted")
                     ROOT_LOGGER.warning(  # remaining steps (db.close!)
                         "shutdown step %r interrupted (continuing teardown)", label
                     )
             except Exception as exc:
+                self.shutdown_failures.append(f"step {label!r} failed: {type(exc).__name__}: {exc}")
                 ROOT_LOGGER.warning(
                     "shutdown step %r failed: %s: %s", label, type(exc).__name__, exc
                 )
@@ -412,6 +525,7 @@ class Framework:
     @staticmethod
     async def _detach_bridge() -> None:
         detach_stdlib_bridge()  # then stop ingesting stdlib
+        detach_stdlib_bridge("discord")  # the fork's tree mirrors with it
 
 
 async def _security_audit(database: Any, credential_service: Any, env_file: str) -> None:
@@ -598,6 +712,11 @@ async def _assemble(
     await logs.start_persistence(database.logs)
     cleanups.append(("log persistence", logs.stop_persistence))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
+    # The fork's own logger tree (discord.*) is captured the same way:
+    # gateway/cache chatter becomes queryable via `global-log` instead of
+    # riding lastResort raw onto the console — the contract that logs
+    # never interrupt the command interface (owner rule 2026-11-17).
+    attach_stdlib_bridge(logs, "discord")
     cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()
     _wire_event_logging(bus, logs)
@@ -705,27 +824,44 @@ async def _assemble(
         gate_reader=_workspace_gate_reader,
     )
 
-    async def _on_task_completed(event: TaskCompleted) -> None:
-        with contextlib.suppress(Exception):
-            await chain_runtime.on_terminal(
+    # the outbox's delivery callback binds NOW — the runtime that
+    # consumes signals exists. Constructed with deliver=None (the
+    # runtime cannot be passed to its own dependency), this bind is
+    # the wiring the constructor comment promised; found missing in
+    # production by the live-debugging toolkit (2026-11-17): signals
+    # pended forever and signal-triggered chains never fired.
+    async def _deliver_pending_signal(signal: SignalIdentity) -> None:
+        await chain_runtime.on_signal(signal.signal_id)
+
+    signals_outbox.bind_delivery(_deliver_pending_signal)
+
+    # terminal triggers run as INDEPENDENT tasks, never inline in the
+    # publisher's stack: the chain step's paced send awaits the scheduler
+    # loop, which is the very stack publish_nowait dispatches on — inline
+    # await deadlocks the run in 'running' (found live by the toolkit's
+    # strengthened predicates, 2026-11-17; direct invoke_handler completed
+    # fine, isolating the re-entrancy). The NURSERY owns them: shutdown
+    # stops acceptance and reaps before dependencies close.
+    chain_triggers = _TerminalTriggerNursery()
+
+    def _spawn_chain_trigger(event: TaskCompleted | TaskFailed, kind: str) -> None:
+        chain_triggers.spawn(
+            chain_runtime.on_terminal(
                 TerminalTrigger(
                     account=event.account,
                     plugin=event.plugin,
                     action=str(getattr(event, "action", "") or ""),
-                    kind="task_completed",
+                    kind=kind,
                 )
-            )
+            ),
+            name=f"chain-trigger-{kind}-{event.task_id}",
+        )
+
+    async def _on_task_completed(event: TaskCompleted) -> None:
+        _spawn_chain_trigger(event, "task_completed")
 
     async def _on_task_failed(event: TaskFailed) -> None:
-        with contextlib.suppress(Exception):
-            await chain_runtime.on_terminal(
-                TerminalTrigger(
-                    account=event.account,
-                    plugin=event.plugin,
-                    action=str(getattr(event, "action", "") or ""),
-                    kind="task_failed",
-                )
-            )
+        _spawn_chain_trigger(event, "task_failed")
 
     bus.subscribe(TaskCompleted, _on_task_completed)
     bus.subscribe(TaskFailed, _on_task_failed)
@@ -967,11 +1103,10 @@ async def _assemble(
         started_at=_time.time(),
     )
 
-    # Framework management from chat (status/accounts/plugins/ratelimit/
-    # lane/tasks/estop/simulation) rides FrameworkVerbsCog: the hub's
-    # api_provider bridges the verbs to the ONE ControlAPI. The mention
-    # bridge (RemoteControl) retired with the hub's registry — see dump/.
-    COMMAND_HUB.api_provider = lambda: api
+    # The hub's ACCESS seam stays (the account manager records account
+    # user ids through it); the framework verbs no longer ride the
+    # accounts (owner call 2026-11-17) so api_provider has no consumer —
+    # the mention bridge and the verbs cog both live in dump/ history.
 
     return Framework(
         api=api,
@@ -993,4 +1128,5 @@ async def _assemble(
         plugin_state=plugin_state,
         cooldown_resync_stop=_stop_cooldown_resync_task,
         claims_stderr=stderr_claimed,
+        chain_triggers=chain_triggers,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import unittest
+from types import SimpleNamespace as NS
 from typing import Any, ClassVar
 
 from interfaces.cli.commands import (
@@ -21,7 +22,6 @@ from interfaces.cli.commands import (
     format_policies,
     format_simulation_report,
     format_warnings,
-    help_text,
     run_command,
 )
 from interfaces.cli.repl import Repl, render_error, run_once
@@ -373,9 +373,13 @@ class FakeApi:
 
     # ---- logs/audit
     async def logs_tail(
-        self, n: int = 100, account: str | None = None, severity: str | None = None
+        self,
+        n: int = 100,
+        account: str | None = None,
+        severity: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
-        self._record("logs_tail", n, account, severity)
+        self._record("logs_tail", n, account, severity, without_account)
         return [
             {
                 "ts": 1700000000.5,
@@ -432,7 +436,9 @@ class TestBasics(unittest.IsolatedAsyncioTestCase):
         text = await run_command(FakeApi(), "help")
         assert text is not None
         self.assertIn("accounts", text)
-        self.assertIn("usage: accounts", text)
+        # the overview is grouped BRIEFS — the flood moved behind focus
+        self.assertIn("observability:", text)
+        self.assertNotIn("usage: accounts", text)
 
     async def test_empty_line(self) -> None:
         self.assertIsNone(await run_command(FakeApi(), "   "))
@@ -670,14 +676,12 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("usage: accounts plugin", str(ctx.exception))
 
     async def test_help_documents_new_commands(self) -> None:
-        text = help_text()
-        self.assertIn("add <name> [plugin ...]", text)
-        self.assertIn("plugins <account>", text)
-        self.assertIn("plugin-add <account> <plugin>", text)
-        self.assertIn("plugin-remove <account> <plugin>", text)
         focused = await run_command(FakeApi(), "help accounts")
         assert focused is not None
-        self.assertIn("plugin-add", focused)
+        self.assertIn("add <name> [plugin ...]", focused)
+        self.assertIn("plugins <account>", focused)
+        self.assertIn("plugin-add <account> <plugin>", focused)
+        self.assertIn("plugin-remove <account> <plugin>", focused)
 
 
 class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
@@ -866,7 +870,7 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         assert text is not None
         recorded = called(api, "logs_tail")
         assert recorded is not None
-        self.assertEqual(recorded[0], (5, "alpha", None))
+        self.assertEqual(recorded[0], (5, "alpha", None, False))
         self.assertIn("core", text)
         text = await run_command(api, "audit 5 alpha")
         assert text is not None
@@ -912,11 +916,16 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
             await run_command(FakeApi(), "accounts credential a b c")
 
     async def test_accounts_credential_in_help(self) -> None:
-        text = help_text()
-        self.assertIn("credential <name> <token>", text)
-        self.assertIn("shell history", text)
-        self.assertIn("credentials status|import-env", text)
-        self.assertIn("cooldowns [account]", text)
+        focused = await run_command(FakeApi(), "help accounts")
+        assert focused is not None
+        self.assertIn("credential <name> <token>", focused)
+        self.assertIn("shell history", focused)
+        creds = await run_command(FakeApi(), "help credentials")
+        assert creds is not None
+        self.assertIn("credentials status|import-env", creds)
+        cool = await run_command(FakeApi(), "help cooldowns")
+        assert cool is not None
+        self.assertIn("cooldowns [account]", cool)
 
     async def test_credentials_status(self) -> None:
         api = FakeApi()
@@ -1191,15 +1200,28 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
     async def test_help_bare_is_full_text(self) -> None:
         text = await run_command(FakeApi(), "help")
         assert text is not None
-        self.assertIn("commands:", text)
-        self.assertIn("usage: accounts", text)
+        # every group header present, every command appears exactly once
+        for group in (
+            "general",
+            "accounts",
+            "plugins",
+            "workspaces",
+            "operations",
+            "observability",
+            "development",
+        ):
+            self.assertIn(f"{group}:", text)
+        for name in HELP:
+            self.assertIn(name, text)
+        # the overview does NOT flood: no usage signatures in the table
+        self.assertNotIn("usage: accounts", text)
 
     async def test_help_focus_for_every_command(self) -> None:
         for name in sorted(HELP):
             text = await run_command(FakeApi(), f"help {name}")
             assert text is not None
             self.assertIn(name, text)
-            self.assertIn(HELP[name][1], text)
+            self.assertIn(HELP[name][2], text)
 
     async def test_help_focus_shows_usage(self) -> None:
         text = await run_command(FakeApi(), "help ratelimit")
@@ -1262,14 +1284,17 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
                 "ratelimit",
                 "tasks",
                 "simulation",
+                "log",
+                "global-log",
                 "logs",
                 "audit",
                 "estop",
                 "quit",
             },
         )
-        for name, (sig, desc) in HELP.items():
-            self.assertTrue(desc, f"HELP[{name!r}] has no description")
+        for name, (sig, brief, detail) in HELP.items():
+            self.assertTrue(brief, f"HELP[{name!r}] has no brief")
+            self.assertTrue(detail, f"HELP[{name!r}] has no detail")
             self.assertIsInstance(sig, str)
 
 
@@ -1424,7 +1449,8 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "logs 0")
         recorded = called(api, "logs_tail")
         assert recorded is not None
-        self.assertEqual(recorded[0], (0, None, None))
+        # the alias routes no-account calls to the framework view
+        self.assertEqual(recorded[0], (0, None, None, True))
 
 
 class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
@@ -1434,13 +1460,19 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         class SlowStatusApi(FakeApi):
             async def status(self) -> dict[str, Any]:
                 await asyncio.sleep(0.05)
+                # deterministic mid-command stop (was call_later(0.02),
+                # which raced the command's start under instrumentation
+                # load). The sleep(0) yields so the repl's stop_wait
+                # future RESOLVES before its loop-top check — the exact
+                # promptless-exit interleaving the test pins.
+                stop.set()
+                await asyncio.sleep(0)
                 return await super().status()
 
         api = SlowStatusApi()
         out = io.StringIO()
         stop = asyncio.Event()
         repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out, stop_event=stop)
-        asyncio.get_running_loop().call_later(0.02, stop.set)
         await asyncio.wait_for(repl.run(), timeout=5)
         text = out.getvalue()
         self.assertTrue(called(api, "status"))
@@ -1704,3 +1736,104 @@ class ColumnSeparationTests(unittest.TestCase):
 
         self.assertEqual(_col("ab", 5), "ab   ")
         self.assertEqual(_col("a-very-long-account-name", 8), "a-very-long-account-name ")
+
+
+class LiveLogWindowTests(unittest.IsolatedAsyncioTestCase):
+    """The live-log contract (owner rule 2026-11-17): --live switches the
+    interface to the log window; any input line returns to the CLI; a
+    one-shot invocation without an input feed is a usage error, never a
+    silent fall-back to flooding."""
+
+    class _LiveApi(FakeApi):
+        def __init__(self) -> None:
+            super().__init__()
+            self.subscribed: list[object] = []
+
+        def logs_service(self) -> Any:
+            outer = self
+
+            class _Svc:
+                def subscribe(self, cb: Any) -> Any:
+                    outer.subscribed.append(cb)
+
+                    def _unsub() -> None:
+                        outer.subscribed.remove(cb)
+
+                    return _unsub
+
+            return _Svc()
+
+    async def test_live_requires_the_repl_feed(self) -> None:
+        with self.assertRaises(UsageError) as ctx:
+            await run_command(LiveLogWindowTests._LiveApi(), "log alpha --live")
+        self.assertIn("REPL", str(ctx.exception))
+
+    async def test_live_window_renders_tail_and_returns_on_any_line(self) -> None:
+        """Observable rendering: the seeded tail AND a live-streamed row
+        appear on the configured stream; the subscription tears down."""
+        api = LiveLogWindowTests._LiveApi()
+        out = io.StringIO()
+
+        async def feed() -> str:
+            # hold the window open until the subscription is REGISTERED,
+            # push one synthetic row through it, then return
+            while not api.subscribed:
+                await asyncio.sleep(0)
+            push_row = api.subscribed[0]
+            assert callable(push_row)
+            push_row(
+                NS(
+                    as_dict=lambda: {
+                        "ts": 1.0,
+                        "severity": "INFO",
+                        "source": "test",
+                        "message": "live-row",
+                        "account": "alpha",
+                        "plugin": None,
+                        "event": None,
+                    }
+                )
+            )
+
+            # explicit synchronization on the OBSERVABLE (PR review:
+            # no yield loops, no wall-clock sleeps): wait until the row
+            # has actually rendered to the window's stream, then return
+            async def _row_rendered() -> None:
+                while "live-row" not in out.getvalue():
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(_row_rendered(), timeout=5.0)
+            return "q"
+
+        summary = await run_command(api, "log alpha --live", input_feed=feed, out=out)
+        assert summary is not None
+        self.assertIn("live log closed", summary)
+        text = out.getvalue()
+        self.assertIn("live log:", text)  # the header
+        self.assertIn("live-row", text)  # the streamed row RENDERED
+        self.assertEqual(api.subscribed, [])  # unsubscribed on exit
+
+    async def test_live_flag_parses_in_any_position_and_keeps_args(self) -> None:
+        api = LiveLogWindowTests._LiveApi()
+
+        async def feed() -> str:
+            return ""
+
+        await run_command(api, "log alpha -f 5", input_feed=feed)
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        # the initial tail kept account + limit; --live/-f stripped
+        self.assertEqual(recorded[0][0:2], (5, "alpha"))
+
+    async def test_global_log_live_routes_to_the_framework_view(self) -> None:
+        api = LiveLogWindowTests._LiveApi()
+
+        async def feed() -> str:
+            return "q"
+
+        summary = await run_command(api, "global-log --live", input_feed=feed)
+        assert summary is not None
+        self.assertIn("live log closed", summary)
+        recorded = called(api, "logs_tail")
+        assert recorded is not None
+        self.assertTrue(recorded[0][3])  # without_account: the suite's rows

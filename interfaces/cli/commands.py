@@ -46,13 +46,20 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import math
 import shlex
 import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Coroutine, Sequence
+
+    #: an awaitable that yields ONE input line (the REPL's queue get) —
+    #: the live log window reads from the SAME queue the prompt reads,
+    #: so there is exactly one stdin reader at any moment
+    AwaitableFactory = Callable[[], Coroutine[Any, Any, str]]
 
 __all__ = [
     "HELP",
@@ -91,15 +98,25 @@ class UsageError(ValueError):
 # ------------------------------------------------------------------- HELP
 #: command -> (usage signature, description); the single registry both
 #: help_text() and the contextual usage errors are built from.
-HELP: dict[str, tuple[str, str]] = {
-    "help": ("[command]", "show this help (or help for one command)"),
-    "status": ("", "overview: accounts, tasks, rate limits, warnings"),
+HELP: dict[str, tuple[str, str, str]] = {
+    # name -> (usage signature, brief (overview line), detail (help <name>))
+    "help": (
+        "[command]",
+        "this page, or detail for one command",
+        "show this help (or help for one command)",
+    ),
+    "status": (
+        "",
+        "overview: accounts, tasks, limits, warnings",
+        "overview: accounts, tasks, rate limits, warnings",
+    ),
     "accounts": (
         "list|add <name> [plugin ...]|plugins <account>"
         "|plugin-add <account> <plugin>|plugin-remove <account> <plugin>"
         "|remove <name>|info <name>"
         "|credential <name> <token>|enable <name> <on|off>"
         "|start [name|all]|stop [name|all]|estop <name>",
+        "account lifecycle, plugins, credentials",
         "account management (capabilities: direct account→plugin"
         " assignment, applied immediately; credentials: dashboard or"
         " 'accounts credential' — CAUTION: the token lands in your shell"
@@ -107,11 +124,13 @@ HELP: dict[str, tuple[str, str]] = {
     ),
     "credentials": (
         "status|import-env [--overwrite]",
+        "token status + .env import",
         "credential management: per-account status; one-shot import of the"
         " legacy .env tokens into encrypted db storage",
     ),
     "cooldowns": (
         "[account]|clear <account> <plugin> [key]",
+        "persistent cooldowns (survive restarts)",
         "active persistent cooldowns (survive restarts; absolute expiry)",
     ),
     "plugins": (
@@ -119,12 +138,14 @@ HELP: dict[str, tuple[str, str]] = {
         "|disable <account> <plugin>|settings <account>"
         "|set <account> <plugin> <key> <value>"
         "|clear <account> <plugin> <key>",
+        "enable/disable/settings per account",
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
     ),
     "profiles": (
         "<account> <plugin> list|show <profile>|active|set-active <profile>"
         "|clear-active|delete <profile>",
+        "account-owned plugin profiles",
         "account-owned plugin profiles (the two-level model: each account"
         " keeps its own instances; the body is plugin-defined)",
     ),
@@ -133,28 +154,59 @@ HELP: dict[str, tuple[str, str]] = {
         "|delete <workspace> [--detach-members]"
         "|add-member <workspace> <account>|remove-member <account>"
         "|pause <workspace>|resume <workspace>|tasks [workspace [status]]",
+        "membership + orchestration",
         "workspaces (membership + orchestration; the shared pacing clock rides membership)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
         "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
+        "pacing policies (1.5s floor)",
         "rate policies (safety floor: 1.5s/action). The send lane is"
         " REMOVED — 'ratelimit lane' still answers as a documented compat"
         " stub (sync groups + per-account pacing replaced it)",
     ),
     "tasks": (
         "list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]",
+        "queue + history",
         "task queue + history",
     ),
-    "simulation": ("list|run [name]", "offline scenario runs"),
+    "simulation": (
+        "list|run [name]",
+        "offline scenario runs",
+        "offline scenario runs over the simulator",
+    ),
+    "log": (
+        "<account> [n] [DEBUG|INFO|WARNING|ERROR] [--live]",
+        "one client's log tail",
+        "structured log tail for ONE account (default: last 20; severity"
+        " UPPERCASE as the trailing arg)",
+    ),
+    "global-log": (
+        "[n] [DEBUG|INFO|WARNING|ERROR] [--live]",
+        "the suite's own logs",
+        "framework log tail — entries with no account context (default:"
+        " last 20; severity UPPERCASE as the trailing arg). The legacy"
+        " 'logs' verb routes here when no account is given",
+    ),
+    # compat alias — NOT in HELP_GROUPS, so the overview never shows it;
+    # the entry exists so `help logs` and its usage errors resolve
     "logs": (
         "[n] [account] [DEBUG|INFO|WARNING|ERROR]",
-        "structured log tail (default: last 20; severity UPPERCASE)",
+        "(compat alias)",
+        "legacy form — routes to 'log <account>' when an account is given, else to 'global-log'",
     ),
-    "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
-    "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
-    "quit": ("", "graceful shutdown, then exit (alias: exit)"),
+    "audit": (
+        "[n] [account]",
+        "interaction audit trail",
+        "interaction audit trail (default: last 20)",
+    ),
+    "estop": (
+        "[resume]",
+        "global emergency stop",
+        "GLOBAL emergency stop; 'estop resume' re-arms after one",
+    ),
+    "quit": ("", "graceful shutdown, then exit", "graceful shutdown, then exit (alias: exit)"),
 }
 
 
@@ -166,26 +218,263 @@ def _col(value: Any, width: int) -> str:
     return text.ljust(width) if len(text) < width else text + " "
 
 
-def help_text() -> str:
-    """Render the HELP registry as aligned text (with an error footer).
+#: overview rendering order — grouped so the page SCANS instead of
+#: flooding; the long signatures live behind `help <command>`.
+HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("general", ("help", "status", "quit")),
+    ("accounts", ("accounts", "credentials")),
+    ("plugins", ("plugins", "profiles", "cooldowns")),
+    ("workspaces", ("workspaces", "tasks")),
+    ("operations", ("ratelimit", "estop")),
+    ("observability", ("log", "global-log", "audit")),
+    ("development", ("simulation",)),
+)
 
-    Long group signatures get their own indented 'usage:' line so the table
-    stays readable at 80 columns.
+
+def help_text() -> str:
+    """One terse line per command, grouped — a page that scans.
+
+    Full signatures stay behind `help <command>` (the detail view);
+    usage errors always name the exact form they expected.
     """
-    lines = ["commands:"]
-    for name, (sig, desc) in sorted(HELP.items()):
-        lines.append(f"  {_col(name, 12)}{desc}")
-        if sig:
-            lines.append(f"  {_col('', 12)}usage: {name} {sig}")
+    lines: list[str] = []
+    for group, names in HELP_GROUPS:
+        lines.append(f"{group}:")
+        for name in names:
+            _sig, brief, _detail = HELP[name]
+            lines.append(f"  {_col(name, 12)}{brief}")
+    lines.append("")
     lines.append(
-        "  errors print as one 'error: ...' line and never exit the REPL;"
-        " 'quit' shuts everything down first"
+        "  full usage: help <command> — errors print one 'error:' line and never exit the REPL"
     )
     return "\n".join(lines)
 
 
 # ------------------------------------------------------------ run_command
-async def run_command(api: Any, line: str) -> str | None:
+
+
+def _log_line(entry: dict[str, Any]) -> str:
+    """One streamed log line, same shape format_logs renders."""
+    context = " ".join(f"{k}={entry[k]}" for k in ("account", "plugin", "event") if entry.get(k))
+    stamp = entry.get("ts")
+    when = (
+        time.strftime("%H:%M:%S", time.localtime(stamp))
+        if isinstance(stamp, (int, float))
+        else str(stamp or "")
+    )
+    return (
+        f"{when} {entry.get('severity', '')!s:7} {entry.get('source', '')}"
+        f" {entry.get('message', '')} {context}"
+    ).rstrip()
+
+
+class _LiveFlag:
+    """Parsed --live / -f state for the log verbs."""
+
+    def __init__(self, rest: list[str]) -> None:
+        self.rest = rest
+        self.on = False
+
+
+#: the close-drain cap (PR review round 4): how many queued rows the
+#: window writes after 'q'/shutdown before reporting the remainder omitted
+_CLOSE_DRAIN_MAX_ROWS = 200
+
+
+def _strip_live(args: list[str]) -> _LiveFlag:
+    """Pull the --live / -f switch out of a log verb's args."""
+    flag = _LiveFlag(args)
+    for token in list(flag.rest):
+        if token in ("--live", "-f"):
+            flag.on = True
+            flag.rest.remove(token)
+    return flag
+
+
+async def _live_log_window(
+    api: Any,
+    *,
+    account: str | None,
+    severity: str | None,
+    input_feed: AwaitableFactory | None,
+    limit: int = 20,
+    out: Any = None,
+    stop_wait: Any = None,
+) -> str:
+    """The live log window: stream matching entries until a keypress returns.
+
+    Contract (owner rule 2026-11-17): invoking a log verb with --live
+    SWITCHES the interface to the log window; any input line ('q' is the
+    convention, Enter works) switches back to the CLI. All window output
+    rides ``out`` (the REPL's configured stream; stdout when absent).
+    """
+    import sys
+
+    if input_feed is None:
+        raise UsageError("--live needs the interactive REPL (one-shot mode has no window)")
+    stream = out if out is not None else sys.stdout
+
+    def _emit(text: str) -> None:
+        print(text, file=stream, flush=True)
+
+    svc = api.logs_service()
+    entries: list[dict[str, Any]] = await api.logs_tail(
+        limit, account=account, severity=severity, without_account=account is None
+    )
+    scope = f"account {account!r}" if account else "the suite (global)"
+    _emit(f"--- live log: {scope} — press q (or Enter) to return ---")
+    for entry in entries:
+        _emit(_log_line(entry))
+    # bounded (PR review round 4): a burst must not queue unbounded
+    # rows that the close-drain would then write in one blocking run
+    streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=500)
+    omitted_on_overflow = 0
+
+    def _selected(entry: Any) -> bool:
+        """The SAME selection the initial tail applied: one account's
+        rows (or the suite's account-less rows for global-log), at the
+        requested severity (PR review 2026-11-18 — the stream used to
+        show EVERY entry regardless of the filters)."""
+        with contextlib.suppress(Exception):
+            row = entry.as_dict()
+            if account is not None and row.get("account") != account:
+                return False
+            if account is None and row.get("account"):
+                return False
+            return severity is None or row.get("severity") == severity
+        return False
+
+    def _on_entry(entry: Any) -> None:
+        # a live window must never break the log path; a full queue
+        # DROPS the row (counted) rather than blocking the log emitter
+        nonlocal omitted_on_overflow
+        with contextlib.suppress(Exception):
+            if _selected(entry):
+                try:
+                    streamed.put_nowait(entry.as_dict())
+                except asyncio.QueueFull:
+                    omitted_on_overflow += 1
+
+    unsubscribe = svc.subscribe(_on_entry)
+    rendered = len(entries)
+    # ONE input task for the window's whole life (CodeRabbit PR review
+    # round 2, 2026-11-18): re-creating it per iteration abandoned live
+    # consumers on the shared input queue — the first 'q' could vanish
+    # into a stale task and later CLI commands get eaten by zombies
+    feed_task: asyncio.Future[str] = asyncio.ensure_future(input_feed())
+    entry_task: asyncio.Future[dict[str, Any]] | None = None
+    # the stop_wait is CALLER-OWNED (the REPL's own shutdown signal):
+    # ensure_future on an existing task returns the same object, and
+    # cancelling it here would make the REPL read done() and SHUT THE
+    # APP DOWN on a mere window close — it is awaited, never cancelled.
+    # Without a shutdown signal, a window-owned never-resolving stand-in
+    # fills the wait set (and IS reaped with the window's tasks).
+    stop_waiting: asyncio.Future[Any]
+    if stop_wait is not None:
+        stop_waiting = stop_wait
+        owns_stop_waiting = False
+    else:
+        stop_waiting = asyncio.ensure_future(_never())
+        owns_stop_waiting = True
+    try:
+        while True:
+            entry_task = asyncio.ensure_future(streamed.get())
+            # the window observes SHUTDOWN too: a SIGINT during --live
+            # must not wait for a keypress that may never come — the
+            # stop signal exits the window exactly like a keypress would
+            waits: list[asyncio.Future[Any]] = [feed_task, entry_task, stop_waiting]
+            done, _pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            rendered_this_wait = False
+            if entry_task in done:
+                rendered += 1
+                rendered_this_wait = True
+                _emit(_log_line(entry_task.result()))
+            if feed_task in done:
+                # retrieve the outcome: a FAILED input task (the feed
+                # raised) must never masquerade as a clean close — the
+                # found-in-review blind spot that hid a NameError
+                feed_task.result()
+            if feed_task in done or stop_waiting in done:
+                # a raced row can be IN FLIGHT: consumed from the queue
+                # by the pending get, not yet rescheduled. Give the woken
+                # reader one bounded grace to complete, render it, then
+                # drain whatever queued behind it (PR review round 2:
+                # the observable window must not drop raced rows).
+                if entry_task is not None and entry_task not in done:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait({entry_task}, timeout=0.05)
+                if (
+                    entry_task is not None
+                    and entry_task.done()
+                    and not entry_task.cancelled()
+                    and not rendered_this_wait
+                ):
+                    # late completion only — the wait block above already
+                    # rendered a simultaneous completion (PR review:
+                    # the same row must not print twice)
+                    rendered += 1
+                    _emit(_log_line(entry_task.result()))
+                # the close-drain is BOUNDED: a burst backlog must not
+                # turn the close into thousands of blocking writes, and
+                # a slow stream must never delay shutdown past the grace
+                drained = 0
+                while streamed.qsize() and drained < _CLOSE_DRAIN_MAX_ROWS:
+                    rendered += 1
+                    drained += 1
+                    _emit(_log_line(streamed.get_nowait()))
+                    # yield every 25 rows: a slow stream must not hold
+                    # the event loop hostage during shutdown drain
+                    if drained % 25 == 0:
+                        await asyncio.sleep(0)
+                skipped = streamed.qsize() + omitted_on_overflow
+                if skipped:
+                    _emit(f"--- {skipped} row(s) omitted (window closing) ---")
+                break  # any input returns; shutdown returns
+    finally:
+        # cancel AND reap the WINDOW-OWNED tasks on every exit path —
+        # the caller's stop_wait stays untouched. Cancellation of the
+        # WINDOW ITSELF propagates: the suppress below only shields the
+        # child tasks' cleanup, never the window's own cancellation.
+        owned: list[Any] = [feed_task, entry_task]
+        if owns_stop_waiting:
+            owned.append(stop_waiting)
+        for task in owned:
+            if task is not None:
+                task.cancel()
+        # unsubscribe BEFORE the (shielded) reap: a cancellation landing
+        # during the await skips every line after it, and the log
+        # service would retain the closed window's callback forever.
+        # unsubscribe is synchronous — no cancellation point, always runs.
+        unsubscribe()
+        if owned:
+            # shielded: a cancellation arriving DURING the child reaping
+            # cannot interrupt the cleanup — the children are reaped and
+            # the cancellation propagates naturally after the shield
+            # (PR review round 8)
+            await asyncio.shield(asyncio.wait({t for t in owned if t is not None}))
+        # window cancellation propagates NATURALLY after this finally:
+        # Python re-raises the pending CancelledError once the finally
+        # completes — no explicit re-raise needed (and none possible on
+        # 3.10 without Task.cancelling(), which is 3.11+)
+    closing = f"--- live log closed ({rendered} lines shown; back on the CLI ---"
+    if omitted_on_overflow and streamed.empty():
+        return f"{closing} [{omitted_on_overflow} row(s) dropped at peak volume]"
+    return closing
+
+
+async def _never() -> None:
+    """A future that never resolves — the no-shutdown-signal stand-in."""
+    await asyncio.Event().wait()
+
+
+async def run_command(
+    api: Any,
+    line: str,
+    *,
+    input_feed: AwaitableFactory | None = None,
+    out: Any = None,
+    stop_wait: Any = None,
+) -> str | None:
     """Execute one command line against the ControlAPI.
 
     Expects the raw input line (shlex-parsed here, so quoted arguments work).
@@ -220,7 +509,7 @@ async def run_command(api: Any, line: str) -> str | None:
             name = "quit"
         if name not in HELP:
             raise UsageError(f"help: unknown command {args[0]!r} — try 'help' alone")
-        sig, desc = HELP[name]
+        sig, _brief, desc = HELP[name]
         focused = [f"{name}: {desc}"]
         if sig:
             focused.append(f"usage: {name} {sig}")
@@ -246,13 +535,69 @@ async def run_command(api: Any, line: str) -> str | None:
         return await _tasks_group(api, args)
     if cmd == "simulation":
         return await _simulation_group(api, args)
+    if cmd == "log":
+        live = _strip_live(list(args))
+        rest = live.rest
+        severity: str | None = None
+        if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1)  # exact-case: account names are lowercase
+        if not rest:
+            raise UsageError(f"usage: log {HELP['log'][0]}")
+        account: str | None = rest.pop(0)
+        limit = 20
+        if rest:
+            if not rest[0].lstrip("-").isdigit():
+                raise UsageError(f"usage: log {HELP['log'][0]}")
+            limit = _integer(rest.pop(0), cmd, "n")
+        if rest:
+            raise UsageError(f"usage: log {HELP['log'][0]}")
+        if live.on:
+            return await _live_log_window(
+                api,
+                account=account,
+                severity=severity,
+                input_feed=input_feed,
+                limit=limit,
+                out=out,
+                stop_wait=stop_wait,
+            )
+        return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+    if cmd == "global-log":
+        live = _strip_live(list(args))
+        rest = live.rest
+        severity = None
+        if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1)
+        limit = 20
+        if rest:
+            if not rest[0].lstrip("-").isdigit():
+                raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
+            limit = _integer(rest.pop(0), cmd, "n")
+        if rest:
+            raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
+        if live.on:
+            return await _live_log_window(
+                api,
+                account=None,
+                severity=severity,
+                input_feed=input_feed,
+                limit=limit,
+                out=out,
+                stop_wait=stop_wait,
+            )
+        return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
     if cmd == "logs":
+        # compat alias (hidden from the overview): the old '[n] [account]'
+        # form routes to the new verbs — an account selects that client's
+        # logs, no account shows the suite's own
         rest = list(args)
         severity = None
         if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            severity = rest.pop(-1)  # exact-case: account names are lowercase
+            severity = rest.pop(-1)
         limit, account = _tail_args(cmd, rest)
-        return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+        if account:
+            return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+        return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
     if cmd == "audit":
         limit, account = _tail_args(cmd, args)
         return format_audit(await api.audit_tail(limit, account=account))

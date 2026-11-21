@@ -103,6 +103,14 @@ class SignalOutbox:
         — the consumer-side dedupe companion."""
         return self._accepted.get(f"{plugin}:{name}")
 
+    def bind_delivery(self, deliver: Callable[[SignalIdentity], Awaitable[Any]]) -> None:
+        """Late-bind the delivery callback (bootstrap order: the outbox
+        must exist before the chain runtime that consumes it, so the
+        constructor takes deliver=None and the runtime's intake binds
+        here — found never-wired in production by the live-debugging
+        toolkit (2026-11-17); signals pended forever)."""
+        self._deliver = deliver
+
     async def deliver_pending(self, limit: int = 50) -> dict[str, int]:
         """One delivery sweep: every pending signal gets its delivery
         callback; success acks, failure counts an attempt and retries

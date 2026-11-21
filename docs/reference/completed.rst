@@ -105,6 +105,25 @@ dependency extras: ``[api]`` (uvicorn), ``[ui]`` (flet + httpx),
 
 **Key files:** ``interfaces/api/app.py``, ``pyproject.toml``
 
+The Direct Client Connection (2026-11-17)
+-----------------------------------------
+
+Owner-locked architecture change, same day: the framework's value is
+ORCHESTRATION and multi-account isolation, not capability mediation.
+Plugin cogs receive their account's library client DIRECTLY through
+the toolbox (``CogServices.bind_client`` at attach — account-scoped
+by construction, dies with the cog). AGENTS §1.4's "plugins never
+touch clients" retired; the paced pipeline remains the law for
+coordinated outbound action, and the facade keeps what has no
+client-side equivalent (persistence families, orchestration verbs).
+The unified-object convention: ``self.services.client`` (alias
+``self.bot``) + ``self.services.paced`` — the facade rides the
+toolbox, not the client's constructor (order + cardinality, recorded
+in the plan).
+
+**Key files:** ``core/plugin_manager/cog_host.py``,
+``docs/plans/client-capability-adoption.md`` (the remaining tracks)
+
 The Plugin COG Seam — ctx.services (2026-11-17)
 -----------------------------------------------
 

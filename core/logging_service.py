@@ -35,6 +35,7 @@ from __future__ import annotations
 import atexit
 import logging
 import logging.handlers
+import os
 import queue
 import sys
 import threading
@@ -80,14 +81,26 @@ _STDERR_QUEUE_HANDLER: logging.handlers.QueueHandler | None = None
 _STDERR_ATEXIT_ARMED = False
 
 
-def _start_stderr_pipeline() -> None:
+def _start_stderr_pipeline(console_level: int | None = None) -> None:
     """Create + start the one listener thread and attach its queue handler
-    to the ``libzent`` logger (idempotent; lock-guarded)."""
+    to the ``libzent`` logger (idempotent; lock-guarded).
+
+    ``console_level`` rides the TERMINAL stream handler: Python applies
+    an ancestor logger's level only at emission origin, so a child
+    logger that explicitly enables INFO would propagate records past a
+    root-level filter — the handler-level threshold is the one that
+    holds for every record that reaches the queue (CodeRabbit PR
+    review 2026-11-17).
+    """
     global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_ATEXIT_ARMED
     with _STDERR_PIPELINE_LOCK:
         if _STDERR_QUEUE_HANDLER is not None:
+            if console_level is not None and _STDERR_LISTENER is not None:
+                _STDERR_LISTENER.handlers[0].setLevel(console_level)
             return
         handler = logging.StreamHandler()
+        if console_level is not None:
+            handler.setLevel(console_level)
         handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -207,8 +220,23 @@ class LogEntry:
         }
 
 
-def configure_stderr(level: int = logging.INFO) -> None:
+def _default_console_level() -> int:
+    """The console default: WARNING, unless the operator overrides.
+
+    Logs are a CHOICE (owner rule 2026-11-17): the REPL surface stays
+    readable — everything still persists (ring + DB) and surfaces via
+    `log <account>` / `global-log`. Set LIBZENT_CONSOLE_LEVEL=INFO or
+    DEBUG when developing to bring the live tail back.
+    """
+    raw = os.environ.get("LIBZENT_CONSOLE_LEVEL", "").strip().upper()
+    return _LEVEL_BY_SEVERITY.get(raw, logging.WARNING)
+
+
+def configure_stderr(level: int | None = None) -> None:
     """Attach one human-readable stderr handler to the logger tree (idempotent).
+
+    Defaults to WARNING on the console (see _default_console_level) —
+    the flood is opt-in via LIBZENT_CONSOLE_LEVEL.
 
     The StreamHandler runs on a QueueListener thread behind a
     QueueHandler: callers (including the record() mirror on the event
@@ -217,9 +245,16 @@ def configure_stderr(level: int = logging.INFO) -> None:
     global _STDERR_CONFIGURED
     if _STDERR_CONFIGURED:
         return
+    if level is None:
+        level = _default_console_level()
     root = logging.getLogger("libzent")
-    root.setLevel(level)
-    _start_stderr_pipeline()
+    # the LOGGER admits broadly (INFO keeps the structured bridge fed —
+    # records stay queryable; DEBUG when DEBUG is requested, so
+    # LIBZENT_CONSOLE_LEVEL=DEBUG diagnostics survive the logger gate);
+    # the CONSOLE threshold lives on the terminal stream handler inside
+    # the pipeline, where propagation cannot bypass it
+    root.setLevel(min(logging.INFO, level))
+    _start_stderr_pipeline(console_level=level)
     handler = _STDERR_QUEUE_HANDLER
     if handler is not None:
         root.addHandler(handler)
@@ -424,6 +459,7 @@ class LogService:
         plugin: str | None = None,
         severity: str | None = None,
         source: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
         """Most recent entries (oldest first) after applying the filters."""
         if n <= 0:
@@ -437,6 +473,8 @@ class LogService:
                 continue
             if account and entry.account != account:
                 continue
+            if without_account and entry.account:
+                continue  # framework-only view (the `global-log` side)
             if plugin and entry.plugin != plugin:
                 continue
             if source and entry.source != source:

@@ -155,9 +155,15 @@ class WorkspaceReconciler:
         with contextlib.suppress(Exception):
             await self.reconcile()
         while True:
+            # cancellation propagates naturally out of sleep (the
+            # checkpoint); suppress(Exception) never eats it —
+            # CancelledError is a BaseException. The old bare `raise`
+            # under suppress(CancelledError) ran with NO active
+            # exception after a normal sleep, killing the task with
+            # "No active exception to reraise" after ONE interval
+            # (user report 2026-11-17: outbox sweeps, deletion resumes,
+            # and run repairs silently stopped).
             await asyncio.sleep(self._interval)
-            with contextlib.suppress(asyncio.CancelledError):
-                raise
             with contextlib.suppress(Exception):
                 await self.reconcile()
 

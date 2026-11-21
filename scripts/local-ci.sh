@@ -2,8 +2,14 @@
 # local-ci — run the FULL CI gate locally before pushing.
 #
 # Usage:
-#   ./scripts/local-ci.sh          # the full gate (lint, types, export, 3.10 suite, 3.13 suite+coverage, build)
-#   ./scripts/local-ci.sh quick    # lint + types + export-sync only (~1 min)
+#   ./scripts/local-ci.sh                 # the full gate (lint, types, export, 3.10 suite, 3.13 suite+coverage, build)
+#   ./scripts/local-ci.sh quick           # lint + types + export-sync only (~1 min)
+#   ./scripts/local-ci.sh --review        # full gate + CodeRabbit review running concurrent with the suites
+#
+# --review is an OPTION, not a mode: it parses anywhere on the command
+# line and requires the full gate (PR review 2026-11-18 — checking
+# only $2 let "./local-ci.sh --review" skip the review while the
+# verdict still said "safe to push").
 #
 # Mirrors .github/workflows/tests.yml exactly. CI must never see a
 # failure this script did not see first (owner rule, 2026-11-17 —
@@ -26,16 +32,82 @@ if [ ! -x "$UV_BIN" ]; then
   exit 2
 fi
 
+# coderabbit resolves the same way (PR #27 round 7 review): a PATH
+# install must not fall through to a hardcoded maintainer home that
+# may not exist on another machine.
+CR_BIN="$(command -v coderabbit || true)"
+[ -n "$CR_BIN" ] || CR_BIN="$HOME/.local/bin/coderabbit"
+
 PROD="main.py core adapters interfaces database benchmark scripts parsers plugins"
 FAIL=0
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m OK  %s\033[0m\n' "$*"; }
 bad()  { printf '\033[31mFAIL %s\033[0m\n' "$*"; FAIL=1; }
 
-# Per-run scratch workspace: concurrent runs never share logs, the
-# export diff, or the 3.10 environment (CodeRabbit PR #25 review).
+# --review anywhere on the command line (PR review 2026-11-18); the
+# mode word keeps its historical first-position handling.
+REVIEW_FLAG=0
+for arg in "$@"; do
+  if [ "$arg" = "--review" ]; then REVIEW_FLAG=1; fi
+done
+if [ "$REVIEW_FLAG" -eq 1 ] && [ "${1:-}" = "quick" ]; then
+  echo "local-ci: --review needs the full gate (quick mode has no suites to review against)" >&2
+  exit 2
+fi
+
+# The checkout lock serializes the WHOLE gate (final pre-push review):
+# steps 1-4 (ruff, format, export, pyright) and the build also run
+# `uv run` against the shared project .venv — locking only the suite
+# legs still let two gates mutate the environment under each other's
+# early steps. The lock file lives beside the persistent 3.10 venv
+# (same checkout-scoped name).
+VENV310="/tmp/opencode/local-ci-venv310-$(pwd | cksum | cut -d' ' -f1)"
+# the lock parent must exist BEFORE the redirection opens the lock file
+# (PR review 2026-11-21): /tmp/opencode is not guaranteed on other
+# machines, and a failed redirection under set -e kills the gate at
+# line one of the lock section
+mkdir -p "$(dirname "$VENV310")"
+exec 9>"$VENV310.lock"
+if ! flock -n 9; then
+  echo "       another gate holds this checkout — waiting for it to finish..."
+  flock 9
+fi
+
+# Per-run scratch workspace: concurrent runs never share logs or the
+# export diff (CodeRabbit PR #25 review). The 3.10 venv is the one
+# deliberate exception — checkout-scoped and lock-serialized, see
+# step 5/8 below (PR review 2026-11-18).
 RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
-trap 'rm -rf "$RUN_DIR"' EXIT
+# Evidence survives a red gate (twice this session, the trap ate the
+# ONLY copy of the review stream and suite logs mid-diagnosis): a
+# failing run's artifacts are copied to the stable scratch area before
+# cleanup; a green run cleans up completely.
+KEEP_ON_FAIL=/tmp/opencode/local-ci-last-failed
+# The detached review (own session, no lock fd) must not outlive an
+# EARLY gate exit either (PR review round 10): INT/TERM, or a failure
+# before the verdict block, previously left it running against a run
+# dir this trap was about to delete. Reap the whole session group
+# first — the verdict block's own kill is a no-op by then (the group
+# is gone) — then handle the evidence.
+reap_review() {
+  if [ -n "${REVIEW_PID:-}" ] && kill -0 "$REVIEW_PID" 2>/dev/null; then
+    kill -- -"$REVIEW_PID" 2>/dev/null || true
+  fi
+  return 0
+}
+cleanup_gate() {
+  reap_review
+  if [ "${FAIL:-0}" -eq 0 ]; then
+    rm -rf "$RUN_DIR"
+  else
+    mkdir -p "$KEEP_ON_FAIL"
+    rm -rf "$KEEP_ON_FAIL"/*
+    cp -r "$RUN_DIR"/. "$KEEP_ON_FAIL"/
+    rm -rf "$RUN_DIR"
+  fi
+}
+trap cleanup_gate EXIT
+trap 'cleanup_gate; trap - EXIT; exit 130' INT TERM
 
 # state/ is live data. Snapshot before the suites so anything they
 # leave behind is REPORTED — bootstrap places credentials.key,
@@ -70,33 +142,16 @@ fi
 # One ratchet per tree. Exit status matters: 0 = clean run, 1 = errors
 # emitted, anything else = the run did not complete — its (possibly
 # empty) log must never count as zero errors.
-mypy_ratchet() {
-  local label="$1" baseline_file="$2" log status=0 errs base
-  log="$RUN_DIR/mypy-$label.log"
-  shift 2
-  "$UV_BIN" run --frozen mypy "$@" &> "$log" || status=$?
-  if [ "$status" -gt 1 ]; then
-    bad "mypy $label did not complete (exit $status) — count rejected"
-    tail -20 "$log"
-    return
-  fi
-  errs=$(grep -c "error:" "$log" || true)
-  base=$(<"$baseline_file")
-  echo "mypy $label errors: $errs (baseline: $base)"
-  if [ "$errs" -eq "$base" ]; then ok "$label == baseline"
-  else
-    # diagnostics BEFORE the exit trap cleans RUN_DIR — a failed gate
-    # must carry its own evidence (CodeRabbit pre-review 2026-11-17).
-    # `|| true`: an empty match must not kill the gate mid-verdict.
-    grep "error:" "$log" | head -20 || true
-    if [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
-    else bad "$label grew ($base -> $errs)"; fi
-  fi
-}
-
-step "4/8 Mypy ratchets — production + tests (split baselines)"
-mypy_ratchet production .github/mypy-baseline main.py core adapters database interfaces plugins benchmark scripts parsers
-mypy_ratchet tests .github/mypy-tests-baseline tests
+step "4/8 Pyright ratchet (errors must equal the baseline exactly)"
+"$UV_BIN" run --frozen pyright --outputjson \
+  core adapters database interfaces plugins benchmark scripts parsers main.py \
+  > "$RUN_DIR/pyright.json" 2>/dev/null || true  # pyright exits 1 on findings
+PYRIGHT_ERRS=$(python3 -c "import json; print(json.load(open('$RUN_DIR/pyright.json'))['summary']['errorCount'])" 2>/dev/null || echo "?")
+PYRIGHT_BASE=$(<.github/pyright-baseline)
+echo "pyright errors: $PYRIGHT_ERRS (baseline: $PYRIGHT_BASE)"
+if [ "$PYRIGHT_ERRS" -eq "$PYRIGHT_BASE" ]; then ok "pyright == baseline"
+elif [ "$PYRIGHT_ERRS" -lt "$PYRIGHT_BASE" ]; then bad "pyright improved — lower .github/pyright-baseline to $PYRIGHT_ERRS in this push"
+else bad "pyright grew ($PYRIGHT_BASE -> $PYRIGHT_ERRS)"; fi
 
 if [ "${1:-}" = "quick" ]; then
   step "quick mode — suites skipped"
@@ -104,10 +159,44 @@ if [ "${1:-}" = "quick" ]; then
   exit "$FAIL"
 fi
 
+# full mode supports a --review flag: the CodeRabbit review runs
+# CONCURRENTLY with the suites (they are independent checks; the
+# contract says both green before push, not sequential). The review
+# output lands in $RUN_DIR/review.ndjson.
+REVIEW_PID=""
+REVIEW_EXIT=0  # initialized here: the stall branch must not read it unset (PR review 2026-11-21)
+if [ "$REVIEW_FLAG" -eq 1 ]; then
+  if [ ! -x "$CR_BIN" ]; then
+    echo "local-ci: --review needs the coderabbit CLI — looked on PATH and at $HOME/.local/bin/coderabbit" >&2
+    exit 2
+  fi
+  step "0/8 CodeRabbit review (concurrent with the suites)"
+  # setsid: the review leads its own session, so the stall path can
+  # signal the whole PROCESS GROUP — killing only the subshell left the
+  # coderabbit child running. fd 9 (the checkout lock) is closed inside:
+  # an inherited lock fd let a stalled review block the NEXT gate's
+  # flock until it died on its own (PR review 2026-11-21).
+  setsid bash -c 'exec 9>&-; exec "$1" review --agent \
+    --base-commit origin/master --fresh \
+    > "$2" 2>&1' _ "$CR_BIN" "$RUN_DIR/review.ndjson" &
+  REVIEW_PID=$!
+  echo "       review running as PID $REVIEW_PID"
+fi
+
 step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
-if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
-  python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
-  ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
+# PERSISTENT but CHECKOUT-SCOPED venv (PR review 2026-11-18): the
+# isolated-per-run venv resolved 90 packages from scratch EVERY gate —
+# minutes of pure waste — but one FIXED shared path let two checkouts
+# with different lockfiles mutate the same environment under each
+# other's running tests. The venv is named after THIS checkout's path;
+# same-checkout gates are serialized by the whole-gate lock above, and
+# --exact prunes dependencies the lock dropped (uv run's default sync
+# keeps extraneous packages). The lock is frozen so the environment is
+# always exactly the lock's resolution.
+if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --exact --python 3.10 \
+  pytest tests/ -n auto --dist loadscope \
+  > "$RUN_DIR/suite-310.log" 2>&1; then
+  ok "3.10 suite: $(grep -E "passed" "$RUN_DIR/suite-310.log" | tail -1)"
 else
   # no-match greps stay nonfatal (set -e + pipefail would otherwise
   # kill the gate before the verdict) and fall back to a bounded tail
@@ -122,9 +211,19 @@ report_state_residue
 step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
-if "$UV_BIN" run --frozen --python 3.13 coverage run -m unittest discover -s tests -t . > "$RUN_DIR/suite-313.log" 2>&1 \
-  && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
-  ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
+# PARALLEL coverage via pytest-cov (process speed, 2026-11-19):
+# pytest-cov forwards coverage into every xdist worker and merges the
+# data itself — plain `coverage run --parallel-mode` measured ONLY the
+# orchestrating master (xdist workers are separate unmeasured
+# processes; the report read 0.0% and failed the floor).
+# CONCURRENT-GATE SAFETY (pre-push round): the data file lives under
+# COVERAGE_FILE in THIS run's scratch dir — a repo-root .coverage let
+# one gate clobber another's data. The environment is serialized by
+# the whole-gate checkout lock (see the top of the script).
+if COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 pytest tests/ --cov -n auto --dist loadscope \
+  > "$RUN_DIR/suite-313.log" 2>&1 \
+  && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
+  ok "3.13 suite: $(grep "passed" "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
   # tests and coverage fail separately: the suite log carries
   # FAILED/ERROR, the coverage log carries the floor line (which reads
@@ -146,6 +245,93 @@ else
 fi
 
 step "8/8 Verdict"
+if [ -n "$REVIEW_PID" ]; then
+  echo "       waiting for the concurrent review (PID $REVIEW_PID)..."
+  # bounded wait (final pre-push review): a stalled review must hang
+  # the verdict forever no more than a stalled suite would — 900s
+  # covers the longest observed full-range review with headroom
+  REVIEW_WAITED=0
+  while kill -0 "$REVIEW_PID" 2>/dev/null && [ "$REVIEW_WAITED" -lt 900 ]; do
+    sleep 10
+    REVIEW_WAITED=$((REVIEW_WAITED + 10))
+  done
+  if kill -0 "$REVIEW_PID" 2>/dev/null; then
+    # signal the review's whole SESSION (setsid made it a group
+    # leader): the subshell-only kill left the coderabbit child alive
+    kill -- -"$REVIEW_PID" 2>/dev/null || true
+    sleep 2
+    kill -9 -- -"$REVIEW_PID" 2>/dev/null || true
+    echo -e "\033[31mREVIEW: stalled past 900s — killed; no review verdict (rerun the gate)\033[0m"
+    FAIL=1
+    REVIEW_EXIT=124  # skip the parse below: a partial stream is not a verdict
+  else
+    wait "$REVIEW_PID" || REVIEW_EXIT=$?
+  fi
+  if [ "$REVIEW_EXIT" -ne 0 ]; then
+    echo -e "\033[31mREVIEW: command failed (exit $REVIEW_EXIT)\033[0m"
+    FAIL=1
+  else
+    # Parse the agent stream as NDJSON (PR #27 round 7 review): a
+    # literal grep misses spaced JSON, an empty stream read as "0
+    # findings", and a skipped review is NOT a clean one.
+    REVIEW_VERDICT="$(python3 - "$RUN_DIR/review.ndjson" <<'PY'
+import json
+import sys
+
+findings = 0
+status = None
+unreviewed = 0
+outcome = None
+try:
+    with open(sys.argv[1]) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") == "finding":
+                findings += 1
+            elif rec.get("type") == "complete":
+                status = rec.get("status")
+                unreviewed = int(rec.get("unreviewedFileCount") or 0)
+                outcome = rec.get("outcome")
+except OSError:
+    print("missing")
+    raise SystemExit(0)
+if status is None:
+    print("incomplete")
+elif status != "review_completed":
+    # review_skipped, error, failed — every non-success terminal status
+    # is a failed review, never a clean one
+    print("failed:%s" % status)
+elif unreviewed > 0:
+    # review_completed can still carry unreviewed files — that is an
+    # incomplete review, not a clean zero
+    print("failed:%d-unreviewed" % unreviewed)
+elif outcome == "failed":
+    print("failed:outcome")
+else:
+    print("%d ok" % findings)
+PY
+)"
+    case "$REVIEW_VERDICT" in
+      "0 ok")
+        echo -e "\033[32mREVIEW: 0 findings\033[0m"
+        ;;
+      skipped|missing|"incomplete"|failed:*)
+        echo -e "\033[31mREVIEW: no completed review ($REVIEW_VERDICT) — see $RUN_DIR/review.ndjson\033[0m"
+        FAIL=1
+        ;;
+      *)
+        echo -e "\033[31mREVIEW: ${REVIEW_VERDICT%% *} finding(s) — see $RUN_DIR/review.ndjson\033[0m"
+        FAIL=1
+        ;;
+    esac
+  fi
+fi
 if [ "$FAIL" -eq 0 ]; then
   echo -e "\n\033[32mALL GATES GREEN — safe to push\033[0m"
 else

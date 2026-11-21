@@ -523,3 +523,39 @@ class StderrPipelineClaims(unittest.TestCase):
             m._STDERR_CONFIGURED = configured_before
             lg.handlers[:] = handlers_before
             lg.propagate = propagate_before
+
+
+class DiscordTreeCaptureTests(unittest.TestCase):
+    """The contract that logs never interrupt the command interface:
+    the fork's own logger tree (discord.*) bridges into the structured
+    log instead of riding lastResort onto stderr (owner rule
+    2026-11-17 — 'accounts start' used to flood the REPL with client
+    warnings)."""
+
+    def test_discord_tree_bridges_and_stops_propagation(self) -> None:
+        import logging as _logging
+
+        from core.logging_service import (
+            LogService,
+            attach_stdlib_bridge,
+            detach_stdlib_bridge,
+        )
+
+        saved_handlers = list(_logging.getLogger("discord").handlers)
+        saved_propagate = _logging.getLogger("discord").propagate
+        saved_level = _logging.getLogger("discord").level
+        try:
+            service = LogService()
+            attach_stdlib_bridge(service, "discord")
+            root = _logging.getLogger("discord")
+            self.assertFalse(root.propagate)  # no lastResort leak
+            self.assertTrue(any(isinstance(h, StdlibBridge) for h in root.handlers))
+            _logging.getLogger("discord.client").warning("gateway hiccup (synthetic)")
+            rows = service.tail(10, severity="WARNING")
+            self.assertTrue(any("gateway hiccup" in r.get("message", "") for r in rows))
+        finally:
+            detach_stdlib_bridge("discord")
+            root = _logging.getLogger("discord")
+            root.handlers = saved_handlers
+            root.propagate = saved_propagate
+            root.setLevel(saved_level)

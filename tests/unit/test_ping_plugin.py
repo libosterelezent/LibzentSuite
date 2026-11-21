@@ -92,11 +92,11 @@ class PingCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.replies[0].startswith("send blocked"), True)
 
     async def test_command_unwired_stack_replies_guidance(self) -> None:
-        # fail-closed: no facade on ctx -> guidance reply, NO raw send
-        facade = _FakePacedFacade()
+        # fail-closed: no facade on ctx -> the guidance reply is the
+        # ONLY observable output (every send the command could make is
+        # either the paced facade — absent — or ctx.send — recorded)
         ctx = _ctx(None)
         await _invoke(_cog(), ctx, 555, text="hello")
-        self.assertEqual(facade.sent, [])
         self.assertEqual(len(ctx.replies), 1)
         self.assertIn("not wired", ctx.replies[0])
 

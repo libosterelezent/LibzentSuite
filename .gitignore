@@ -44,6 +44,8 @@ dump/*
 !dump/README.md
 knowledgebase/
 
+# live-debugging toolkit output (findings JSONL + run summaries are run artifacts)
+scripts/live-debugging/findings/
 # python build artifacts (uv build / pip install -e .)
 /dist/
 /build/
