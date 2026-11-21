@@ -12,7 +12,7 @@ of the layers:
      - Where
      - Applies to
    * - ``.env``
-     - ``PRIMARY_BOT_ID``, ``OWNER_USER_IDS``
+     - ``OWNER_USER_IDS``
        (+ ``LZ_MASTER_KEY`` via process env only) —
        account tokens live ENCRYPTED in the DB, imported from ``.env``
        only via ``credentials import-env``

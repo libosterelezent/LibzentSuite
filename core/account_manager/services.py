@@ -355,9 +355,8 @@ class AccountPluginServices:
     def account_username(self) -> str | None:
         """The account's own Discord username (None offline/pre-connect).
 
-        Used to attribute the primary bot's per-user limit messages ("**name**,
-        the roulette is limited...") — a shared channel must not park OUR
-        rolling on ANOTHER user's limit. Read defensively through the
+        Used to attribute per-user limit messages in shared channels — one
+        account must not act on another user's limit. Read defensively through the
         adapter's underlying library client.
         """
         client = self._client()
@@ -901,7 +900,7 @@ class AccountPluginServices:
     # ------------------------------------------------------------ properties
     @property
     def credentials(self) -> Any:
-        """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
+        """Fleet credentials (owner ids) — never hardcoded."""
         return self._credentials
 
     @property

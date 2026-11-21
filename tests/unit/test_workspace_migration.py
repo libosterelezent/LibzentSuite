@@ -324,8 +324,8 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
     async def test_migration_is_idempotent_and_restart_safe(self) -> None:
         applied = await self._migrate()
         self.assertEqual(
-            applied, 7
-        )  # v10..v16: fold, drops, profiles, cooldown profile, pointer, legacy fold, preset defs
+            applied, 8
+        )  # v10..v17: fold, drops, profiles, cooldown profile, pointer, legacy fold, preset defs, primary-bot retirement
         again = await self._migrate()  # re-run: nothing new applies
         self.assertEqual(again, 0)
 

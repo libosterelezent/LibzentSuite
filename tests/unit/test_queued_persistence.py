@@ -200,6 +200,7 @@ class TestLogServiceQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [e["message"] for e in repo.added], ["prime"] + [f"m{i}" for i in range(1000)]
         )
+
     async def test_overflow_drops_counted_ring_unaffected(self) -> None:
         """(c) Queue capped at 10_000 in-flight: the excess is dropped FROM
         PERSISTENCE, counted in stats()['dropped']; ring/counters keep

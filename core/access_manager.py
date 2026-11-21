@@ -6,7 +6,6 @@ OWNER_USER_IDS model (see the migration note in credentials.py).
 Storage: single kv row per concern under the ``access:`` prefix —
 
   access:admins          -> [discord user id, ...]
-  access:primary_bot_id    -> int
   access:account:<name>  -> {"is_admin": bool,
                              "prefix_mode": "mention"|"symbol"|"both",
                              "prefix_symbol": str,
@@ -36,7 +35,6 @@ LOG = logging.getLogger("libzent.access")
 
 #: kv keys (single source of truth for the row names)
 KEY_ADMINS = "access:admins"
-KEY_PRIMARY_BOT_ID = "access:primary_bot_id"
 
 
 def account_key(name: str) -> str:
@@ -263,30 +261,6 @@ class AccessManager:
         self._log.info("account %s prefix -> mode=%s symbol=%r", name, mode, symbol)
         return {"prefix_mode": mode, "prefix_symbol": symbol}
 
-    # ---------------------------------------------------------- primary bot id
-    async def primary_bot_id(self) -> int | None:
-        """DB value first; the env PRIMARY_BOT_ID is the fallback."""
-        raw = await self._kv.get(KEY_PRIMARY_BOT_ID)
-        if raw is not None:
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                pass
-        if self._credentials is not None:
-            try:
-                return self._credentials.primary_bot_id
-            except Exception:
-                return None
-        return None
-
-    async def set_primary_bot_id(self, user_id: int | None) -> None:
-        if user_id is None:
-            await self._kv.delete(KEY_PRIMARY_BOT_ID)
-            self._log.info("primary bot id cleared (env fallback applies)")
-            return
-        await self._kv.set(KEY_PRIMARY_BOT_ID, int(user_id))
-        self._log.info("primary bot id set to %d", int(user_id))
-
     # ---------------------------------------------------------- overview
     async def all_account_rows(self) -> dict[str, dict[str, Any]]:
         """Every access row keyed by account name (adminlist verb + the
@@ -360,7 +334,6 @@ class AccessManager:
 __all__ = [
     "DEFAULT_ACCOUNT_ROW",
     "KEY_ADMINS",
-    "KEY_PRIMARY_BOT_ID",
     "PREFIX_MODES",
     "AccessManager",
     "account_key",

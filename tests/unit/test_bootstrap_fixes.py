@@ -119,15 +119,6 @@ class TestFromFileSymlink(unittest.TestCase):
             self.assertEqual(Credentials.from_file(real).get("A"), "1")
 
 
-class TestPrimaryBotIdTruncation(unittest.TestCase):
-    def test_malformed_value_truncated_in_error(self) -> None:
-        creds = Credentials({"PRIMARY_BOT_ID": "x" * 100})
-        with self.assertRaises(CredentialsError) as ctx:
-            _ = creds.primary_bot_id
-        self.assertIn("...", str(ctx.exception))
-        self.assertNotIn("x" * 41, str(ctx.exception))
-
-
 # ------------------------------------------- access-manager concurrency
 class SlowKv:
     """kv double that YIELDS on every await so tasks really interleave."""

@@ -98,7 +98,7 @@ FAST_POLICIES = {
     },
     "accounts": {},
 }
-FAST_SETTINGS = {"ldp_worker": {"burst": 2}}
+FAST_SETTINGS = {"ldp_worker": {"burst": 2}, "exporter": {"bot_id": PRIMARY_BOT_ID}}
 
 # --- bounded-wait budgets (every timing wait is explicit) ---------------
 #: idle seconds that count as "the world went quiet"
@@ -477,7 +477,6 @@ class Harness:
             f"DISCORD_TOKEN_BETA=sim-token-beta\n"
             f"DISCORD_TOKEN_GAMMA=sim-token-gamma\n"
             f"OWNER_USER_IDS={OWNER_ID}\n"
-            f"PRIMARY_BOT_ID={PRIMARY_BOT_ID}\n"
         )
         # 0600: the boot-time security audit warns on group/world-readable
         # credential files, and the backfill now SURFACES that warning

@@ -50,6 +50,7 @@ FAST_SETTINGS = {
         # flow sent no chunk. 3.0s is what the simulation scenarios give the
         # same fixture (adapters/simulator/scenarios.py).
         "dm_read_timeout": 3.0,
+        "bot_id": PRIMARY_BOT_ID,
     }
 }
 FAST_POLICIES = {
@@ -173,7 +174,6 @@ class Stack:
         self.config_dir = make_config_dir(settings)
         self.credentials = Credentials.from_values(
             {
-                "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
                 "OWNER_USER_IDS": str(OWNER_ID),
                 "DISCORD_TOKEN_ALPHA": "sim-alpha",
                 "DISCORD_TOKEN_BETA": "sim-beta",

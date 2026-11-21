@@ -878,6 +878,11 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON workspace_executions(workspace, state);
         """,
     ),
+    (
+        17,
+        "retire the framework primary-bot id (game-agnostic owner rule)",
+        "DELETE FROM kv WHERE key = 'access:primary_bot_id';",
+    ),
 ]
 
 

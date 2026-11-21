@@ -43,12 +43,6 @@ class FakeCredentials:
             return frozenset()
         return frozenset(int(x) for x in self._owner.split(",") if x.strip())
 
-    @property
-    def primary_bot_id(self) -> int:
-        if self._bot_id is None:
-            raise KeyError("PRIMARY_BOT_ID")
-        return int(self._bot_id)
-
 
 def make(kv: Any = None, creds: FakeCredentials | None = None) -> AccessManager:
     kv_repo: Any = kv or FakeKv()  # duck-typed KvRepository double
@@ -202,28 +196,6 @@ class TestAdminFlag(unittest.IsolatedAsyncioTestCase):
         am = make()
         await am.set_admin_flag("alpha", True)  # no user_id recorded
         self.assertFalse(await am.is_admin_id(1))
-
-
-# -------------------------------------------------------------- primary bot id
-class TestPrimaryBotId(unittest.IsolatedAsyncioTestCase):
-    async def test_none_when_unset_no_env(self) -> None:
-        am = make()
-        self.assertIsNone(await am.primary_bot_id())
-
-    async def test_db_value_wins(self) -> None:
-        am = make(creds=FakeCredentials(bot_id=111))
-        await am.set_primary_bot_id(222)
-        self.assertEqual(await am.primary_bot_id(), 222)
-
-    async def test_env_fallback_when_db_unset(self) -> None:
-        am = make(creds=FakeCredentials(bot_id=111))
-        self.assertEqual(await am.primary_bot_id(), 111)
-
-    async def test_clear_reverts_to_env(self) -> None:
-        am = make(creds=FakeCredentials(bot_id=111))
-        await am.set_primary_bot_id(222)
-        await am.set_primary_bot_id(None)
-        self.assertEqual(await am.primary_bot_id(), 111)
 
 
 # ------------------------------------------------------------- overview

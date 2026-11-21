@@ -91,7 +91,6 @@ dependency group, which `uv sync --frozen` installs.
 `.env` needs:
 
 ```ini
-PRIMARY_BOT_ID=432610292342587392     # the primary bot's public bot id (DB setting wins once set)
 OWNER_USER_IDS=123456789012345678     # YOUR Discord user id — migrated ONE TIME into the DB admin list
 ```
 
