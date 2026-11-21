@@ -54,12 +54,15 @@ class FakeLimiter:
         self.acquire_order: list[str] = []
         self.reports: list[tuple[str, str, float, bool]] = []
         self.gate: asyncio.Event | None = None
+        self.blocked_count = 0  # acquires currently parked on the gate
 
     async def acquire(self, action: str, account: str, plugin: str, priority: int) -> FakeGrant:
         self.acquire_calls.append((action, account, plugin, int(priority)))
         self.acquire_order.append(account)
         if self.gate is not None and not self.gate.is_set():
+            self.blocked_count += 1
             await self.gate.wait()
+            self.blocked_count -= 1
         return FakeGrant(
             action=action,
             account=account,
