@@ -13,10 +13,11 @@ UV_BIN="$(command -v uv || true)"
 
 # Per-run scratch (kept on failure for diagnostics: the path is printed)
 RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
+VENV310=""  # step 5 fills this; the trap cleans both
 KEEP_ON_FAIL=0
 cleanup() {
   if [ "$FAIL" -eq 0 ] || [ "$KEEP_ON_FAIL" -eq 1 ]; then
-    rm -rf "$RUN_DIR"
+    rm -rf "$RUN_DIR" "$VENV310"
   else
     echo "diagnostics preserved: $RUN_DIR"
   fi
@@ -54,15 +55,15 @@ fi
 step "5/7 Suite on 3.10"
 # per-checkout venv (unique by full path hash + lock hash), synced to drop stale packages
 VENV_KEY="$(echo "$(pwd)_$(sha256sum uv.lock | cut -c1-8)" | sha256sum | cut -c1-12)"
-VENV310="/tmp/opencode/local-ci-310-$VENV_KEY"
-rm -rf "$VENV310"
+VENV310="$(mktemp -d /tmp/opencode/local-ci-310.XXXXXXXXXX)"  # per-run: concurrent gates can never delete each other's env
 UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 pytest tests/ -n auto --dist loadscope > "$RUN_DIR/suite-310.log" 2>&1 && ok "3.10: $(grep 'passed' "$RUN_DIR/suite-310.log" | tail -1)" || { bad "3.10 failed"; grep 'FAILED' "$RUN_DIR/suite-310.log" | head -3; }
 
 step "6/7 Suite + coverage on 3.13"
 COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 pytest tests/ -n auto --dist loadscope --cov=core --cov=adapters --cov=database --cov=interfaces --cov=plugins --cov=benchmark --cov=scripts --cov=parsers --cov-report=term-missing --cov-report="json:$RUN_DIR/cov.json" > "$RUN_DIR/suite-313.log" 2>&1 && ok "3.13: $(grep 'passed' "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/suite-313.log")" || { bad "3.13 failed"; grep 'FAILED' "$RUN_DIR/suite-313.log" | head -3; grep 'Coverage failure' "$RUN_DIR/suite-313.log" | head -1; }
 
 step "7/7 Build (into the run's scratch dir)"
-if (cd "$RUN_DIR" && timeout 120 "$UV_BIN" build --outdir "$RUN_DIR/dist" --project "$(pwd)" > "$RUN_DIR/build.log" 2>&1); then
+CHECKOUT_DIR="$(pwd)"  # before the cd: $PWD/$(pwd) expand post-cd otherwise
+if (cd "$RUN_DIR" && timeout 120 "$UV_BIN" build --out-dir "$RUN_DIR/dist" "$CHECKOUT_DIR" > "$RUN_DIR/build.log" 2>&1); then
   ok "build: $(grep Successfully "$RUN_DIR/build.log" | head -1)"
 else
   # uv build may not support --project; fall back to repo root but clean dist
