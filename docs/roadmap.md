@@ -23,10 +23,13 @@ scheduling, rate-limit policies + the safety floor, credentials
 (encrypted at rest), logs and audit, simulation, workspace
 orchestration. Plugins stay independent of the interface layer.
 
-## Current State (2026-11-17)
+## Current State (2026-11-21)
 
-**1,619 tests green, CI green, mypy strict ZERO across all 216 source
-files.** The two-level data model is live (profiles + presets +
+**1,678 tests green, CI green, pyright ZERO** (equality ratchet at
+`.github/pyright-baseline`). pytest + xdist owns the runner (`-n
+auto --dist loadscope` — each gate leg ~3× faster); mypy retired
+with both its trees at ZERO. The two-level data model is live
+(profiles + presets +
 executions, migrations v12–v16). The FastAPI core API and the Flet UI
 shell are landed with honest dependency extras (`[api]`, `[ui]`,
 `[all]`) — the wiring is the remaining connective work. Full

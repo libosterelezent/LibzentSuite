@@ -16,6 +16,16 @@ nothing can ship until that hold is lifted; see
 
 ## [Unreleased]
 
+### Changed
+- The test runner is pytest + xdist (`-n auto --dist loadscope`);
+  `unittest discover` retired — each CI/gate leg drops from ~7.5
+  minutes to ~2m45s. pyright (basic mode, 3.10 target) owns static
+  typing with the equality ratchet at `.github/pyright-baseline`
+  (opened at 72, marched to 0); mypy retired from the dev group and
+  the lock. `scripts/local-ci.sh` is rewritten as the clean
+  seven-step code-quality gate — the CodeRabbit machinery left the
+  gate entirely (it reviews PRs on GitHub, not local runs).
+
 ### Fixed
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
