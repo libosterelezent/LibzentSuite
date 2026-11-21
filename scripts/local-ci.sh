@@ -83,7 +83,31 @@ RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
 # failing run's artifacts are copied to the stable scratch area before
 # cleanup; a green run cleans up completely.
 KEEP_ON_FAIL=/tmp/opencode/local-ci-last-failed
-trap '[ "$FAIL" -eq 0 ] && rm -rf "$RUN_DIR" || { mkdir -p "$KEEP_ON_FAIL"; rm -rf "$KEEP_ON_FAIL"/*; cp -r "$RUN_DIR"/. "$KEEP_ON_FAIL"/; rm -rf "$RUN_DIR"; }' EXIT
+# The detached review (own session, no lock fd) must not outlive an
+# EARLY gate exit either (PR review round 10): INT/TERM, or a failure
+# before the verdict block, previously left it running against a run
+# dir this trap was about to delete. Reap the whole session group
+# first — the verdict block's own kill is a no-op by then (the group
+# is gone) — then handle the evidence.
+reap_review() {
+  if [ -n "${REVIEW_PID:-}" ] && kill -0 "$REVIEW_PID" 2>/dev/null; then
+    kill -- -"$REVIEW_PID" 2>/dev/null || true
+  fi
+  return 0
+}
+cleanup_gate() {
+  reap_review
+  if [ "${FAIL:-0}" -eq 0 ]; then
+    rm -rf "$RUN_DIR"
+  else
+    mkdir -p "$KEEP_ON_FAIL"
+    rm -rf "$KEEP_ON_FAIL"/*
+    cp -r "$RUN_DIR"/. "$KEEP_ON_FAIL"/
+    rm -rf "$RUN_DIR"
+  fi
+}
+trap cleanup_gate EXIT
+trap 'cleanup_gate; trap - EXIT; exit 130' INT TERM
 
 # state/ is live data. Snapshot before the suites so anything they
 # leave behind is REPORTED — bootstrap places credentials.key,
