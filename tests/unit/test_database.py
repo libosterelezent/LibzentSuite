@@ -606,7 +606,9 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
         gate_task = loop.create_task(gate_progressor())
         caller = loop.create_task(hold_call())
         try:
-            await asyncio.to_thread(entered.wait, 5.0)  # worker is IN the callback
+            self.assertTrue(  # the worker must actually reach the callback
+                await asyncio.to_thread(entered.wait, 5.0)
+            )
             deadline = loop.time() + 5.0
             while gate_ticks < 1 and loop.time() < deadline:
                 await asyncio.sleep(0)
@@ -615,7 +617,8 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
         finally:
             release.set()
             gate_task.cancel()  # the progressor spins forever by design
-            await asyncio.gather(caller, gate_task, return_exceptions=True)
+            await asyncio.gather(gate_task, return_exceptions=True)
+            await caller  # a failed gate query must FAIL the test, not vanish
 
 
 class TestConnectionRobustness(AsyncDatabaseTestCase):
