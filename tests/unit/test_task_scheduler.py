@@ -495,23 +495,29 @@ class TestRetry(SchedulerTestBase):
     async def test_no_retry_on_flow_blocked(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", retries=5)
         self.sender.outcomes.append(("raise", FlowBlocked("alpha", "channel gone")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "failed")
+        # wait for the transition and the publish, not the clock — a
+        # settle raced the terminal tail under distributed load (the
+        # third gate flake of this class in this file)
+        self.assertTrue(await self.wait_until(lambda: task.status == "failed"))
         assert task.error is not None
         self.assertIn("channel gone", task.error)
         self.assertIn("FlowBlocked", task.error)
         self.assertEqual(task.attempts, 0)
         self.assertEqual(len(self.sender.calls), 1)
         self.assertEqual(self.sleeps, [])
+        self.assertTrue(
+            await self.wait_until(
+                lambda: [e.task_id for e in self.recorder.of(TaskFailed)] == [task.id]
+            )
+        )
         failed = self.recorder.of(TaskFailed)
-        self.assertEqual([e.task_id for e in failed], [task.id])
         self.assertIn("channel gone", failed[0].error)
 
     async def test_no_retry_on_unexpected_exception(self) -> None:
         task = self.scheduler.submit("alpha", "p", "poke", retries=3)
         self.sender.outcomes.append(("raise", KeyError("no such channel")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "failed")
+        # same race shape as its FlowBlocked sibling — wait, don't settle
+        self.assertTrue(await self.wait_until(lambda: task.status == "failed"))
         assert task.error is not None
         self.assertIn("KeyError", task.error)
         self.assertEqual(len(self.sender.calls), 1)
