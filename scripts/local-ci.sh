@@ -13,11 +13,10 @@ UV_BIN="$(command -v uv || true)"
 
 # Per-run scratch (kept on failure for diagnostics: the path is printed)
 RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
-VENV310=""  # step 5 fills this; the trap cleans both
 KEEP_ON_FAIL=0
 cleanup() {
   if [ "$FAIL" -eq 0 ] || [ "$KEEP_ON_FAIL" -eq 1 ]; then
-    rm -rf "$RUN_DIR" "$VENV310"
+    rm -rf "$RUN_DIR"  # covers VENV310 (inside the scratch dir)
   else
     echo "diagnostics preserved: $RUN_DIR"
   fi
@@ -55,7 +54,7 @@ fi
 step "5/7 Suite on 3.10"
 # per-checkout venv (unique by full path hash + lock hash), synced to drop stale packages
 VENV_KEY="$(echo "$(pwd)_$(sha256sum uv.lock | cut -c1-8)" | sha256sum | cut -c1-12)"
-VENV310="$(mktemp -d /tmp/opencode/local-ci-310.XXXXXXXXXX)"  # per-run: concurrent gates can never delete each other's env
+VENV310="$RUN_DIR/venv310"  # inside the per-run scratch: no external parent dir, unique per run, trap-cleaned
 UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 pytest tests/ -n auto --dist loadscope > "$RUN_DIR/suite-310.log" 2>&1 && ok "3.10: $(grep 'passed' "$RUN_DIR/suite-310.log" | tail -1)" || { bad "3.10 failed"; grep 'FAILED' "$RUN_DIR/suite-310.log" | head -3; }
 
 step "6/7 Suite + coverage on 3.13"

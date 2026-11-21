@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -577,11 +576,21 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
         self.assertGreater(progress, 20)
         # parked DB-worker gate (the ratio's documented limitation,
         # closed): a SQL function registered on the connection runs ON
-        # the aiosqlite worker thread. While it holds SQLite busy, the
-        # loop must keep servicing other tasks — a synchronous bridge
-        # would stall inside the call and the counter could not move.
+        # the aiosqlite worker thread. The gate is EVENT-sequenced — the
+        # worker signals entry, the loop must service the progressor
+        # WHILE the hold is open, and only then is the worker released;
+        # the 5s bounds are hang guards, not measurements. A bridge that
+        # ran SQLite on the loop could not service the progressor inside
+        # the open hold — the bounded wait fails instead.
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_gate() -> None:
+            entered.set()
+            release.wait(timeout=5.0)
+
         async with self.db.connection.read() as conn:
-            await conn.create_function("hold_gate", 0, lambda: time.sleep(0.1))
+            await conn.create_function("hold_gate", 0, hold_gate)
         gate_ticks = 0
 
         async def gate_progressor() -> None:
@@ -590,12 +599,23 @@ class TestConcurrentWriters(AsyncDatabaseTestCase):
                 await asyncio.sleep(0)
                 gate_ticks += 1
 
-        gate_task = asyncio.get_running_loop().create_task(gate_progressor())
-        try:
+        async def hold_call() -> None:
             await self.db.connection.fetch_one("SELECT hold_gate()")
+
+        loop = asyncio.get_running_loop()
+        gate_task = loop.create_task(gate_progressor())
+        caller = loop.create_task(hold_call())
+        try:
+            await asyncio.to_thread(entered.wait, 5.0)  # worker is IN the callback
+            deadline = loop.time() + 5.0
+            while gate_ticks < 1 and loop.time() < deadline:
+                await asyncio.sleep(0)
+            # ticks observed strictly inside the open hold window
+            self.assertGreaterEqual(gate_ticks, 1)
         finally:
-            gate_task.cancel()
-        self.assertGreater(gate_ticks, 0)
+            release.set()
+            gate_task.cancel()  # the progressor spins forever by design
+            await asyncio.gather(caller, gate_task, return_exceptions=True)
 
 
 class TestConnectionRobustness(AsyncDatabaseTestCase):
