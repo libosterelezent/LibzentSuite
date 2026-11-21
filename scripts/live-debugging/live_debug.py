@@ -722,7 +722,9 @@ class Harness:
             data: dict[str, Any] = {}
             if callable(as_dict):
                 with contextlib.suppress(Exception):
-                    data = dict[str, Any](as_dict[str, Any]())  # pyright: ignore[reportArgumentType,reportGeneralTypeIssues,reportAttributeAccessIssue,reportAssignmentType,reportCallIssue,reportIndexIssue,reportOperatorIssue,reportOptionalMemberAccess,reportOptionalOperand,reportReturnType]  # dynamic boundary
+                    result: object = as_dict()
+                    if isinstance(result, dict):
+                        data = dict[str, Any](result)
             elif isinstance(entry, dict):
                 data = dict(entry)
             self._audit_tail.append(
