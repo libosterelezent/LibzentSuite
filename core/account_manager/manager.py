@@ -2595,10 +2595,21 @@ class AccountManager:
             return self._stop_landed(runtime) or runtime.generation != generation
 
         def _still_enabled(plugin_name: str) -> bool:
-            # LIVE flag read: the runtime objects in the view are the
-            # live ones — a disable that lands mid-pass must be seen
-            # here (PR review 2026-11-21)
-            return bool(getattr(runtimes.get(plugin_name), "enabled", True))
+            # LIVE view, fail closed for REMOVALS (PR review round 10):
+            # the captured ``runtimes`` dict goes stale across the host
+            # awaits — a plugin REMOVED in place vanishes from the
+            # manager's current mapping, and a re-attach REPLACES the
+            # mapping wholesale. An absent ACCOUNT view is the
+            # duck-typed-double case (cannot judge — the same
+            # default-True the ``current`` set's computation uses); an
+            # absent PLUGIN in a live view is a removal: fail closed.
+            live = getattr(self._plugin_manager, "_accounts", {}).get(name)
+            if live is None:
+                return True
+            runtime_view = live.get(plugin_name)
+            if runtime_view is None:
+                return False
+            return bool(getattr(runtime_view, "enabled", True))
 
         for plugin_name in hosted - current:
             try:
