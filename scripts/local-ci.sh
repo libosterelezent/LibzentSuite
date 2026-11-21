@@ -256,6 +256,8 @@ import sys
 
 findings = 0
 status = None
+unreviewed = 0
+outcome = None
 try:
     with open(sys.argv[1]) as fh:
         for line in fh:
@@ -270,6 +272,8 @@ try:
                 findings += 1
             elif rec.get("type") == "complete":
                 status = rec.get("status")
+                unreviewed = int(rec.get("unreviewedFileCount") or 0)
+                outcome = rec.get("outcome")
 except OSError:
     print("missing")
     raise SystemExit(0)
@@ -279,6 +283,12 @@ elif status != "review_completed":
     # review_skipped, error, failed — every non-success terminal status
     # is a failed review, never a clean one
     print("failed:%s" % status)
+elif unreviewed > 0:
+    # review_completed can still carry unreviewed files — that is an
+    # incomplete review, not a clean zero
+    print("failed:%d-unreviewed" % unreviewed)
+elif outcome == "failed":
+    print("failed:outcome")
 else:
     print("%d ok" % findings)
 PY
