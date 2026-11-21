@@ -295,8 +295,8 @@ class TestPluginToggleFailsClosed(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_plugin_rejected(self) -> None:
         stack = await Stack().boot()
-        await stack.framework.api.accounts_add({"name": "alpha", "plugins": [PROBE]})
         try:
+            await stack.framework.api.accounts_add({"name": "alpha", "plugins": [PROBE]})
             with self.assertRaises(ValueError):
                 await stack.framework.api.plugins_set_enabled("alpha", "no-such-plugin", False)
         finally:
