@@ -221,7 +221,7 @@ import json
 import sys
 
 findings = 0
-completed = False
+status = None
 try:
     with open(sys.argv[1]) as fh:
         for line in fh:
@@ -235,21 +235,25 @@ try:
             if rec.get("type") == "finding":
                 findings += 1
             elif rec.get("type") == "complete":
-                completed = True
-                if rec.get("status") == "review_skipped":
-                    print("skipped")
-                    raise SystemExit(0)
+                status = rec.get("status")
 except OSError:
     print("missing")
     raise SystemExit(0)
-print("%d %s" % (findings, "ok" if completed else "incomplete"))
+if status is None:
+    print("incomplete")
+elif status != "review_completed":
+    # review_skipped, error, failed — every non-success terminal status
+    # is a failed review, never a clean one
+    print("failed:%s" % status)
+else:
+    print("%d ok" % findings)
 PY
 )"
     case "$REVIEW_VERDICT" in
       "0 ok")
         echo -e "\033[32mREVIEW: 0 findings\033[0m"
         ;;
-      skipped|missing|*" incomplete")
+      skipped|missing|"incomplete"|failed:*)
         echo -e "\033[31mREVIEW: no completed review ($REVIEW_VERDICT) — see $RUN_DIR/review.ndjson\033[0m"
         FAIL=1
         ;;
