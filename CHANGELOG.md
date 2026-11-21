@@ -63,7 +63,12 @@ nothing can ship until that hold is lifted; see
   event-proven park points — the 3.10 leg failed the torn-tail
   regression under distributed load because a 20ms sleep let the
   stop's abort legitimately cancel a task whose completion tail had
-  not parked yet. Triaged: the CLI live-log window's synchronous
+  not parked yet; the gate's 3.13 leg is concurrent-gate safe —
+  coverage data lives under `COVERAGE_FILE` in the per-run scratch
+  dir and the leg holds the checkout flock (two gates used to clobber
+  the one repo-root `.coverage`, and `rm -f .coverage.*` could delete
+  the other's in-flight worker data — a clobbered read measured 0.0%
+  and failed the floor). Triaged: the CLI live-log window's synchronous
   `print` can block the loop on a stalled consumer pipe (pre-existing,
   interactive `--live` feature — bounded off-loop output is a design
   change deferred to its own pass); the fail-closed toggle test's
