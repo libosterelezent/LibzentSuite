@@ -441,13 +441,17 @@ async def _live_log_window(
         for task in owned:
             if task is not None:
                 task.cancel()
+        # unsubscribe BEFORE the (shielded) reap: a cancellation landing
+        # during the await skips every line after it, and the log
+        # service would retain the closed window's callback forever.
+        # unsubscribe is synchronous — no cancellation point, always runs.
+        unsubscribe()
         if owned:
             # shielded: a cancellation arriving DURING the child reaping
-            # cannot interrupt the cleanup — the children are reaped,
-            # the unsubscribe runs, and the cancellation propagates
-            # naturally after the shield (PR review round 8)
+            # cannot interrupt the cleanup — the children are reaped and
+            # the cancellation propagates naturally after the shield
+            # (PR review round 8)
             await asyncio.shield(asyncio.wait({t for t in owned if t is not None}))
-        unsubscribe()
         # window cancellation propagates NATURALLY after this finally:
         # Python re-raises the pending CancelledError once the finally
         # completes — no explicit re-raise needed (and none possible on
