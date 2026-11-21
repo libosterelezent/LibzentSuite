@@ -55,6 +55,19 @@ if [ "$REVIEW_FLAG" -eq 1 ] && [ "${1:-}" = "quick" ]; then
   exit 2
 fi
 
+# The checkout lock serializes the WHOLE gate (final pre-push review):
+# steps 1-4 (ruff, format, export, pyright) and the build also run
+# `uv run` against the shared project .venv — locking only the suite
+# legs still let two gates mutate the environment under each other's
+# early steps. The lock file lives beside the persistent 3.10 venv
+# (same checkout-scoped name).
+VENV310="/tmp/opencode/local-ci-venv310-$(pwd | cksum | cut -d' ' -f1)"
+exec 9>"$VENV310.lock"
+if ! flock -n 9; then
+  echo "       another gate holds this checkout — waiting for it to finish..."
+  flock 9
+fi
+
 # Per-run scratch workspace: concurrent runs never share logs or the
 # export diff (CodeRabbit PR #25 review). The 3.10 venv is the one
 # deliberate exception — checkout-scoped and lock-serialized, see
@@ -65,7 +78,7 @@ RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
 # failing run's artifacts are copied to the stable scratch area before
 # cleanup; a green run cleans up completely.
 KEEP_ON_FAIL=/tmp/opencode/local-ci-last-failed
-trap '[ "$FAIL" -eq 0 ] && rm -rf "$RUN_DIR" || { mkdir -p "$KEEP_ON_FAIL"; rm -rf "$KEEP_ON_FAIL"/*; cp -r "$RUN_DIR." "$KEEP_ON_FAIL/"; rm -rf "$RUN_DIR"; }' EXIT
+trap '[ "$FAIL" -eq 0 ] && rm -rf "$RUN_DIR" || { mkdir -p "$KEEP_ON_FAIL"; rm -rf "$KEEP_ON_FAIL"/*; cp -r "$RUN_DIR"/. "$KEEP_ON_FAIL"/; rm -rf "$RUN_DIR"; }' EXIT
 
 # state/ is live data. Snapshot before the suites so anything they
 # leave behind is REPORTED — bootstrap places credentials.key,
@@ -140,16 +153,11 @@ step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
 # isolated-per-run venv resolved 90 packages from scratch EVERY gate —
 # minutes of pure waste — but one FIXED shared path let two checkouts
 # with different lockfiles mutate the same environment under each
-# other's running tests. The venv is named after THIS checkout's path,
-# and an flock held through the 3.10 leg serializes same-checkout
-# gates; different checkouts never contend. The lock is frozen so the
-# environment is always exactly the lock's resolution.
-VENV310="/tmp/opencode/local-ci-venv310-$(pwd | cksum | cut -d' ' -f1)"
-exec 9>"$VENV310.lock"
-if ! flock -n 9; then
-  echo "       another gate holds this checkout's 3.10 venv — waiting for it to finish..."
-  flock 9
-fi
+# other's running tests. The venv is named after THIS checkout's path;
+# same-checkout gates are serialized by the whole-gate lock above, and
+# --exact prunes dependencies the lock dropped (uv run's default sync
+# keeps extraneous packages). The lock is frozen so the environment is
+# always exactly the lock's resolution.
 if UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --exact --python 3.10 \
   pytest tests/ -n auto --dist loadscope \
   > "$RUN_DIR/suite-310.log" 2>&1; then
@@ -163,7 +171,6 @@ else
   bad "3.10 suite — $reason"
   grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-310.log" | head -40 || true
 fi
-exec 9>&-  # release the checkout's 3.10 venv — the 3.13 leg uses the project .venv
 report_state_residue
 
 step "6/8 Full suite + coverage floor on 3.13"
@@ -176,14 +183,8 @@ step "6/8 Full suite + coverage floor on 3.13"
 # processes; the report read 0.0% and failed the floor).
 # CONCURRENT-GATE SAFETY (pre-push round): the data file lives under
 # COVERAGE_FILE in THIS run's scratch dir — a repo-root .coverage let
-# one gate clobber another's data — and the leg holds the checkout
-# flock: two gates must not mutate the project .venv under each
-# other's running suites either.
-exec 9>"$VENV310.lock"
-if ! flock -n 9; then
-  echo "       another gate holds this checkout's suites — waiting for the 3.13 leg..."
-  flock 9
-fi
+# one gate clobber another's data. The environment is serialized by
+# the whole-gate checkout lock (see the top of the script).
 if COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 pytest tests/ --cov -n auto --dist loadscope \
   > "$RUN_DIR/suite-313.log" 2>&1 \
   && COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
@@ -198,7 +199,6 @@ else
   bad "3.13 suite/coverage — $reason"
   grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-313.log" | head -30 || true
 fi
-exec 9>&-  # release — the build leg shares nothing mutable
 report_state_residue
 
 step "7/8 Build (sdist + wheel)"
@@ -212,8 +212,24 @@ fi
 step "8/8 Verdict"
 if [ -n "$REVIEW_PID" ]; then
   echo "       waiting for the concurrent review (PID $REVIEW_PID)..."
-  REVIEW_EXIT=0
-  wait "$REVIEW_PID" || REVIEW_EXIT=$?
+  # bounded wait (final pre-push review): a stalled review must hang
+  # the verdict forever no more than a stalled suite would — 900s
+  # covers the longest observed full-range review with headroom
+  REVIEW_WAITED=0
+  while kill -0 "$REVIEW_PID" 2>/dev/null && [ "$REVIEW_WAITED" -lt 900 ]; do
+    sleep 10
+    REVIEW_WAITED=$((REVIEW_WAITED + 10))
+  done
+  if kill -0 "$REVIEW_PID" 2>/dev/null; then
+    kill "$REVIEW_PID" 2>/dev/null || true
+    sleep 2
+    kill -9 "$REVIEW_PID" 2>/dev/null || true
+    echo -e "\033[31mREVIEW: stalled past 900s — killed; no review verdict (rerun the gate)\033[0m"
+    FAIL=1
+  else
+    REVIEW_EXIT=0
+    wait "$REVIEW_PID" || REVIEW_EXIT=$?
+  fi
   if [ "$REVIEW_EXIT" -ne 0 ]; then
     echo -e "\033[31mREVIEW: command failed (exit $REVIEW_EXIT)\033[0m"
     FAIL=1
