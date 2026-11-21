@@ -406,6 +406,12 @@ class Harness:
         # armed only by _arm_loop_handler — teardown restores the loop
         # handler iff this harness actually replaced it
         self._handler_installed = False
+        # LZ_MASTER_KEY is cleared for the run and restored at teardown:
+        # an ambient operator key would make CredentialService skip the
+        # workdir key file entirely (breaking the key-sidecar
+        # expectation) AND encrypt the synthetic tokens under the
+        # operator's real key material (PR review 2026-11-21)
+        self._prior_master_key: str | None = os.environ.pop("LZ_MASTER_KEY", None)
         self._torn_down = False
         # framework handles (set by boot)
         self.workdir: Path | None = None
@@ -560,6 +566,10 @@ class Harness:
         finally:
             self._detach_capture()
             self._remove_workdir()
+            # the operator's ambient master key returns with us (it was
+            # never the harness's to consume)
+            if self._prior_master_key is not None:
+                os.environ["LZ_MASTER_KEY"] = self._prior_master_key
 
     def _remove_workdir(self) -> None:
         """Delete the disposable workdir (kept with --keep-workdir)."""
