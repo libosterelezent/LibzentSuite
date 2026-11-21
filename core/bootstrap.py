@@ -328,6 +328,15 @@ class _TerminalTriggerNursery:
                 # their unwind — finish it bounded, then propagate.
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.wait({reap}, timeout=5.0)
+                if not reap.done():
+                    # pathological: a cancelled trigger ignored its
+                    # cancellation for the whole budget. Shutdown MUST
+                    # still terminate — but not silently: the witness
+                    # may outlive the dependencies closing below.
+                    ROOT_LOGGER.warning(
+                        "terminal trigger reap still running after the 5s join "
+                        "budget; shutdown continues around it"
+                    )
                 raise
 
 
