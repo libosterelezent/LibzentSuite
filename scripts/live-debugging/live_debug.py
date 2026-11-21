@@ -173,6 +173,7 @@ def _deliberate_row(
     event: str | None,
     phase: str | None = None,
     expected_disconnects: frozenset[str] = frozenset(),
+    account: str | None = None,
 ) -> bool:
     """True for known-DELIBERATE loud rows — operator actions and staged
     failure paths that log WARNING/ERROR on purpose.
@@ -193,15 +194,16 @@ def _deliberate_row(
     # deliberately stopping, while a disconnect-exercising phase runs
     # (accounts' estop/stop/remove, the ordered shutdown). A phase-wide
     # downgrade masked a disconnect of an account no harness action can
-    # explain (PR review: scope to the expected account). Matched by
-    # event name + source exactly — AccountFailed is NEVER expected (a
-    # real failure); message words are not consulted beyond the
-    # account field.
+    # explain (PR review: scope to the expected account). The account
+    # comes from the STRUCTURED LogEntry field first (production rows
+    # carry it there), with the message field as the legacy fallback.
+    # AccountFailed is NEVER expected (a real failure).
+    row_account = account if account is not None else _message_account(message)
     if (
         event == "AccountDisconnected"
         and source == "events"
         and phase in _DISCONNECT_PHASES
-        and _message_account(message) in expected_disconnects
+        and row_account in expected_disconnects
     ):
         return True
     if severity == "ERROR":
@@ -223,6 +225,7 @@ def classify_log_entry(
     event: str | None = None,
     phase: str | None = None,
     expected_disconnects: frozenset[str] = frozenset(),
+    account: str | None = None,
 ) -> str | None:
     """Map one structured log row to a finding severity (None = not one).
 
@@ -231,14 +234,15 @@ def classify_log_entry(
     observation when deliberate, minor when the message reads like a
     contract violation (the keyword list), and nothing at all when it is
     ordinary operational chatter. INFO/DEBUG rows are never findings.
-    ``phase`` and ``expected_disconnects`` scope the phase-dependent
-    deliberate rules (the estop disconnect echo) to phases that actually
-    disconnect and to the accounts they named.
+    ``phase``, ``expected_disconnects`` and ``account`` scope the
+    phase-dependent deliberate rules (the estop disconnect echo) to
+    phases that actually disconnect, the accounts they named, and the
+    row's structured account field.
     """
     sev = (severity or "").upper()
     if sev not in ("ERROR", "WARNING"):
         return None
-    if _deliberate_row(sev, source, message, event, phase, expected_disconnects):
+    if _deliberate_row(sev, source, message, event, phase, expected_disconnects, account):
         return "observation"
     if sev == "ERROR":
         return "major"
@@ -689,6 +693,7 @@ class Harness:
             source = str(getattr(entry, "source", "?"))
             message = str(getattr(entry, "message", ""))
             event = str(getattr(entry, "event", "") or "") or None
+            account = getattr(entry, "account", None)
             verdict = classify_log_entry(
                 severity,
                 source,
@@ -696,6 +701,7 @@ class Harness:
                 event,
                 phase=self._phase,
                 expected_disconnects=frozenset(self._expected_disconnects),
+                account=account if isinstance(account, str) else None,
             )
             if verdict is None:
                 return
