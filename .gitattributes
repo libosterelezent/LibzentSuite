@@ -1,0 +1,6 @@
+# Repository-wide line-ending policy: LF everywhere, on every platform.
+# The project is developed and gated on Linux; the bash gate, Python
+# sources, and text fixtures must never acquire CRLF (bash chokes on \r,
+# and diffs/hashes stay byte-identical across platforms). Without this
+# file a Windows clone depends on each machine's core.autocrlf setting.
+* text=auto eol=lf

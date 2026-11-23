@@ -326,8 +326,10 @@ def dir_fingerprint(root: Path) -> list[tuple[str, str]]:
     ever deletes or resets anything (AGENTS.md §7)."""
     if not root.is_dir():
         return []
+    # as_posix: the fingerprint keys must be platform-independent — the
+    # same logical tree fingerprints identically on Windows and POSIX
     return sorted(
-        (str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())
+        (path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
         for path in root.rglob("*")
         if path.is_file()
     )

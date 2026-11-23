@@ -20,6 +20,7 @@ the three riskiest untested ones (plus the rate-engine logger swallow):
 from __future__ import annotations
 
 import logging
+import tempfile
 import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -59,9 +60,15 @@ class ExplodingListCredentialRepo:
 
 
 class TestCredentialResolveSurvivesRefreshExplosion(unittest.IsolatedAsyncioTestCase):
+    def _service(self, repo: ExplodingListCredentialRepo) -> CredentialService:
+        """Over a DISPOSABLE key file (tempfile) — never a fixed shared path."""
+        tmp = tempfile.TemporaryDirectory(prefix="lz-round2-cred-")
+        self.addCleanup(tmp.cleanup)
+        return CredentialService(repo, key_path=Path(tmp.name) / "test.key")
+
     async def test_resolve_loads_token_despite_broken_listing(self) -> None:
         repo = ExplodingListCredentialRepo()
-        svc = CredentialService(repo, key_path="/tmp/opencode/test-round2-cred.key")
+        svc = self._service(repo)
         await repo.store("alpha", svc.fernet.encrypt(b"tok-alpha"))
 
         self.assertEqual(await svc.resolve("alpha"), "tok-alpha")
@@ -69,7 +76,7 @@ class TestCredentialResolveSurvivesRefreshExplosion(unittest.IsolatedAsyncioTest
 
     async def test_resolve_of_truly_missing_account_stays_none(self) -> None:
         repo = ExplodingListCredentialRepo()
-        svc = CredentialService(repo, key_path="/tmp/opencode/test-round2-cred.key")
+        svc = self._service(repo)
         self.assertIsNone(await svc.resolve("ghost"))
 
 

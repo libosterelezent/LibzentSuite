@@ -14,9 +14,13 @@ tests never import the parallel-built real packages.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import copy
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -545,6 +549,15 @@ class ManagerHarness:
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
 
+#: Disposable per-process home for harness credential keys. Never a fixed
+#: shared path: the previous /tmp/opencode/... literal was a Linux-session
+#: artifact — unresolvable on Windows and shared across runs everywhere,
+#: against the disposable-storage rule. One dir per process keeps xdist
+#: workers isolated; removed at interpreter exit.
+_CRED_KEY_DIR = Path(tempfile.mkdtemp(prefix="lz-test-cred-"))
+atexit.register(shutil.rmtree, _CRED_KEY_DIR, ignore_errors=True)
+
+
 def make_manager(
     *,
     token_values: dict[str, str] | None = None,
@@ -596,7 +609,7 @@ def make_manager(
             return sorted(self.rows)
 
     cred_repo = _MemCredRepo()
-    credential_service = CredentialService(cred_repo, key_path="/tmp/opencode/test-cred.key")
+    credential_service = CredentialService(cred_repo, key_path=_CRED_KEY_DIR / "test-cred.key")
     seed = (
         token_values
         if token_values is not None

@@ -15,10 +15,15 @@ import asyncio
 import contextlib
 import gc
 import os
-import resource
+import sys
 import threading
 from bisect import bisect_left
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # Windows has no `resource` module — _winproc's probes stand in
+    resource = None
 
 __all__ = ["LoopLagMonitor", "ProcessSampler", "SamplerSession", "TaskSampler"]
 
@@ -41,7 +46,9 @@ class ProcessSampler:
 
     CPU from ``resource.getrusage`` (covers the aiosqlite thread + any
     dashboard threads — that IS framework cost). RSS from
-    ``/proc/self/status`` on Linux with a ``ru_maxrss`` fallback.
+    ``/proc/self/status`` on Linux with a ``ru_maxrss`` fallback. On
+    Windows both ride the ctypes probes in ``benchmark._winproc`` —
+    neither ``resource`` nor ``/proc`` exists there.
     """
 
     def __init__(self, interval_s: float = 0.1) -> None:
@@ -75,6 +82,13 @@ class ProcessSampler:
 
     # -------------------------------------------------------------- probes
     def _rusage(self) -> tuple[float, float]:
+        # the platform test keeps both pyright views honest: typeshed omits
+        # getrusage in its Windows stub, so the POSIX lines must sit in a
+        # branch that view proves unreachable
+        if sys.platform == "win32" or resource is None:
+            from ._winproc import process_times
+
+            return process_times()
         ru = resource.getrusage(resource.RUSAGE_SELF)
         return (ru.ru_utime, ru.ru_stime)
 
@@ -87,6 +101,10 @@ class ProcessSampler:
                             return int(line.split()[1])
             except OSError:
                 pass
+        if sys.platform == "win32" or resource is None:
+            from ._winproc import rss_kb
+
+            return rss_kb()
         ru = resource.getrusage(resource.RUSAGE_SELF)
         kb = int(ru.ru_maxrss)
         return kb // 1024 if kb > 10_000_000 else kb  # macOS reports bytes
