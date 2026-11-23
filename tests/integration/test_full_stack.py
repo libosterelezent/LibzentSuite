@@ -41,7 +41,12 @@ PROBE = "probe"
 FAST_SETTINGS = {
     "exporter": {
         "inter_chunk_delay": 0.0,
-        "dm_read_timeout": 0.6,
+        # the exporter stops collecting DM pages after this much idle time,
+        # whether or not the first one arrived. Under the gate's coverage leg
+        # a 0.6s window closed first ("collected 0 soulmate page(s)") and the
+        # flow sent no chunk. 3.0s is what the simulation scenarios give the
+        # same fixture (adapters/simulator/scenarios.py).
+        "dm_read_timeout": 3.0,
     }
 }
 FAST_POLICIES = {
@@ -51,49 +56,89 @@ FAST_POLICIES = {
     },
     "accounts": {},
 }
-#: the message interval these tests configure. Three assertions read it, and
-#: only the third measures the wire:
+#: the message interval these tests configure. The pacing tests assert it
+#: twice without a clock, then read the wire once:
 #:
 #: * the EFFECTIVE policy is exactly this interval: configuration, no clock;
 #: * the pacer's own STAMPS are at least this interval apart: exact under any
 #:   load, up to ``STAMP_EPSILON`` of rounding (see ``Stack.pacing_stamps``);
-#: * a MEASURED wire gap still clears ``WIRE_GAP_FLOOR``. The pacer stamps
-#:   its spacing clock at the expected wire instant, so a send delayed by
-#:   load compresses the next measured gap by exactly that lateness (worst
-#:   observed on a healthy, loaded box: 52-60ms). The budget in that floor is
-#:   what makes it a BYPASS detector (a real bypass collapses gaps to
-#:   ~0.05-0.3s) and not the spacing proof.
+#: * no SEND reached the wire before the stamp that admitted it. The pacer
+#:   stamps its spacing clock at the expected wire instant, so a send delayed
+#:   by load leaves later than its stamp, never earlier. A measured gap
+#:   between two sends has no such property: one send running 110ms later
+#:   than the next left a 1.3896s gap under the gate's coverage leg, so
+#:   none is asked of it.
 POLICY_INTERVAL = FAST_POLICIES["global"]["message"]["interval"]
 #: ``ratelimit_stats`` reports a stamp as its age, rounded to a millisecond
 STAMP_EPSILON = 0.005
-WIRE_GAP_FLOOR = POLICY_INTERVAL - 0.10
+
+#: the pages the simulated primary bot DMs in answer to "$dump"
+DUMP_PAGES = ["Soulmates\n---------\nAlice\nBob\nCharlie", "Dana\nEve\nFinn"]
+#: enough names for a 50-character chunk budget to split into three chunks:
+#: with the "$dump" request that is four sends, each chunk after the first
+#: held by the pacer for a full interval after the one before
+#: (test_pacing_enforced_between_sends)
+MANY_NAMES = [f"name{i:04d}" for i in range(12)]
+LONG_DUMP_PAGES = [
+    "Soulmates\n---------\n" + "\n".join(MANY_NAMES[:6]),
+    "\n".join(MANY_NAMES[6:]),
+]
 
 #: what a stalled exporter flow leaves in the log: its own progress lines
 #: (plus everything the framework logged loudly; see Stack._flow_log_tail)
 FLOW_LOG_MARKS = ("flow aborted", "soulmate", "chunk", "did not complete", "exporter")
 
 
-def make_config_dir() -> Path:
+def make_config_dir(settings: dict[str, dict[str, Any]] | None = None) -> Path:
+    """A config directory for one stack: the fast fixture settings (with
+    `settings` merged in per plugin), the fast policies, and no accounts."""
     root = Path(tempfile.mkdtemp(prefix="sm-config-"))
-    (root / "global_settings.json").write_text(json.dumps(FAST_SETTINGS))
+    overrides = settings or {}
+    merged = {name: {**values, **overrides.get(name, {})} for name, values in FAST_SETTINGS.items()}
+    (root / "global_settings.json").write_text(json.dumps(merged))
     (root / "rate_limits.json").write_text(json.dumps(FAST_POLICIES))
     (root / "accounts").mkdir()
     return root
 
 
 class PacerStampAssertions:
-    """The strict, clock-free spacing proof shared by the pacing tests."""
+    """The strict, clock-free pacing proofs shared by the pacing tests."""
 
-    def assert_pacer_stamps_spaced(self: unittest.TestCase, stamps: list[float]) -> None:
+    def assert_pacer_stamps_spaced(
+        self: unittest.TestCase, stamps: list[float], jitters: list[float]
+    ) -> None:
         """Consecutive pacer stamps are at least ``POLICY_INTERVAL`` apart.
 
         The stamps come from ``Stack.pacing_stamps``: the pacer's own
-        spacing clock, which lateness cannot compress.
+        spacing clock, which lateness cannot compress. A stamp is grant +
+        that send's jitter, so a gap between stamps is the interval plus
+        the later grant's wake-up lateness plus the later send's jitter.
+        The jitter is known (``jitters``, from ``Stack.grant_jitters``) and
+        is subtracted here; only the lateness is left to hide a shorter
+        interval behind.
         """
-        gaps = [b - a for a, b in itertools.pairwise(stamps)]
+        self.assertEqual(len(jitters), len(stamps))
+        gaps = [
+            b - a - jitter
+            for (a, b), jitter in zip(itertools.pairwise(stamps), jitters[1:], strict=True)
+        ]
         self.assertTrue(
             all(g >= POLICY_INTERVAL - STAMP_EPSILON for g in gaps),
             f"pacer stamps are closer than {POLICY_INTERVAL}s: gaps={[round(g, 3) for g in gaps]}",
+        )
+
+    def assert_no_send_before_its_stamp(self: unittest.TestCase, leads: list[float]) -> None:
+        """No send reached the wire before the stamp that admitted it.
+
+        ``leads`` are per send ``wire time - stamp``, from
+        ``Stack.pacing_stamps``: never negative on a healthy system, however
+        late load makes a send. A negative lead means the stamp sampled after
+        that send is newer than the send itself: it left without waiting for
+        the pacer, or the sampler missed its own send and read the next stamp.
+        """
+        self.assertTrue(
+            all(lead >= -STAMP_EPSILON for lead in leads),
+            f"send before its stamp: leads={[round(x, 3) for x in leads]}",
         )
 
 
@@ -106,15 +151,12 @@ class Stack:
         db_path: str | None = None,
         extra_accounts: list[str] | None = None,
         plugin_dir: Path = FIXTURE_PLUGINS,
+        settings: dict[str, dict[str, Any]] | None = None,
+        dump_pages: list[str] | None = None,
     ) -> None:
         self.world = SimWorld(
             responder_id=PRIMARY_BOT_ID,
-            responses={
-                "$dump": [
-                    "Soulmates\n---------\nAlice\nBob\nCharlie",
-                    "Dana\nEve\nFinn",
-                ]
-            },
+            responses={"$dump": list(dump_pages or DUMP_PAGES)},
             reply_delay=0.01,
         )
         self.world.add_user(OWNER_ID, "owner")
@@ -123,7 +165,7 @@ class Stack:
         self.world.add_user(2002, "beta")
         self.world.add_channel(GUILD_CHANNEL, "grind-channel")
         self.user_ids = {"alpha": ALPHA_ID, "beta": 2002}
-        self.config_dir = make_config_dir()
+        self.config_dir = make_config_dir(settings)
         self.credentials = Credentials.from_values(
             {
                 "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
@@ -211,8 +253,9 @@ class Stack:
 
     async def pacing_stamps(
         self, key: str, channel: int, authors: set[int], sends: int, limit: float = 30.0
-    ) -> list[float]:
-        """The pacer's spacing-clock stamps for `key`, one per send, oldest first.
+    ) -> tuple[list[float], list[float]]:
+        """The pacer's stamps for `key` and each send's lead over its stamp,
+        one entry per send, oldest first.
 
         When the pacer admits a send it stamps the key's clock at grant +
         jitter, and it admits the next send on that key no sooner than one
@@ -223,12 +266,12 @@ class Stack:
         Each stamp is sampled the moment its send lands in the journal.
         ``ratelimit_stats`` reports it as its age and never suspends, so the
         sample lands in the same event-loop step as the send's detection.
-        A stamp always precedes its own send; a sample whose stamp is NEWER
-        than the send it followed saw a later stamp instead (the sampler ran
-        a whole interval late, or sends are landing unpaced) and is reported
-        as confounded rather than measured.
+        The lead is ``send time - stamp`` on the wall clock: zero or more
+        for a send that waited for the pacer, since it left at or after the
+        stamp that admitted it.
         """
         stamps: list[float] = []
+        leads: list[float] = []
         for count in range(1, sends + 1):
             landed = await self._wait_for_sends(channel, authors, count, limit, key)
             ages = (await self.framework.api.ratelimit_stats())["last_fire_ages"]
@@ -237,14 +280,26 @@ class Stack:
                 raise AssertionError(
                     f"{key}: send {count} landed, but the pacer never stamped this key"
                 )
-            sent_at = landed[count - 1]
-            if wall - ages[key] > sent_at + STAMP_EPSILON:
-                raise AssertionError(
-                    f"{key}: the stamp sampled after send {count} is newer than that "
-                    f"send ({sent_at:.3f}): confounded, not measured"
-                )
             stamps.append(mono - ages[key])
-        return stamps
+            leads.append(landed[count - 1] - (wall - ages[key]))
+        return stamps, leads
+
+    def grant_jitters(self, accounts: set[str], action: str, sends: int) -> list[float]:
+        """The grant jitter each of the first `sends` tasks of `accounts`/`action`
+        drew, in seconds, in start order.
+
+        The scheduler records a task's jitter and start time before it invokes
+        the sender, so every task whose send already landed carries both. Its
+        finish time is not usable here: a send is in the journal before its
+        task is.
+        """
+        rows = [
+            r
+            for r in self.framework.scheduler.tasks()
+            if r["account"] in accounts and r["action"] == action and r["started_at"] is not None
+        ]
+        rows.sort(key=lambda r: (r["started_at"], r["id"]))
+        return [r["grant_jitter_ms"] / 1000.0 for r in rows[:sends]]
 
     async def _wait_for_sends(
         self, channel: int, authors: set[int], count: int, limit: float, who: str
@@ -322,27 +377,34 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             await stack.stop()
 
     async def test_pacing_enforced_between_sends(self) -> None:
-        stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
+        stack = await Stack(
+            plugin_dir=SIM_PLUGINS,
+            settings={"exporter": {"max_chunk_length": 50}},
+            dump_pages=LONG_DUMP_PAGES,
+        ).boot()
         await stack.start()
         try:
             alpha = {stack.user_ids["alpha"]}
             await stack.owner_says("export")
-            stamps = await stack.pacing_stamps("alpha:message", GUILD_CHANNEL, alpha, sends=2)
+            # "$dump", then three chunks. Every chunk after the first is held
+            # by the pacer for a full interval after the one before, however
+            # long the DM phase took, which is why this reads a flow of four
+            # sends and not a request and a single chunk.
+            stamps, leads = await stack.pacing_stamps(
+                "alpha:message", GUILD_CHANNEL, alpha, sends=4
+            )
+            sent = stack.world.messages_of(GUILD_CHANNEL)
+            self.assertEqual(sum(1 for m in sent if m.startswith("$exporter ")), 3)
             # STRICT, and no clock involved: what paces these sends is the
             # effective policy, and it is exactly the configured interval
             effective = await stack.framework.api.ratelimit_effective("message", "alpha")
             self.assertEqual(effective["interval"], POLICY_INTERVAL)
             # STRICT, on the pacer's own clock: consecutive stamps on the key
             # are a full interval apart whatever the load (Stack.pacing_stamps)
-            self.assert_pacer_stamps_spaced(stamps)
-            # The wire gaps (what actually hit the wire) are the BYPASS
-            # detector: a real bypass collapses them to ~0.05-0.3s. Lateness
-            # of an earlier send compresses a gap by exactly that much, which
-            # is why the floor carries a budget and proves nothing tighter.
-            outs = stack.outbound(GUILD_CHANNEL, alpha)
-            self.assertGreaterEqual(len(outs), 2)
-            gaps = [b - a for a, b in itertools.pairwise(outs)]
-            self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
+            jitters = stack.grant_jitters({"alpha"}, "message", sends=4)
+            self.assert_pacer_stamps_spaced(stamps, jitters)
+            # STRICT, on the wire: no send left before the pacer admitted it
+            self.assert_no_send_before_its_stamp(leads)
         finally:
             await stack.stop()
 
@@ -570,7 +632,7 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
             # deadline rather than a fixed count of polls: four paced sends
             # are three 1.5s intervals (~t=4.5s) and instrumentation load
             # can stretch that — the sampler returns the moment the last lands
-            stamps = await stack.pacing_stamps(
+            stamps, leads = await stack.pacing_stamps(
                 f"group:{group}:message", GUILD_CHANNEL, members, sends=4
             )
             await asyncio.sleep(0.3)
@@ -584,12 +646,10 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(effective["interval"], POLICY_INTERVAL)
             # STRICT, on the pacer's own clock: consecutive stamps on the
             # SHARED clock are a full interval apart (Stack.pacing_stamps)
-            self.assert_pacer_stamps_spaced(stamps)
-            # every gap between GROUP members (and each account's own calls)
-            # on the wire clears the same bypass-detector floor as above
-            outs = stack.outbound(GUILD_CHANNEL, members)
-            gaps = [b - a for a, b in itertools.pairwise(outs)]
-            self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
+            jitters = stack.grant_jitters(set(stack.user_ids), "message", sends=4)
+            self.assert_pacer_stamps_spaced(stamps, jitters)
+            # STRICT, on the wire: no send left before the pacer admitted it
+            self.assert_no_send_before_its_stamp(leads)
         finally:
             await stack.stop()
 
