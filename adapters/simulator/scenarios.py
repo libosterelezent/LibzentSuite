@@ -461,8 +461,11 @@ SCENARIOS: dict[str, Scenario] = {
         name="pacing_respected",
         description=(
             "With a 1.6s message interval every outbound gap observed in the "
-            "audit trail stays above the 1.5s safety floor (100ms above it "
-            "absorbs load skew)."
+            "audit trail is at least 1.3s: pacing is in force (a bypass puts "
+            "consecutive sends a few hundredths of a second apart). A send "
+            "delayed by load is part of the measured gap, so the 1.5s safety "
+            "floor is what the limiter is configured with, not what a wire "
+            "gap can show."
         ),
         policies={"message": {"interval": PACING_INTERVAL, "jitter": [0.0, 0.05]}},
         world_setup=_base_world(_roster_pages(500)),

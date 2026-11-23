@@ -84,7 +84,9 @@ dependency group, which `uv sync --frozen` installs.
 > `uv run --frozen` instead; that form needs no activation and is the one to
 > use on Windows.
 > If the only Python installed is outside the tested range, pin one for the
-> sync: `set UV_PYTHON=3.13` (PowerShell: `$env:UV_PYTHON = "3.13"`). The
+> sync with the `UV_PYTHON` environment variable: `export UV_PYTHON=3.13`
+> in a POSIX shell or Git Bash, `set UV_PYTHON=3.13` in cmd,
+> `$env:UV_PYTHON = "3.13"` in PowerShell. The
 > local gate `scripts/local-ci.sh` is bash — on Windows, run it from Git Bash.
 
 `.env` needs:
