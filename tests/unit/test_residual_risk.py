@@ -331,13 +331,17 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fake", capture.captures[0])
 
     async def test_no_spikes_in_calm_run(self) -> None:
+        # A calm history captures nothing. The lags run through the REAL
+        # monitor -> hook -> capture path, but as synthetic samples: "the
+        # machine was calm for 200 ms" is an assumption about the host, and
+        # it is false under parallel load on a platform whose timer ticks
+        # every ~15.6 ms (one late wake past 10x p50 fired a capture).
         from benchmark.sampler import SamplerSession, SpikeCapture
 
         capture = SpikeCapture()
         session = SamplerSession(loop_interval_ms=5, spike_capture=capture)
-        session.start()
-        await asyncio.sleep(0.2)
-        await session.stop()
+        for lag_s in (0.0002, 0.0005, 0.001, 0.003, 0.0008) * 20:
+            session.lag._record(lag_s)  # every sample far under the 25 ms floor
         self.assertEqual(capture.captures, [])
 
 

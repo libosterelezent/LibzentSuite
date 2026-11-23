@@ -27,8 +27,9 @@ One suite, every platform
 
 The suite is platform-independent. A test that depends on an OS capability
 — POSIX permission bits, symlink creation — probes for it and skips with the
-reason where it is missing, so the same suite is green on Linux (where CI
-gates) and on native Windows. Never skip by platform *name*: a probe skips
+reason where it is missing, so the same suite is green on Linux and on
+native Windows — and CI runs it on both (3.10–3.13 on Linux, 3.10 and 3.13
+on Windows). Never skip by platform *name*: a probe skips
 exactly where the OS cannot do the thing under test and still runs wherever
 it can (Developer Mode on Windows, a mode-less file system on Linux).
 

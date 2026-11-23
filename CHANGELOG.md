@@ -32,7 +32,10 @@ nothing can ship until that hold is lifted; see
   memory as unavailable — never zero — where neither can observe the
   process. The suite is green on native Windows (seven capability-bound
   tests skip with their reason); the local gate and `scripts/run_tests.sh`
-  run from Git Bash. CI still gates on Linux.
+  run from Git Bash. CI runs the suite on Windows as well (3.10 and 3.13,
+  the two ends of the range), with every step under bash. The duplicated
+  pyright step is gone, and the step now parses its count with the
+  project's own interpreter.
 
 ### Fixed
 - Portability defects the first native-Windows run exposed: a hard
