@@ -66,7 +66,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - Tests are deterministic and offline: injected clocks, seeded randomness, in-memory or simulated Discord, no real network, no live accounts, no wall-clock sleeps.
 - **Never touch the real `state/` directory** from tests or scripts. It holds the live databases and the credentials key. Tests use disposable storage and clean up only what their own run created.
 - Cover failure paths, cancellation, duplicate calls, and races. For stateful operations, assert both the result and what was persisted.
-- Run narrow tests first, then the adjacent suites, then the full suite. CI runs Python 3.10–3.13, so check 3.10 for changes touching dependencies, typing, or stdlib APIs.
+- Run narrow tests first, then the adjacent suites, then the full suite. CI runs Python 3.10–3.13 and also runs the suite on Windows, so check 3.10 for changes touching dependencies, typing, or stdlib APIs, and keep stdlib use portable.
 - Never weaken a test to get green. Fix the cause, or document a pre-existing failure with evidence.
 - Coverage measures production code only. The coverage floor only rises.
 - Report exactly what you ran and what you didn't. Never claim a check passed unless it did.

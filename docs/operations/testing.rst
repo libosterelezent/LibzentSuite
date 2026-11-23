@@ -27,22 +27,24 @@ One suite, every platform
 -------------------------
 
 The suite is platform-independent. A test that depends on an OS capability
-— POSIX permission bits, symlink creation — probes for it and skips with the
-reason where it is missing, so the same suite is green on Linux and on
-native Windows — and CI runs it on both (3.10–3.13 on Linux, 3.10 and 3.13
-on Windows). Never skip by platform *name*: a probe skips
-exactly where the OS cannot do the thing under test and still runs wherever
-it can (Developer Mode on Windows, a mode-less file system on Linux).
+— POSIX permission bits, symlink creation — probes for that capability and
+skips with the reason where it is missing, so the same suite is green on
+Linux and on native Windows, and CI runs it on both (3.10–3.13 on Linux,
+3.10 and 3.13 on Windows). The probes live in ``tests/unit/helpers.py``
+(``can_symlink``, ``enforces_file_modes``) and test the capability rather
+than the platform's name: they skip exactly where the OS cannot do the
+thing under test, and still run wherever it can (Developer Mode on
+Windows, a mode-less file system on Linux).
 
-A test must not lean on behavior an OS forgives. POSIX lets an open file be
-unlinked, which hid a still-open database handle from a temp-directory
-cleanup until Windows refused the delete: close handles *inside* the scope
-that removes their files.
+The suite also avoids leaning on behavior an OS forgives. POSIX lets an
+open file be unlinked, which once hid a still-open database handle from a
+temp-directory cleanup until Windows refused the delete; such handles are
+now closed inside the scope that removes their files.
 
 Two figures are not comparable across platforms: wall-clock timing, and the
 benchmark's loop-lag histogram (Windows timers tick near 15.6 ms by default,
 so its p50 sits near 20 ms where Linux reports well under a millisecond).
-Keep benchmark baselines per platform.
+Benchmark baselines are therefore kept per platform.
 
 Soak tests are opt-in: ``LZ_SOAK=1`` (fleet soak) and ``LZ_CHAOS=1`` (chaos
 matrix).
