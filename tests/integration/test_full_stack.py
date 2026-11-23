@@ -154,6 +154,29 @@ class Stack:
     async def owner_says(self, content: str, account: str = "alpha") -> None:
         self.world.deliver(GUILD_CHANNEL, OWNER_ID, content)
 
+    async def wait_for_outbound(
+        self, channel: int, count: int, account: str = "alpha", limit: float = 30.0
+    ) -> None:
+        """Return once `account` has `count` messages in the channel's journal.
+
+        Waits for the OUTCOME the caller will assert on, never for silence.
+        The export flow is legitimately quiet in the trigger channel while
+        the plugin exchanges DM pages and then waits out the pacing interval
+        before its chunk goes out; under load that silence outlasts any
+        fixed quiet window, and the window would return before the chunk.
+        """
+        uid = self.user_ids[account]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
+        while loop.time() < deadline:
+            sent = sum(1 for m in self.world.history.get(channel, []) if m.author_id == uid)
+            if sent >= count:
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(
+            f"{account} never reached {count} outbound messages in channel {channel}"
+        )
+
 
 class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
     """The production boot path driving the WORKLOAD fixture (a paced
@@ -165,7 +188,8 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         await stack.start()
         try:
             await stack.owner_says("export")
-            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
+            # the request and the chunk are the account's two sends here
+            await stack.wait_for_outbound(GUILD_CHANNEL, 2)
             history = stack.world.messages_of(GUILD_CHANNEL)
             # export request + one chunk (pages fit a single chunk)
             self.assertIn("export", history[0])
@@ -173,19 +197,20 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(chunks), 1)
             self.assertIn("Alice", chunks[0])
 
-            # outbound audit trail with pacing data (queued persistence:
-            # give the drain worker a beat to land rows in the DB)
-            audit = []
-            for _ in range(20):
-                await asyncio.sleep(0.15)
+            # outbound audit trail with pacing data (queued persistence):
+            # wait for BOTH rows the assertion below reads — one per send
+            audit: list[dict[str, Any]] = []
+            for _ in range(200):
                 audit = await stack.framework.api.audit_tail(n=20)
-                if any(e.get("direction") == "out" for e in audit):
+                rows = [
+                    e
+                    for e in audit
+                    if e.get("direction") == "out" and e.get("action") in ("message", "dm")
+                ]
+                if len(rows) >= 2:
                     break
-            outs = [
-                e
-                for e in audit
-                if e.get("direction") == "out" and e.get("action") in ("message", "dm")
-            ]
+                await asyncio.sleep(0.15)
+            outs = rows
             self.assertGreaterEqual(len(outs), 2)
             self.assertTrue(all("plugin=exporter" in (e.get("note") or "") for e in outs))
             # task history persisted with statuses
@@ -206,8 +231,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         await stack.start()
         try:
             await stack.owner_says("export")
-            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
-            # config policy: 1.5s interval (+50ms jitter max) -> every gap
+            await stack.wait_for_outbound(GUILD_CHANNEL, 2)
             # config policy: 1.5s interval (+50ms jitter max) -> gaps stay
             # near 1.5s. The 1.30 floor catches a real limiter bypass (gaps
             # would collapse to ~0.05-0.3s) while absorbing load skew: one
