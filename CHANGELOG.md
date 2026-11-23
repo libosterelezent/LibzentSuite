@@ -84,7 +84,17 @@ nothing can ship until that hold is lifted; see
 - The CI-workflow guard against a bare `python3` missed the heredoc
   and backtick forms, and no test checked that it could catch
   anything. It now recognises the word in any shell position and has
-  a test of its own.
+  a test of its own, and a `#` inside quotes is no longer taken for a
+  comment: `echo '#'; python3 -m pytest` used to pass the guard.
+- The README gave only cmd's `set UV_PYTHON=3.13` for pinning the
+  interpreter. In bash `set` assigns a positional parameter and exports
+  nothing, so Git Bash users got no pin. The `export` form comes first
+  now, with the cmd and PowerShell forms labelled.
+- The full-stack pacing sampler reconstructs each stamp from a clock
+  read taken before the call that produced its age, and carries the
+  width of that bracket into the spacing assertion. A thread the OS
+  descheduled between the engine's clock read and the test's used to
+  move the stamp later and could fail a healthy send.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
   plugin BEFORE any state moves (an unknown account used to get a
