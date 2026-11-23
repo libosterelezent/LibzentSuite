@@ -402,7 +402,7 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
         """kakerareact + kakeraloot shapes: services actions flow through the
         scheduler (paced) into the world; audit rows carry the action kind."""
         from core.audit import AuditRecorder
-        from core.event_bus import EventBus
+        from core.event_bus import EventBus, TaskCompleted
         from core.priority import Priority
         from core.task_scheduler import TaskScheduler
 
@@ -459,10 +459,14 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
                 message_id=message.id,
                 content="kakera:claim",
             )
+            # the audit rows are written in the finish TAIL, after the status
+            # flips: wait for the published terminal events, not the status
+            completed: set[int] = set()
+            bus.subscribe(TaskCompleted, lambda event: completed.add(event.task_id))
             for _ in range(100):
-                await asyncio.sleep(0.02)
-                if t1.status == "completed" and t2.status == "completed":
+                if {t1.id, t2.id} <= completed:
                     break
+                await asyncio.sleep(0.02)
             self.assertEqual(t1.status, "completed")
             self.assertEqual(t2.status, "completed")
             self.assertEqual(client.button_clicks, [(message.id, "kakera:claim")])
