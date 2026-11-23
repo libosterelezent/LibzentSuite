@@ -1,8 +1,10 @@
 """Unit tests for core.task_scheduler: lanes, priority, retry, cancel, history.
 
 All timing-sensitive paths use the patched ``scheduler._sleep`` seam for
-backoff and small real sleeps for lane scheduling; a gated fake limiter and
-a holdable fake sender make checkpoints deterministic.
+backoff. A wait for a state is on an observable condition (a task's published
+terminal event, a recorded call, a set event), never a fixed sleep: under a
+loaded event loop no duration is long enough, on any platform. A gated fake
+limiter and a holdable fake sender make checkpoints deterministic.
 """
 
 from __future__ import annotations
@@ -260,6 +262,45 @@ class SchedulerTestBase(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.005)
         return bool(predicate())
 
+    async def wait_finished(self, *tasks: Task) -> None:
+        """Wait until every task's terminal event is published.
+
+        The terminal status is applied synchronously; the history row, the
+        audit row and the terminal event follow in an independent tail task,
+        in that order. The published event is the last of the three, so once
+        it is seen every effect of the task is observable (a status check
+        alone can pass before any row exists). Fails, naming the stuck
+        tasks, when the bounded wait runs out.
+        """
+
+        def unpublished() -> list[str]:
+            published = {
+                e.task_id for e in self.recorder.of(TaskCompleted, TaskFailed, TaskCancelled)
+            }
+            return [f"task {t.id} ({t.status})" for t in tasks if t.id not in published]
+
+        if not await self.wait_until(lambda: not unpublished()):
+            stuck = unpublished()
+            self.fail(f"no terminal event published for {len(stuck)} task(s): {stuck[:5]}")
+
+    async def start_joining_stop(self, **stop_kwargs: Any) -> asyncio.Task[None]:
+        """Create a stop() caller that JOINS the in-flight stop, and return
+        once it is parked on the owner's latch.
+
+        stop()'s join path has no await before the latch wait, so a caller
+        that has started is parked there: the signal is set on the joiner's
+        first step, and the event loop resumes this coroutine only after it.
+        """
+        parked = asyncio.Event()
+
+        async def joining() -> None:
+            parked.set()
+            await self.scheduler.stop(**stop_kwargs)
+
+        joiner = asyncio.create_task(joining())
+        await parked.wait()
+        return joiner
+
 
 # ------------------------------------------------------- lifecycle + events
 class TestLifecycle(SchedulerTestBase):
@@ -267,7 +308,7 @@ class TestLifecycle(SchedulerTestBase):
         task = self.scheduler.submit(
             "alpha", "exporter", "message", channel_id=123, content="hello"
         )
-        await self.settle()
+        await self.wait_finished(task)
         self.assertEqual(task.status, "completed")
         self.assertEqual(
             [type(e).__name__ for e in self.recorder.of(TaskQueued, TaskStarted, TaskCompleted)],
@@ -317,9 +358,9 @@ class TestLifecycle(SchedulerTestBase):
 
     async def test_default_name_and_get(self) -> None:
         task = self.scheduler.submit("alpha", "exporter", "dm", user_id=42, content="hi")
-        await self.settle()
-        self.assertEqual(task.name, "exporter:dm")
         self.assertIs(self.scheduler.get(task.id), task)  # live
+        await self.wait_finished(task)
+        self.assertEqual(task.name, "exporter:dm")
         self.assertIs(self.scheduler.get(task.id), task)  # finished fallback keeps the object
         self.assertIsNone(self.scheduler.get(9999))
 
@@ -327,18 +368,21 @@ class TestLifecycle(SchedulerTestBase):
 # --------------------------------------------------- serialization + fairness
 class TestLanes(SchedulerTestBase):
     async def test_one_account_tasks_are_serialized(self) -> None:
+        tasks: list[Task] = []
         for i in range(3):
-            self.scheduler.submit("alpha", "p", "message", channel_id=1, content=f"m{i}")
+            tasks.append(
+                self.scheduler.submit("alpha", "p", "message", channel_id=1, content=f"m{i}")
+            )
             self.sender.outcomes.append(("sleep", 0.03))
-        await self.settle(0.5)
+        await self.wait_finished(*tasks)
         self.assertEqual(self.sender.max_inflight["alpha"], 1)
         self.assertEqual([t.content for t in self.sender.calls], ["m0", "m1", "m2"])
 
     async def test_two_accounts_run_concurrently(self) -> None:
-        self.scheduler.submit("a1", "p", "message", channel_id=1)
-        self.scheduler.submit("a2", "p", "message", channel_id=2)
+        first = self.scheduler.submit("a1", "p", "message", channel_id=1)
+        second = self.scheduler.submit("a2", "p", "message", channel_id=2)
         self.sender.outcomes.extend([("sleep", 0.08), ("sleep", 0.08)])
-        await self.settle(0.5)
+        await self.wait_finished(first, second)
         self.assertEqual(self.sender.max_inflight["a1"], 1)
         self.assertEqual(self.sender.max_inflight["a2"], 1)
         self.assertEqual(self.sender.max_total, 2)  # truly parallel across accounts
@@ -350,7 +394,7 @@ class TestLanes(SchedulerTestBase):
             "alpha", "p", "message", content="high", priority=Priority.HIGH
         )
         self.sender.outcomes.extend([("sleep", 0.01), ("sleep", 0.01)])
-        await self.settle(0.3)
+        await self.wait_finished(low, high)
         self.assertEqual([t.content for t in self.sender.calls], ["high", "low"])
         self.assertEqual(high.status, "completed")
         self.assertEqual(low.status, "completed")
@@ -372,8 +416,8 @@ class TestLanes(SchedulerTestBase):
         self.assertEqual(high.status, "completed")
 
     async def test_limiter_receives_full_context(self) -> None:
-        self.scheduler.submit("alpha", "exporter", "message", priority=Priority.HIGH)
-        await self.settle()
+        task = self.scheduler.submit("alpha", "exporter", "message", priority=Priority.HIGH)
+        await self.wait_finished(task)
         self.assertEqual(self.limiter.acquire_calls, [("message", "alpha", "exporter", 0)])
 
 
@@ -382,19 +426,20 @@ class TestCancel(SchedulerTestBase):
     async def test_cancel_queued_task(self) -> None:
         gate = self.limiter.block_acquires()
         t1 = self.scheduler.submit("alpha", "p", "message", channel_id=1)
-        await self.settle(0.02)  # t1 picked up, blocked in acquire
+        # t1 picked up and parked in acquire: its recorded acquire call is the proof
+        self.assertTrue(await self.wait_until(lambda: len(self.limiter.acquire_calls) == 1))
         t2 = self.scheduler.submit("alpha", "p", "message", channel_id=2)
         t3 = self.scheduler.submit("alpha", "p", "message", channel_id=3)
 
         self.assertTrue(self.scheduler.cancel(t2.id))
         self.assertEqual(t2.status, "cancelled")
         self.assertFalse(self.scheduler.cancel(t2.id))  # already terminal
-        await self.settle(0.01)  # let the fire-and-forget publish task run
+        await self.wait_finished(t2)  # its tail publishes TaskCancelled
         cancelled_events = self.recorder.of(TaskCancelled)
         self.assertEqual([e.task_id for e in cancelled_events], [t2.id])
 
         gate.set()
-        await self.settle(0.3)
+        await self.wait_finished(t1, t3)
         self.assertEqual([t.id for t in self.sender.calls], [t1.id, t3.id])
         self.assertEqual(t1.status, "completed")
         self.assertEqual(t3.status, "completed")
@@ -450,7 +495,8 @@ class TestCancel(SchedulerTestBase):
     async def test_cancel_matching_counts_queued_and_running(self) -> None:
         gate = self.limiter.block_acquires()
         t1 = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.02)  # running (blocked in acquire)
+        # t1 picked up and parked in acquire (its status is still queued)
+        self.assertTrue(await self.wait_until(lambda: len(self.limiter.acquire_calls) == 1))
         t2 = self.scheduler.submit("alpha", "p", "message")  # queued
         t3 = self.scheduler.submit("alpha", "other", "poke")  # queued, other plugin
         t4 = self.scheduler.submit("beta", "p", "message")  # other account
@@ -460,7 +506,7 @@ class TestCancel(SchedulerTestBase):
         t2_ref = self.scheduler.get(t2.id)
         assert t2_ref is not None
         gate.set()
-        await self.settle(0.3)
+        await self.wait_finished(t1, t2_ref, t3, t4)
         self.assertEqual(t2_ref.status, "cancelled")
         self.assertEqual(t3.status, "completed")
         self.assertEqual(t4.status, "completed")
@@ -577,7 +623,11 @@ class TestRetry(SchedulerTestBase):
         invoked EXACTLY ONCE even with retry budget left."""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
         self.sender.outcomes.extend([("sleep", 0.5), ("sleep", 0.5)])
-        await self.settle(0.4)
+        await self.wait_finished(task)
+        self.assertEqual(task.status, "timed_out")
+        # absence has no condition to wait for: hold a quiet window (the
+        # ~0.35s past the timeout this test always held) before proving it
+        await self.settle(0.35)
         self.assertEqual(task.status, "timed_out")
         self.assertEqual(len(self.sender.calls), 1)  # NO duplicate send
         self.assertEqual(task.attempts, 0)  # no retry consumed
@@ -614,7 +664,8 @@ class TestStop(SchedulerTestBase):
     async def test_stop_drain_false_cancels_everything(self) -> None:
         self.limiter.block_acquires()  # block every acquire inside the limiter
         t1 = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.02)  # blocked inside acquire
+        # t1 picked up and parked inside the limiter's acquire
+        self.assertTrue(await self.wait_until(lambda: len(self.limiter.acquire_calls) == 1))
         t2 = self.scheduler.submit("alpha", "p", "message")
         t3 = self.scheduler.submit("beta", "p", "message")
 
@@ -631,7 +682,7 @@ class TestStop(SchedulerTestBase):
     async def test_stop_drain_timeout_still_terminates(self) -> None:
         gate = self.limiter.block_acquires()
         task = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.02)
+        self.assertTrue(await self.wait_until(lambda: len(self.limiter.acquire_calls) == 1))
         await self.scheduler.stop(drain=True, timeout=0.15)  # drain cannot finish
         self.assertEqual(task.status, "cancelled")
         gate.set()
@@ -655,9 +706,9 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")
         await in_sender.wait()
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
-        await asyncio.sleep(0.02)  # owner parked in the drain loop
-        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
-        await asyncio.sleep(0.02)  # joiner parked on the pending latch
+        # the owner parks in the drain loop once it has taken the latch
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_latch is not None))
+        joiner = await self.start_joining_stop(drain=True)
         self.assertTrue(
             self.scheduler._stop_latch is not None and not self.scheduler._stop_latch.done()
         )
@@ -688,9 +739,8 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")
         await in_sender.wait()
         owner1 = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
-        await asyncio.sleep(0.02)
-        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
-        await asyncio.sleep(0.02)
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_latch is not None))
+        joiner = await self.start_joining_stop(drain=True)
         owner1.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await owner1
@@ -713,9 +763,8 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")
         await in_sender.wait()
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
-        await asyncio.sleep(0.02)
-        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
-        await asyncio.sleep(0.02)
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_latch is not None))
+        joiner = await self.start_joining_stop(drain=True)
         joiner.cancel()  # cancelling a JOINER must never cancel the teardown
         with self.assertRaises(asyncio.CancelledError):
             await joiner
@@ -743,9 +792,10 @@ class TestStopSingleFlight(SchedulerTestBase):
         task = self.scheduler.submit("alpha", "p", "message")
         await in_sender.wait()
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
-        await asyncio.sleep(0.02)
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_latch is not None))
         owner.cancel()  # lands inside the teardown
-        await asyncio.sleep(0.02)
+        # _stop_failed is set at the top of _abort_stop, before its first await
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_failed))
         owner.cancel()  # lands inside _abort_stop's bounded reap
         with self.assertRaises(asyncio.CancelledError):
             await owner
@@ -760,7 +810,7 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")
         self.sender.outcomes.append(("sleep", 0.08))
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=5.0))
-        await asyncio.sleep(0.01)
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stopping))
         with self.assertRaises(SchedulerError):
             self.scheduler.start()  # re-arm mid-stop forbidden
         await owner
@@ -776,7 +826,7 @@ class TestStopSingleFlight(SchedulerTestBase):
         task = self.scheduler.submit("alpha", "p", "message")
         self.sender.outcomes.append(("sleep", 0.08))
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=5.0))
-        await asyncio.sleep(0.01)
+        self.assertTrue(await self.wait_until(lambda: self.scheduler._stop_latch is not None))
         joiner = asyncio.create_task(self.scheduler.stop(drain=False))
         await owner
         await joiner  # joined the completed stop: success, no own sweep
@@ -797,7 +847,7 @@ class TestExactlyOnceRaces(SchedulerTestBase):
         test_timeout_retries_then_times_out.)"""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
         self.sender.outcomes.extend([("raise", ConnectionError("reset")), ("ok", None)])
-        await self.settle(0.4)
+        await self.wait_finished(task)
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.repo.add_calls), 1)  # one row, two sends
         self.assertEqual(len(self.audit.calls), 1)  # one audit row
@@ -897,7 +947,7 @@ class TestStressExactlyOnce(SchedulerTestBase):
                 self.scheduler.cancel_matching(account=rng.choice(accounts))
 
         await self.scheduler.stop(drain=True, timeout=10.0)
-        await self.settle(0.05)  # publish_nowait tasks run one hop after tails
+        await self.wait_finished(*tasks)  # every tail has published its terminal event
 
         for task in tasks:
             self.assertTrue(task.is_terminal, f"task {task.id} not terminal")
@@ -959,7 +1009,7 @@ class TestHistoryAndStats(SchedulerTestBase):
     async def test_history_repo_failure_never_breaks_pipeline(self) -> None:
         self.repo.fail = True
         task = self.scheduler.submit("alpha", "p", "message")
-        await self.settle()
+        await self.wait_finished(task)
         self.assertEqual(task.status, "completed")
         self.assertEqual(self.repo.add_calls, [])
         # read fails too -> in-memory fallback
@@ -970,7 +1020,7 @@ class TestHistoryAndStats(SchedulerTestBase):
         scheduler.start()
         try:
             task = scheduler.submit("alpha", "p", "message")
-            await asyncio.sleep(0.05)
+            await self.wait_finished(task)
             self.assertEqual(task.status, "completed")
             self.assertEqual([r["id"] for r in await scheduler.history()], [task.id])
             self.assertEqual(await scheduler.history(limit=0), [])
@@ -1154,8 +1204,10 @@ class TestFailedStopHardening(SchedulerTestBase):
             await hold.wait()
 
         orig_add = self.repo.add
+        in_write = asyncio.Event()  # the sweep has reached the blocked write
 
         async def blocked_add(entry: dict[str, Any]) -> int:
+            in_write.set()
             await db.wait()  # keep the teardown parked mid-sweep
             return await orig_add(entry)
 
@@ -1167,7 +1219,7 @@ class TestFailedStopHardening(SchedulerTestBase):
         t2 = self.scheduler.submit("alpha", "p", "message")  # queued behind
 
         owner = asyncio.create_task(self.scheduler.stop(drain=False, timeout=0.0))
-        await asyncio.sleep(0.05)  # sweep parked inside the blocked history write
+        await asyncio.wait_for(in_write.wait(), timeout=5.0)  # sweep parked in the write
         owner.cancel()
         db.set()
         hold.set()
@@ -1421,7 +1473,7 @@ class TestRestoreSequence(SchedulerTestBase):
             self.assertGreaterEqual(nxt, int(time.time()))
             task = scheduler.submit("alpha", "p", "message")
             self.assertEqual(task.id, nxt)
-            await self.settle(0.05)
+            await self.wait_finished(task)
             self.assertEqual(len(repo.add_calls), 1)  # no swallowed collision
         finally:
             await scheduler.stop(drain=False)
