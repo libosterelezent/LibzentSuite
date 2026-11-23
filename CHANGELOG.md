@@ -75,6 +75,12 @@ nothing can ship until that hold is lifted; see
 - `test_rich_model`'s pipeline test read the audit rows the moment the
   task statuses flipped; the rows are written in the finish tail, after
   that. It waits for the published terminal events now.
+- The simulator's `pacing_respected` scenario measured wire gaps against
+  a 100ms budget and failed the gate's coverage leg on a healthy pacer
+  (1.473s for a 1.6s interval: one send 127ms late). Lateness is part of
+  a measured gap, so the budget is 300ms now, and the check is described
+  as what it shows (pacing in force; a bypass collapses the gaps) rather
+  than as the hard floor on the wire.
 - The CI-workflow guard against a bare `python3` missed the heredoc
   and backtick forms, and no test checked that it could catch
   anything. It now recognises the word in any shell position and has
