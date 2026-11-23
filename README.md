@@ -77,9 +77,12 @@ dependency group, which `uv sync --frozen` installs.
 > modules, and one suite that is green on every OS. CI runs the suite on
 > Linux (3.10–3.13) and on Windows (3.10 and 3.13); the benchmark and the
 > local gate run natively on Windows too, where seven capability-bound tests
-> skip with their reason
-> (POSIX permission bits, symlinks without Developer Mode). Commands below
-> write `python3` — on Windows that is `python` or `uv run --frozen python`.
+> skip with their reason (POSIX permission bits, symlinks without Developer
+> Mode). The commands below write `python3` for an ACTIVATED project
+> environment — `uv sync` installs it but does not activate it, so run
+> `source .venv/bin/activate` first, or prefix any command with
+> `uv run --frozen` instead; that form needs no activation and is the one to
+> use on Windows.
 > If the only Python installed is outside the tested range, pin one for the
 > sync: `set UV_PYTHON=3.13` (PowerShell: `$env:UV_PYTHON = "3.13"`). The
 > local gate `scripts/local-ci.sh` is bash — on Windows, run it from Git Bash.

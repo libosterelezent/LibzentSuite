@@ -8,8 +8,9 @@ from injected manual clocks, sleep seams, and seeded RNGs. Six scenarios
 (``export_basic`` … ``estop_halt``) double as living documentation of
 intended behavior.
 
-pytest is the runner and xdist parallelizes it (``--dist loadscope`` keeps
-each module's tests on one worker):
+pytest is the runner and xdist parallelizes it (``--dist loadscope`` groups
+test functions by module and test methods by class, so one class's methods
+always share a worker — two classes from the same module may not):
 
 .. code-block:: bash
 

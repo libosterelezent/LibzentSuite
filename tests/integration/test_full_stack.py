@@ -50,6 +50,14 @@ FAST_POLICIES = {
     },
     "accounts": {},
 }
+#: the message interval these tests configure, and the floor a MEASURED wire
+#: gap must still clear. They differ by 100ms of load skew, and by nothing
+#: else: the pacer stamps its spacing clock at the expected wire instant, so
+#: a send delayed by load compresses the next measured gap by exactly that
+#: lateness (worst observed on a healthy, loaded box: 52ms). The interval
+#: itself is asserted strictly and needs no clock.
+POLICY_INTERVAL = FAST_POLICIES["global"]["message"]["interval"]
+WIRE_GAP_FLOOR = POLICY_INTERVAL - 0.10
 
 
 def make_config_dir() -> Path:
@@ -232,12 +240,13 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         try:
             await stack.owner_says("export")
             await stack.wait_for_outbound(GUILD_CHANNEL, 2)
-            # config policy: 1.5s interval (+50ms jitter max) -> gaps stay
-            # near 1.5s. The 1.30 floor catches a real limiter bypass (gaps
-            # would collapse to ~0.05-0.3s) while absorbing load skew: one
-            # send delayed past its slot compresses the next measured gap
-            # by exactly that delay. Measured on the world journal (what
-            # actually hit the wire).
+            # STRICT, and no clock involved: what paces these sends is the
+            # effective policy, and it is exactly the configured interval
+            effective = await stack.framework.api.ratelimit_effective("message", "alpha")
+            self.assertEqual(effective["interval"], POLICY_INTERVAL)
+            # The wire gaps are measured on the world journal (what actually
+            # hit the wire). A real bypass collapses them to ~0.05-0.3s; a
+            # gap under the floor by less than the skew budget is lateness.
             outs = sorted(
                 m.ts
                 for m in stack.world.history.get(GUILD_CHANNEL, [])
@@ -245,7 +254,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
             )
             self.assertGreaterEqual(len(outs), 2)
             gaps = [b - a for a, b in itertools.pairwise(outs)]
-            self.assertTrue(all(g >= 1.30 for g in gaps), gaps)
+            self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
         finally:
             await stack.stop()
 
@@ -480,17 +489,22 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.3)
             history = [m for m in stack.world.messages_of(GUILD_CHANNEL) if m.startswith("hi-")]
             self.assertEqual(len(history), 4)
+            # STRICT, no clock: every member is paced at the configured
+            # interval on its own (account, message) scope — the shared group
+            # clock is what serializes the members against each other
+            for account in stack.user_ids:
+                effective = await stack.framework.api.ratelimit_effective("message", account)
+                self.assertEqual(effective["interval"], POLICY_INTERVAL)
             # every gap between GROUP members (and each account's own calls)
-            # respects the 1.5s config interval across the shared clock —
-            # same floor as the single-account case: real bypasses collapse
-            # to ~0.05-0.3s gaps; 1.30 absorbs load skew (see above)
+            # respects that interval across the shared clock — the same
+            # wire-gap floor, with the same 100ms skew budget, as above
             outs = sorted(
                 m.ts
                 for m in stack.world.history.get(GUILD_CHANNEL, [])
                 if m.author_id in stack.user_ids.values()
             )
             gaps = [b - a for a, b in itertools.pairwise(outs)]
-            self.assertTrue(all(g >= 1.30 for g in gaps), gaps)
+            self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
         finally:
             await stack.stop()
 

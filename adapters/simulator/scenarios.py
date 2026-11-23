@@ -56,14 +56,16 @@ IMPORT_PREFIX = "$exporter "
 TRIGGER_WORD = "export"
 #: pacing used by pacing_respected and its verification tolerance (seconds)
 PACING_INTERVAL = 1.6
-#: pacing floor slack: interval minus this is the violation threshold. A
-#: REAL violation (limiter bypassed) lands 5-10x under the interval;
-#: the slack only absorbs load skew — one send delayed past its slot
-#: compresses the NEXT measured gap by exactly that delay (the timer
-#: fires from the scheduled instant, not the late actual one).
-#: 50ms absorbed nothing on a loaded gate box; 200ms still catches
-#: every real bypass with an order of magnitude to spare.
-PACING_TOLERANCE = 0.2
+#: pacing floor slack: the violation threshold is the interval minus this.
+#: The pacer stamps its spacing clock at the EXPECTED wire instant (grant +
+#: jitter), so a send delayed past that instant by load compresses the NEXT
+#: measured gap by exactly that lateness — the budget absorbs only that.
+#: It is the distance from the policy interval to the hard safety floor
+#: (1.6s - 1.5s): the check tolerates 100ms of skew and no more, so a gap
+#: below the floor still fails. The worst lateness observed on a healthy,
+#: loaded gate box was 60ms. The interval itself is not checked here — it
+#: is what the limiter is configured with, which needs no clock to assert.
+PACING_TOLERANCE = 0.1
 #: simulated 429 wait and the tolerance when verifying the retry gap
 RETRY_AFTER = 0.8
 RETRY_TOLERANCE = 0.3
@@ -458,7 +460,8 @@ SCENARIOS: dict[str, Scenario] = {
         name="pacing_respected",
         description=(
             "With a 1.6s message interval every outbound gap observed in the "
-            "audit trail is at least the interval (minus a 0.05s tolerance)."
+            "audit trail stays above the 1.5s safety floor (100ms above it "
+            "absorbs load skew)."
         ),
         policies={"message": {"interval": PACING_INTERVAL, "jitter": [0.0, 0.05]}},
         world_setup=_base_world(_roster_pages(500)),
