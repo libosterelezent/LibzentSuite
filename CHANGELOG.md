@@ -60,10 +60,21 @@ nothing can ship until that hold is lifted; see
   call, a set event — and those rounds pass on 3.10 and 3.13.
 - The full-stack pacing tests prove spacing on the pacer's own
   spacing-clock stamps (`ratelimit_stats`), which stay a full interval
-  apart under any load, instead of only relaxing the measured wire gap
-  to 1.40s: a pacer regressed to 1.42s is rejected again (verified by
-  regressing it on purpose). The wire floor remains the bypass
-  detector. A sampler timeout now carries the framework's log lines.
+  apart under any load, and that no send reached the wire before its
+  stamp. No fixed floor is asked of a measured wire gap any more: the
+  pacer stamps at the expected wire instant, so a send that load delays
+  shortens the next gap by exactly its lateness (one send running 110ms
+  later than the next left a 1.3896s gap under the gate's coverage leg).
+  Regressing the pacer to 1.42s on purpose now fails both tests at the
+  stamp assertion; the exact interval itself is pinned by the engine's
+  unit tests under an injected clock. A sampler timeout carries the
+  framework's newest log lines.
+- The exporter fixture's DM idle window in the full-stack tests is 3.0s,
+  the value the simulation scenarios give it. At 0.6s the gate's
+  coverage leg collected no pages and the flow sent no chunk.
+- `test_rich_model`'s pipeline test read the audit rows the moment the
+  task statuses flipped; the rows are written in the finish tail, after
+  that. It waits for the published terminal events now.
 - The CI-workflow guard against a bare `python3` missed the heredoc
   and backtick forms, and no test checked that it could catch
   anything. It now recognises the word in any shell position and has
