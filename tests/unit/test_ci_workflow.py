@@ -43,11 +43,48 @@ SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13")
 #: changes.
 RULESET_LINUX_CONTEXTS = tuple(f"unittest ({v})" for v in SUPPORTED_PYTHONS)
 
-#: ``python3`` as a whole shell word: not part of a path, a version or
-#: another name (``/usr/bin/python3``, ``python3.10``, ``python3.exe``).
-#: Whatever shell syntax sits next to it does not matter: ``python3<<'PY'``
-#: (a heredoc), ``out=$(python3 x)`` and ``python3;`` all invoke it.
-_BARE_PYTHON3 = re.compile(r"(?<![\w./-])python3(?![\w.])")
+#: ``python3`` as a whole shell word: not part of a path, a version,
+#: another name or a ``#``-joined word (``/usr/bin/python3``, ``python3.10``,
+#: ``python3.exe``, ``a#python3``). Whatever shell syntax sits next to it does
+#: not matter: ``python3<<'PY'`` (a heredoc), ``out=$(python3 x)`` and
+#: ``python3;`` all invoke it.
+_BARE_PYTHON3 = re.compile(r"(?<![\w./#-])python3(?![\w.])")
+
+#: a ``#`` opens a comment only at the start of a word
+_COMMENT_PREFIXES = " \t;&|("
+
+
+def _command_part(line: str) -> str:
+    """The part of a shell line that the shell executes.
+
+    Cut at the first ``#`` that opens a comment. A ``#`` does that only
+    outside quotes and at the start of a word: in ``echo '#'; python3 x`` it
+    is a quoted character and the second command stays, ``a#b`` is one word,
+    and ``echo ok # python3`` loses its tail.
+    """
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if quote == '"' and char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1] in _COMMENT_PREFIXES):
+            return line[:index]
+        index += 1
+    return line
+
+
+def _bare_python3_lines(script: str) -> list[str]:
+    """The lines of `script` that invoke a bare ``python3``."""
+    return [
+        line.strip() for line in script.splitlines() if _BARE_PYTHON3.search(_command_part(line))
+    ]
 
 
 def _load_job() -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -151,14 +188,29 @@ class TestWorkflowSteps(unittest.TestCase):
     def test_no_step_invokes_a_bare_python3(self) -> None:
         # `python3` is whichever interpreter the runner has on PATH, not
         # necessarily the project's
-        offenders = []
-        for step in self.steps:
-            script = str(step.get("run", ""))
-            for line in script.splitlines():
-                code = line.split("#", 1)[0]
-                if _BARE_PYTHON3.search(code):
-                    offenders.append(f"{step['name']}: {line.strip()}")
+        offenders = [
+            f"{step['name']}: {line}"
+            for step in self.steps
+            for line in _bare_python3_lines(str(step.get("run", "")))
+        ]
         self.assertEqual(offenders, [])
+
+    def test_a_hash_inside_quotes_is_not_a_comment(self) -> None:
+        # A plain split at the first `#` saw `echo '` here and let the
+        # command through
+        self.assertEqual(
+            _bare_python3_lines("echo '#'; python3 -m pytest"),
+            ["echo '#'; python3 -m pytest"],
+        )
+        self.assertEqual(
+            _bare_python3_lines('echo "#"; python3 x.py'),
+            ['echo "#"; python3 x.py'],
+        )
+        # a real comment is skipped, with or without a space before the hash
+        self.assertEqual(_bare_python3_lines("echo ok # python3 -m pytest"), [])
+        self.assertEqual(_bare_python3_lines("echo ok #python3"), [])
+        # a hash that does not start a word is part of the word
+        self.assertEqual(_bare_python3_lines("echo a#python3"), [])
 
     def test_the_bare_python3_probe_catches_every_shell_form(self) -> None:
         # The probe guards the workflow, and the workflow holds no offender
@@ -186,6 +238,7 @@ class TestWorkflowSteps(unittest.TestCase):
             "python3.exe x.py",
             "uv run --python 3.13 python -m pytest",
             "pyenv install 3.13.0",
+            "echo a#python3",
         )
         for line in invokes:
             with self.subTest(line=line):
