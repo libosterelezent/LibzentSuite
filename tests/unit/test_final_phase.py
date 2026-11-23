@@ -15,7 +15,7 @@ from core.account_manager.services import MessageWaiterRegistry
 from core.cooldowns import CooldownService
 from core.event_bus import EventBus, MessageReceived
 from core.rate_limit_manager.engine import RateLimitManager
-from tests.unit.helpers import make_manager
+from tests.unit.helpers import enforces_file_modes, make_manager
 from tests.unit.test_rate_engine import StubLogger
 
 if TYPE_CHECKING:
@@ -385,6 +385,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SUPERSECRET-TOKEN-VALUE", rendered)
         self.assertIn("RealDiscordClient", rendered)
 
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_key_file_tightened_on_read(self) -> None:
         import tempfile
         from pathlib import Path

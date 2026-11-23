@@ -69,8 +69,9 @@ class DbTelemetry:
     def set_worker_thread(self, thread: Any) -> None:
         """Capture the aiosqlite worker's kernel TID (thread CPU source)."""
         # aiosqlite < 0.22: the connection IS the worker Thread; >= 0.22:
-        # it holds the thread as ``_thread``. /proc/self/task needs the
-        # KERNEL tid (native_id) — Python's ``ident`` is not that.
+        # it holds the thread as ``_thread``. The CPU sources (/proc/self/task,
+        # psutil's thread list) need the KERNEL tid (native_id) — Python's
+        # ``ident`` is not that.
         worker = getattr(thread, "_thread", thread)
         self._worker_tid = getattr(worker, "native_id", None) or getattr(worker, "ident", None)
 
@@ -146,11 +147,32 @@ class DbTelemetry:
             return out
 
     def _worker_thread_cpu(self) -> dict[str, Any] | None:
-        """Worker-thread CPU from /proc (Linux only, delta-free absolute
-        ticks sampled by the caller twice)."""
+        """Worker-thread CPU: absolute user/system seconds, sampled twice by
+        the caller for a delta.
+
+        Platform-independent: ``psutil`` answers on every OS when installed;
+        ``/proc`` is the Linux-only fallback for installs without it. The
+        import stays lazy — telemetry is off (zero work) by default, so the
+        production import graph never needs psutil."""
         tid = self._worker_tid
         if tid is None:
             return None
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+        if psutil is not None:
+            try:
+                for entry in psutil.Process().threads():
+                    if entry.id == tid:
+                        return {
+                            "available": True,
+                            "user_s": round(entry.user_time, 3),
+                            "sys_s": round(entry.system_time, 3),
+                        }
+            except psutil.Error:
+                return {"available": False, "reason": "thread cpu unavailable"}
+            return {"available": False, "reason": "worker thread not found"}
         try:
             with open(f"/proc/self/task/{tid}/stat") as fh:
                 fields = fh.read().rsplit(")", 1)[1].split()
@@ -162,7 +184,7 @@ class DbTelemetry:
                 "sys_s": round(stime / hz, 3),
             }
         except (OSError, ValueError, IndexError):
-            return {"available": False, "reason": "requires /proc"}
+            return {"available": False, "reason": "requires psutil or /proc"}
 
 
 TELEMETRY = DbTelemetry()

@@ -40,7 +40,12 @@ fi
 
 step "4/7 Pyright ratchet"
 "$UV_BIN" run --frozen pyright --outputjson core adapters database interfaces plugins benchmark scripts parsers main.py > "$RUN_DIR/pyright.json" 2>/dev/null || true
-PYRIGHT_ERRS=$(python3 -c "import json; print(json.load(open('$RUN_DIR/pyright.json'))['summary']['errorCount'])" 2>/dev/null || echo "?")
+# the count is parsed by the SAME locked interpreter that just ran pyright,
+# and the report reaches it on STDIN: a bare `python3` is whatever the system
+# has (on Windows often the Microsoft Store stub alias, which prints nothing
+# and exits), and a /tmp path embedded in a Python string literal crosses
+# into a native Windows interpreter unconverted
+PYRIGHT_ERRS=$("$UV_BIN" run --frozen python -c "import json, sys; print(json.load(sys.stdin)['summary']['errorCount'])" < "$RUN_DIR/pyright.json" 2>/dev/null || echo "?")
 PYRIGHT_BASE=$(cat .github/pyright-baseline)
 echo "pyright: $PYRIGHT_ERRS (baseline: $PYRIGHT_BASE)"
 [ "$PYRIGHT_ERRS" -eq "$PYRIGHT_BASE" ] && ok "pyright == baseline" || bad "pyright: $PYRIGHT_BASE -> $PYRIGHT_ERRS"

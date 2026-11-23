@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from core.event_bus import Event, EventBus, MessageReceived
 from core.task_scheduler import TaskScheduler
+from tests.unit.helpers import enforces_file_modes
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeHistoryRepo,
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 
 
 class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    """Each test closes its database INSIDE the temp-dir scope: Windows
+    cannot delete an open file, where POSIX forgives the unlink — a
+    cleanup registered for after the ``with`` block hid that ordering."""
+
     async def test_off_by_default_zero_records(self) -> None:
         from database.db import Database
         from database.telemetry import TELEMETRY
@@ -37,12 +42,14 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 db = Database(str(Path(tmp) / "t.db"))
                 await db.connect()
-                self.addAsyncCleanup(db.close)
-                TELEMETRY.reset()
-                await db.kv.set("k", "v")
-                await db.kv.get("k")
-                snap = TELEMETRY.snapshot()
-                self.assertEqual(snap["requests"]["total"], 0)
+                try:
+                    TELEMETRY.reset()
+                    await db.kv.set("k", "v")
+                    await db.kv.get("k")
+                    snap = TELEMETRY.snapshot()
+                    self.assertEqual(snap["requests"]["total"], 0)
+                finally:
+                    await db.close()
         finally:
             TELEMETRY.enabled = was
 
@@ -56,18 +63,20 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 db = Database(str(Path(tmp) / "t.db"))
                 await db.connect()
-                self.addAsyncCleanup(db.close)
-                TELEMETRY.reset()
-                for i in range(5):
-                    await db.kv.set(f"k{i}", {"n": i})
-                await db.kv.get("k0")
-                snap = TELEMETRY.snapshot()
-                self.assertGreaterEqual(snap["requests"]["by_kind"]["transaction"], 5)
-                self.assertGreaterEqual(snap["requests"]["by_kind"]["commit"], 5)
-                self.assertGreaterEqual(snap["requests"]["by_kind"]["read"], 1)
-                self.assertIn("transaction_ms", snap)
-                self.assertIn("commit_ms", snap)
-                self.assertLessEqual(snap["commit_ms"]["max"], snap["transaction_ms"]["max"])
+                try:
+                    TELEMETRY.reset()
+                    for i in range(5):
+                        await db.kv.set(f"k{i}", {"n": i})
+                    await db.kv.get("k0")
+                    snap = TELEMETRY.snapshot()
+                    self.assertGreaterEqual(snap["requests"]["by_kind"]["transaction"], 5)
+                    self.assertGreaterEqual(snap["requests"]["by_kind"]["commit"], 5)
+                    self.assertGreaterEqual(snap["requests"]["by_kind"]["read"], 1)
+                    self.assertIn("transaction_ms", snap)
+                    self.assertIn("commit_ms", snap)
+                    self.assertLessEqual(snap["commit_ms"]["max"], snap["transaction_ms"]["max"])
+                finally:
+                    await db.close()
         finally:
             TELEMETRY.enabled = was
 
@@ -81,14 +90,16 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 db = Database(str(Path(tmp) / "t.db"))
                 await db.connect()
-                self.addAsyncCleanup(db.close)
-                TELEMETRY.reset()
-                # assertNoLogs on the ROOT logger flags ANY debug record;
-                # scope to the framework tree (aiosqlite's own debug lines
-                # are third-party and not ours to police)
-                with self.assertNoLogs(logger="libzent", level="DEBUG"):
-                    for i in range(50):
-                        await db.kv.set(f"x{i}", i)
+                try:
+                    TELEMETRY.reset()
+                    # assertNoLogs on the ROOT logger flags ANY debug record;
+                    # scope to the framework tree (aiosqlite's own debug lines
+                    # are third-party and not ours to police)
+                    with self.assertNoLogs(logger="libzent", level="DEBUG"):
+                        for i in range(50):
+                            await db.kv.set(f"x{i}", i)
+                finally:
+                    await db.close()
         finally:
             TELEMETRY.enabled = was
 
@@ -331,6 +342,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_json_report_mode_0600(self) -> None:
         from benchmark.report import to_json
 

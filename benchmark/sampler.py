@@ -1,8 +1,13 @@
-"""Samplers: process metrics, event-loop lag, task census — stdlib only.
+"""Samplers: process metrics, event-loop lag, task census — stdlib core.
 
 Design (PHASE-4 S6): every sampler is a loop task binding lazily to the
 running loop, cheap enough to run continuously during a scenario and
 STOPPED before any leak snapshot (the samplers are themselves tasks/RSS).
+
+Platform independence: nothing here imports a platform-only module. CPU
+has a portable stdlib clock; memory and handle counts take the optional
+``psutil`` (dev group) on every OS, a plain ``/proc`` read on Linux, and
+are reported as unavailable elsewhere (see ``ProcessSampler``).
 
 LoopLagMonitor generalizes scripts/bench_db.py's LoopStallMeter from
 max/median to a bucketed histogram with p50/p95/p99/max. Resolution:
@@ -15,15 +20,15 @@ import asyncio
 import contextlib
 import gc
 import os
-import sys
 import threading
+import time
 from bisect import bisect_left
 from typing import Any
 
 try:
-    import resource
-except ImportError:  # Windows has no `resource` module — _winproc's probes stand in
-    resource = None
+    import psutil  # optional (dev group): resident memory + open handles on every OS
+except ImportError:
+    psutil = None  # the stdlib core still measures CPU; memory is then Linux-only
 
 __all__ = ["LoopLagMonitor", "ProcessSampler", "SamplerSession", "TaskSampler"]
 
@@ -44,11 +49,14 @@ def _edges_ms() -> tuple[float, ...]:
 class ProcessSampler:
     """Periodic process-wide snapshot (default 100 ms).
 
-    CPU from ``resource.getrusage`` (covers the aiosqlite thread + any
-    dashboard threads — that IS framework cost). RSS from
-    ``/proc/self/status`` on Linux with a ``ru_maxrss`` fallback. On
-    Windows both ride the ctypes probes in ``benchmark._winproc`` —
-    neither ``resource`` nor ``/proc`` exists there.
+    Platform-independent by construction. CPU comes from one portable
+    clock — ``time.process_time`` without psutil, the process's own
+    user+system times with it — and covers every thread (the aiosqlite
+    worker and any dashboard threads; that IS framework cost). Resident
+    memory and open handles have no portable stdlib source: ``psutil``
+    supplies them on every OS when installed, ``/proc`` covers Linux
+    without it, and elsewhere they are reported as UNAVAILABLE (keys
+    omitted) rather than guessed at.
     """
 
     def __init__(self, interval_s: float = 0.1) -> None:
@@ -56,14 +64,15 @@ class ProcessSampler:
         self._task: asyncio.Task[None] | None = None
         self._rss: list[int] = []
         self._fds: list[int] = []
-        self._ru0: tuple[float, float] = (0.0, 0.0)
+        self._cpu0: tuple[float, tuple[float, float] | None] = (0.0, None)
         self._t0: float = 0.0
+        self._proc = psutil.Process() if psutil is not None else None
         self._linux = os.path.isdir("/proc/self")
         self._on_rss: Any | None = None  # G5 spike hook (session-set)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
-        self._ru0 = self._rusage()
+        self._cpu0 = self._cpu()
         self._t0 = asyncio.get_running_loop().time()
         self._task = asyncio.get_running_loop().create_task(self._run())
 
@@ -81,18 +90,24 @@ class ProcessSampler:
             await asyncio.sleep(self.interval_s)
 
     # -------------------------------------------------------------- probes
-    def _rusage(self) -> tuple[float, float]:
-        # the platform test keeps both pyright views honest: typeshed omits
-        # getrusage in its Windows stub, so the POSIX lines must sit in a
-        # branch that view proves unreachable
-        if sys.platform == "win32" or resource is None:
-            from ._winproc import process_times
-
-            return process_times()
-        ru = resource.getrusage(resource.RUSAGE_SELF)
-        return (ru.ru_utime, ru.ru_stime)
+    def _cpu(self) -> tuple[float, tuple[float, float] | None]:
+        """(total CPU seconds, (user, system) split or None) for the process."""
+        if psutil is not None and self._proc is not None:
+            try:
+                times = self._proc.cpu_times()
+            except psutil.Error:
+                pass
+            else:
+                split = (times.user, times.system)
+                return (times.user + times.system, split)
+        return (time.process_time(), None)
 
     def _rss_kb(self) -> int | None:
+        if psutil is not None and self._proc is not None:
+            try:
+                return int(self._proc.memory_info().rss // 1024)
+            except psutil.Error:
+                return None
         if self._linux:
             try:
                 with open("/proc/self/status") as fh:
@@ -101,15 +116,20 @@ class ProcessSampler:
                             return int(line.split()[1])
             except OSError:
                 pass
-        if sys.platform == "win32" or resource is None:
-            from ._winproc import rss_kb
-
-            return rss_kb()
-        ru = resource.getrusage(resource.RUSAGE_SELF)
-        kb = int(ru.ru_maxrss)
-        return kb // 1024 if kb > 10_000_000 else kb  # macOS reports bytes
+        return None
 
     def _fd_count(self) -> int:
+        if psutil is not None and self._proc is not None:
+            try:
+                # typeshed (and psutil itself) declare num_fds on POSIX and
+                # num_handles on Windows only: resolve by name so neither
+                # platform's type view sees the other's counter
+                counter = getattr(self._proc, "num_fds", None) or getattr(
+                    self._proc, "num_handles", None
+                )
+                return int(counter()) if counter is not None else -1
+            except psutil.Error:
+                return -1
         if self._linux:
             try:
                 return len(os.listdir("/proc/self/fd"))
@@ -128,19 +148,22 @@ class ProcessSampler:
 
     # -------------------------------------------------------------- output
     def summary(self) -> dict[str, Any]:
-        ru1 = self._rusage()
         wall = max(asyncio.get_running_loop().time() - self._t0, 1e-9)
-        cpu = (ru1[0] - self._ru0[0]) + (ru1[1] - self._ru0[1])
-        rss = self._rss or [0]
-        return {
-            "rss_base_kb": rss[0],
-            "rss_peak_kb": max(rss),
-            "rss_end_kb": rss[-1],
-            "cpu_user_s": round(ru1[0] - self._ru0[0], 3),
-            "cpu_sys_s": round(ru1[1] - self._ru0[1], 3),
-            "cpu_pct": round(cpu / wall * 100.0, 2),
+        cpu, split = self._cpu()
+        cpu_delta = cpu - self._cpu0[0]
+        out: dict[str, Any] = {
+            "cpu_s": round(cpu_delta, 3),
+            "cpu_pct": round(cpu_delta / wall * 100.0, 2),
             "fd_peak": max(self._fds) if self._fds else -1,
         }
+        if self._rss:  # omitted, not zeroed, when memory is unobservable
+            out["rss_base_kb"] = self._rss[0]
+            out["rss_peak_kb"] = max(self._rss)
+            out["rss_end_kb"] = self._rss[-1]
+        if split is not None and self._cpu0[1] is not None:
+            out["cpu_user_s"] = round(split[0] - self._cpu0[1][0], 3)
+            out["cpu_sys_s"] = round(split[1] - self._cpu0[1][1], 3)
+        return out
 
 
 class LoopLagMonitor:

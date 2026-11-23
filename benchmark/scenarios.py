@@ -88,6 +88,7 @@ async def _cycle_report(
         "rss_base_kb",
         "rss_peak_kb",
         "rss_end_kb",
+        "cpu_s",
         "cpu_user_s",
         "cpu_sys_s",
         "cpu_pct",
@@ -110,7 +111,8 @@ async def _cycle_report(
 def _track_cycle(scenario: ScenarioRun, session: SamplerSession) -> None:
     rss_series, task_series = _run_series(scenario)
     proc = session.process.summary()
-    rss_series.append(proc["rss_end_kb"])
+    if "rss_end_kb" in proc:  # absent where memory is unobservable (no psutil, no /proc)
+        rss_series.append(proc["rss_end_kb"])
     task_series.append(session.tasks.live_tasks())
 
 

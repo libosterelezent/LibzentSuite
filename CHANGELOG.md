@@ -25,8 +25,29 @@ nothing can ship until that hold is lifted; see
   the lock. `scripts/local-ci.sh` is rewritten as the clean
   seven-step code-quality gate — the CodeRabbit machinery left the
   gate entirely (it reviews PRs on GitHub, not local runs).
+- The project is platform-independent. No platform-only modules remain:
+  the benchmark sampler and the DB worker-thread telemetry measure CPU,
+  memory and handles with a stdlib clock plus the optional `psutil` (dev
+  group), falling back to a plain `/proc` read on Linux and reporting
+  memory as unavailable — never zero — where neither can observe the
+  process. The suite is green on native Windows (seven capability-bound
+  tests skip with their reason); the local gate and `scripts/run_tests.sh`
+  run from Git Bash. CI still gates on Linux.
 
 ### Fixed
+- Portability defects the first native-Windows run exposed: a hard
+  `import resource` made the whole benchmark package unimportable;
+  exception locations were built with a `/` split that returns the whole
+  path on Windows; three tests hardcoded a `/tmp` key path; a test-side
+  directory fingerprint keyed on OS separators; the gate parsed its
+  pyright count with the system's `python3` (on Windows often the Store
+  stub) and a `/tmp` path embedded in a Python literal;
+  `scripts/run_tests.sh` still invoked the retired `unittest discover`
+  and only knew the POSIX virtualenv layout.
+- Three telemetry tests closed their database only after the temp
+  directory had been removed. POSIX forgave the unlink of an open file;
+  Windows refused the delete. Databases now close inside the scope that
+  removes them.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
   plugin BEFORE any state moves (an unknown account used to get a

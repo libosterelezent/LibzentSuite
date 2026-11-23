@@ -18,6 +18,7 @@ import atexit
 import copy
 import logging
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +37,36 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
 LOG = logging.getLogger("tests.helpers")
+
+
+# ------------------------------------------------------------ platform probes
+# Capability probes, not platform names: the suite is platform-independent,
+# so a test skips exactly where THIS OS/filesystem cannot do the thing under
+# test, and still runs wherever it can (Developer Mode on Windows, a POSIX
+# mode on a mode-less filesystem, ...).
+def can_symlink() -> bool:
+    """Can this OS/filesystem create symlinks? Windows grants it only with
+    Developer Mode or SeCreateSymbolicLinkPrivilege (WinError 1314 otherwise)."""
+    with tempfile.TemporaryDirectory(prefix="lz-sym-") as tmp:
+        target = Path(tmp) / "t"
+        target.write_text("x")
+        try:
+            (Path(tmp) / "l").symlink_to(target)
+        except OSError:
+            return False
+    return True
+
+
+def enforces_file_modes() -> bool:
+    """Does this OS/filesystem honour POSIX permission bits? Windows accepts
+    chmod as a near no-op, so a 0600 file still reports 0o666 — privacy
+    assertions (key files, databases, report artifacts) are meaningful only
+    where the bits are enforced."""
+    with tempfile.TemporaryDirectory(prefix="lz-mode-") as tmp:
+        probe = Path(tmp) / "p"
+        probe.write_text("x")
+        probe.chmod(0o600)
+        return (stat.S_IMODE(probe.stat().st_mode) & 0o077) == 0
 
 
 # ------------------------------------------------------------ repositories

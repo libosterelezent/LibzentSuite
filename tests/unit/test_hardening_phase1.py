@@ -31,6 +31,7 @@ from core.event_bus import Event, EventBus
 from core.logging_service import LogService, ServiceLogger
 from database.connection import DatabaseError as ConnDatabaseError
 from database.db import Database
+from tests.unit.helpers import enforces_file_modes
 
 #: fixture plugins (the framework ships none; the fixture keeps the boot
 #: path exercising plugin discovery/attachment)
@@ -60,6 +61,7 @@ class TestDatabaseLayer(_TmpCase):
         # not re-wrapped ("database add account failed: ...")
         self.assertEqual(str(ctx.exception), "account 'a' already exists")
 
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_file_created_private(self) -> None:
         await self.open_db()
         mode = stat.S_IMODE(os.stat(self.dir / "t.db").st_mode)
@@ -394,6 +396,7 @@ class TestCredentials(_TmpCase):
         self.assertEqual(first, frozenset({1, 2, 3}))
         self.assertIs(creds.owner_user_ids, first)
 
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_key_file_created_private_and_reused(self) -> None:
         path = self.dir / "k" / "credentials.key"
         with mock.patch.dict(os.environ, {}, clear=False):

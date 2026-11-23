@@ -22,6 +22,7 @@ from core.credentials import Credentials, CredentialsError
 from core.event_bus import EventBus
 from core.logging_service import LogService, ServiceLogger
 from core.rate_limit_manager import RateLimitManager
+from tests.unit.helpers import can_symlink
 
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
@@ -98,23 +99,9 @@ class TestParseEnvComments(unittest.TestCase):
         self.assertEqual(env, {"A": "1", "B": "ab#cd", "C": "x # y", "D": "", "E": ""})
 
 
-def _can_symlink() -> bool:
-    """Capability probe, not a platform name: Windows grants symlink
-    creation only with Developer Mode or SeCreateSymbolicLinkPrivilege
-    (WinError 1314 otherwise), so this skips exactly where the OS can't."""
-    with tempfile.TemporaryDirectory(prefix="sm-sym-") as tmp:
-        target = Path(tmp) / "t"
-        target.write_text("x")
-        try:
-            (Path(tmp) / "l").symlink_to(target)
-        except OSError:
-            return False
-    return True
-
-
 class TestFromFileSymlink(unittest.TestCase):
     @unittest.skipUnless(
-        _can_symlink(), "symlink creation needs Developer Mode or the symlink privilege"
+        can_symlink(), "symlink creation needs Developer Mode or the symlink privilege"
     )
     def test_symlinked_env_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-link-") as tmp:
@@ -391,7 +378,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
             self._restore()
 
     @unittest.skipUnless(
-        _can_symlink(), "symlink creation needs Developer Mode or the symlink privilege"
+        can_symlink(), "symlink creation needs Developer Mode or the symlink privilege"
     )
     async def test_early_failure_releases_the_claim(self) -> None:
         m = self._m
