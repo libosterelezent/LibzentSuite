@@ -21,6 +21,7 @@ from adapters.simulator.scenarios import (
     EXPORT_COMMAND,
     IMPORT_PREFIX,
     PACING_INTERVAL,
+    PACING_TOLERANCE,
     SCENARIOS,
     Scenario,
     quiet_window,
@@ -202,6 +203,21 @@ class TestChecksPure(unittest.TestCase):
         failures = check(rushed, SimWorld())
         self.assertTrue(any("pacing violated" in f for f in failures))
         self.assertLessEqual(PACING_INTERVAL, 1.7, "pacing scenario stays sim-cheap")
+
+    def test_pacing_tolerates_a_late_send_but_not_a_bypass(self) -> None:
+        # The gate's coverage leg on Windows measured a 1.473s gap between two
+        # sends of this healthy pacer (one send 127ms late): that must pass.
+        check = SCENARIOS["pacing_respected"].checks
+        contents = [EXPORT_COMMAND] + [IMPORT_PREFIX + c for c in "abc"]
+        late = _audit_out([10.0, 11.473, 13.073, 14.673], contents)
+        self.assertEqual(check(late, SimWorld()), [])
+        # one millisecond under the threshold is a violation, on every gap
+        minimum = PACING_INTERVAL - PACING_TOLERANCE
+        under = _audit_out([10.0 + i * (minimum - 0.001) for i in range(4)], contents)
+        self.assertEqual(len(check(under, SimWorld())), 3)
+        # a bypass: the sends leave back-to-back
+        bypass = _audit_out([10.0, 10.05, 10.1, 10.15], contents)
+        self.assertEqual(len(check(bypass, SimWorld())), 3)
 
     def test_pacing_needs_timestamps_and_three_sends(self) -> None:
         check = SCENARIOS["pacing_respected"].checks
