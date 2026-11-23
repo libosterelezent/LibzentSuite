@@ -51,6 +51,23 @@ nothing can ship until that hold is lifted; see
   directory had been removed. POSIX forgave the unlink of an open file;
   Windows refused the delete. Databases now close inside the scope that
   removes them.
+- The scheduler unit tests slept for a fixed 10-500ms and then asserted
+  a state. On a loaded event loop (the 3.10 leg under four xdist
+  workers on a four-thread Windows machine) a task was still `queued`
+  when the 50ms sleep ended: five failed in the gate, eleven distinct
+  ones across three deliberately starved rounds. Every wait is now on
+  the observable — the published terminal event, the recorded acquire
+  call, a set event — and those rounds pass on 3.10 and 3.13.
+- The full-stack pacing tests prove spacing on the pacer's own
+  spacing-clock stamps (`ratelimit_stats`), which stay a full interval
+  apart under any load, instead of only relaxing the measured wire gap
+  to 1.40s: a pacer regressed to 1.42s is rejected again (verified by
+  regressing it on purpose). The wire floor remains the bypass
+  detector. A sampler timeout now carries the framework's log lines.
+- The CI-workflow guard against a bare `python3` missed the heredoc
+  and backtick forms, and no test checked that it could catch
+  anything. It now recognises the word in any shell position and has
+  a test of its own.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
   plugin BEFORE any state moves (an unknown account used to get a
