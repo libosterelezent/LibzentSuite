@@ -12,6 +12,7 @@ import asyncio
 import itertools
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,14 +51,26 @@ FAST_POLICIES = {
     },
     "accounts": {},
 }
-#: the message interval these tests configure, and the floor a MEASURED wire
-#: gap must still clear. They differ by 100ms of load skew, and by nothing
-#: else: the pacer stamps its spacing clock at the expected wire instant, so
-#: a send delayed by load compresses the next measured gap by exactly that
-#: lateness (worst observed on a healthy, loaded box: 52ms). The interval
-#: itself is asserted strictly and needs no clock.
+#: the message interval these tests configure. Three assertions read it, and
+#: only the third measures the wire:
+#:
+#: * the EFFECTIVE policy is exactly this interval: configuration, no clock;
+#: * the pacer's own STAMPS are at least this interval apart: exact under any
+#:   load, up to ``STAMP_EPSILON`` of rounding (see ``Stack.pacing_stamps``);
+#: * a MEASURED wire gap still clears ``WIRE_GAP_FLOOR``. The pacer stamps
+#:   its spacing clock at the expected wire instant, so a send delayed by
+#:   load compresses the next measured gap by exactly that lateness (worst
+#:   observed on a healthy, loaded box: 52-60ms). The budget in that floor is
+#:   what makes it a BYPASS detector (a real bypass collapses gaps to
+#:   ~0.05-0.3s) and not the spacing proof.
 POLICY_INTERVAL = FAST_POLICIES["global"]["message"]["interval"]
+#: ``ratelimit_stats`` reports a stamp as its age, rounded to a millisecond
+STAMP_EPSILON = 0.005
 WIRE_GAP_FLOOR = POLICY_INTERVAL - 0.10
+
+#: what a stalled exporter flow leaves in the log: its own progress lines
+#: (plus everything the framework logged loudly; see Stack._flow_log_tail)
+FLOW_LOG_MARKS = ("flow aborted", "soulmate", "chunk", "did not complete", "exporter")
 
 
 def make_config_dir() -> Path:
@@ -66,6 +79,22 @@ def make_config_dir() -> Path:
     (root / "rate_limits.json").write_text(json.dumps(FAST_POLICIES))
     (root / "accounts").mkdir()
     return root
+
+
+class PacerStampAssertions:
+    """The strict, clock-free spacing proof shared by the pacing tests."""
+
+    def assert_pacer_stamps_spaced(self: unittest.TestCase, stamps: list[float]) -> None:
+        """Consecutive pacer stamps are at least ``POLICY_INTERVAL`` apart.
+
+        The stamps come from ``Stack.pacing_stamps``: the pacer's own
+        spacing clock, which lateness cannot compress.
+        """
+        gaps = [b - a for a, b in itertools.pairwise(stamps)]
+        self.assertTrue(
+            all(g >= POLICY_INTERVAL - STAMP_EPSILON for g in gaps),
+            f"pacer stamps are closer than {POLICY_INTERVAL}s: gaps={[round(g, 3) for g in gaps]}",
+        )
 
 
 class Stack:
@@ -162,6 +191,11 @@ class Stack:
     async def owner_says(self, content: str, account: str = "alpha") -> None:
         self.world.deliver(GUILD_CHANNEL, OWNER_ID, content)
 
+    def outbound(self, channel: int, authors: set[int]) -> list[float]:
+        """Journal timestamps of the messages `authors` sent to `channel`,
+        oldest first (the journal is what actually hit the wire)."""
+        return sorted(m.ts for m in self.world.history.get(channel, []) if m.author_id in authors)
+
     async def wait_for_outbound(
         self, channel: int, count: int, account: str = "alpha", limit: float = 30.0
     ) -> None:
@@ -173,20 +207,73 @@ class Stack:
         before its chunk goes out; under load that silence outlasts any
         fixed quiet window, and the window would return before the chunk.
         """
-        uid = self.user_ids[account]
+        await self._wait_for_sends(channel, {self.user_ids[account]}, count, limit, account)
+
+    async def pacing_stamps(
+        self, key: str, channel: int, authors: set[int], sends: int, limit: float = 30.0
+    ) -> list[float]:
+        """The pacer's spacing-clock stamps for `key`, one per send, oldest first.
+
+        When the pacer admits a send it stamps the key's clock at grant +
+        jitter, and it admits the next send on that key no sooner than one
+        interval after that stamp: consecutive stamps are a full interval
+        apart under ANY load. Lateness delays a send, never the distance
+        between stamps, so this is the spacing proof a wire gap cannot be.
+
+        Each stamp is sampled the moment its send lands in the journal.
+        ``ratelimit_stats`` reports it as its age and never suspends, so the
+        sample lands in the same event-loop step as the send's detection.
+        A stamp always precedes its own send; a sample whose stamp is NEWER
+        than the send it followed saw a later stamp instead (the sampler ran
+        a whole interval late, or sends are landing unpaced) and is reported
+        as confounded rather than measured.
+        """
+        stamps: list[float] = []
+        for count in range(1, sends + 1):
+            landed = await self._wait_for_sends(channel, authors, count, limit, key)
+            ages = (await self.framework.api.ratelimit_stats())["last_fire_ages"]
+            wall, mono = time.time(), time.monotonic()
+            if key not in ages:
+                raise AssertionError(
+                    f"{key}: send {count} landed, but the pacer never stamped this key"
+                )
+            sent_at = landed[count - 1]
+            if wall - ages[key] > sent_at + STAMP_EPSILON:
+                raise AssertionError(
+                    f"{key}: the stamp sampled after send {count} is newer than that "
+                    f"send ({sent_at:.3f}): confounded, not measured"
+                )
+            stamps.append(mono - ages[key])
+        return stamps
+
+    async def _wait_for_sends(
+        self, channel: int, authors: set[int], count: int, limit: float, who: str
+    ) -> list[float]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + limit
         while loop.time() < deadline:
-            sent = sum(1 for m in self.world.history.get(channel, []) if m.author_id == uid)
-            if sent >= count:
-                return
+            landed = self.outbound(channel, authors)
+            if len(landed) >= count:
+                return landed
             await asyncio.sleep(0.02)
         raise AssertionError(
-            f"{account} never reached {count} outbound messages in channel {channel}"
+            f"{who} never reached {count} outbound messages in channel {channel}"
+            f"{await self._flow_log_tail()}"
         )
 
+    async def _flow_log_tail(self) -> str:
+        """Newest flow-relevant log lines, to explain a stalled flow in the failure."""
+        logs = await self.framework.api.logs_tail(n=200)
+        lines = [
+            f"[{e.get('severity')}] {e.get('message')}"
+            for e in logs
+            if str(e.get("severity", "")).upper() in ("WARNING", "ERROR", "CRITICAL")
+            or any(mark in str(e.get("message", "")) for mark in FLOW_LOG_MARKS)
+        ]
+        return "".join(f"\n  log: {line[:200]}" for line in lines[-6:])
 
-class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
+
+class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTestCase):
     """The production boot path driving the WORKLOAD fixture (a paced
     multi-step flow plugin under tests/fixtures/sim_plugins — the
     framework itself bundles no plugins)."""
@@ -238,20 +325,21 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
+            alpha = {stack.user_ids["alpha"]}
             await stack.owner_says("export")
-            await stack.wait_for_outbound(GUILD_CHANNEL, 2)
+            stamps = await stack.pacing_stamps("alpha:message", GUILD_CHANNEL, alpha, sends=2)
             # STRICT, and no clock involved: what paces these sends is the
             # effective policy, and it is exactly the configured interval
             effective = await stack.framework.api.ratelimit_effective("message", "alpha")
             self.assertEqual(effective["interval"], POLICY_INTERVAL)
-            # The wire gaps are measured on the world journal (what actually
-            # hit the wire). A real bypass collapses them to ~0.05-0.3s; a
-            # gap under the floor by less than the skew budget is lateness.
-            outs = sorted(
-                m.ts
-                for m in stack.world.history.get(GUILD_CHANNEL, [])
-                if m.author_id == stack.user_ids["alpha"]
-            )
+            # STRICT, on the pacer's own clock: consecutive stamps on the key
+            # are a full interval apart whatever the load (Stack.pacing_stamps)
+            self.assert_pacer_stamps_spaced(stamps)
+            # The wire gaps (what actually hit the wire) are the BYPASS
+            # detector: a real bypass collapses them to ~0.05-0.3s. Lateness
+            # of an earlier send compresses a gap by exactly that much, which
+            # is why the floor carries a budget and proves nothing tighter.
+            outs = stack.outbound(GUILD_CHANNEL, alpha)
             self.assertGreaterEqual(len(outs), 2)
             gaps = [b - a for a, b in itertools.pairwise(outs)]
             self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
@@ -452,15 +540,16 @@ class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
 
-class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
+class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase):
     """Per-account/group scope over the production bootstrap: accounts in
     one sync_group serialize their API activity on a shared clock."""
 
     async def test_group_members_serialize(self) -> None:
         stack = await Stack().boot()
         api = stack.framework.api
-        await api.accounts_add({"name": "alpha", "workspace": "grinders"})
-        await api.accounts_add({"name": "beta", "workspace": "grinders"})
+        group = "grinders"
+        await api.accounts_add({"name": "alpha", "workspace": group})
+        await api.accounts_add({"name": "beta", "workspace": group})
         self.assertEqual(
             (await api.ratelimit_stats())["groups"],
             {"alpha": "grinders", "beta": "grinders"},
@@ -476,16 +565,14 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
                     channel_id=GUILD_CHANNEL,
                     content=f"hi-{account}",
                 )
-            # poll to the 4th message with a deadline, not a fixed
-            # iteration count: 4 paced sends on the 2.0s group clock
-            # land ~t=6s, and instrumentation load can stretch that —
-            # the loop exits the moment the last one lands
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + 20.0
-            while loop.time() < deadline:
-                await asyncio.sleep(0.05)
-                if len(stack.world.messages_of(GUILD_CHANNEL)) >= 4:
-                    break
+            members = set(stack.user_ids.values())
+            # sample the shared clock's stamp as each send lands, to a
+            # deadline rather than a fixed count of polls: four paced sends
+            # are three 1.5s intervals (~t=4.5s) and instrumentation load
+            # can stretch that — the sampler returns the moment the last lands
+            stamps = await stack.pacing_stamps(
+                f"group:{group}:message", GUILD_CHANNEL, members, sends=4
+            )
             await asyncio.sleep(0.3)
             history = [m for m in stack.world.messages_of(GUILD_CHANNEL) if m.startswith("hi-")]
             self.assertEqual(len(history), 4)
@@ -495,14 +582,12 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
             for account in stack.user_ids:
                 effective = await stack.framework.api.ratelimit_effective("message", account)
                 self.assertEqual(effective["interval"], POLICY_INTERVAL)
+            # STRICT, on the pacer's own clock: consecutive stamps on the
+            # SHARED clock are a full interval apart (Stack.pacing_stamps)
+            self.assert_pacer_stamps_spaced(stamps)
             # every gap between GROUP members (and each account's own calls)
-            # respects that interval across the shared clock — the same
-            # wire-gap floor, with the same 100ms skew budget, as above
-            outs = sorted(
-                m.ts
-                for m in stack.world.history.get(GUILD_CHANNEL, [])
-                if m.author_id in stack.user_ids.values()
-            )
+            # on the wire clears the same bypass-detector floor as above
+            outs = stack.outbound(GUILD_CHANNEL, members)
             gaps = [b - a for a, b in itertools.pairwise(outs)]
             self.assertTrue(all(g >= WIRE_GAP_FLOOR for g in gaps), gaps)
         finally:
