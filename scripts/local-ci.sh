@@ -56,11 +56,25 @@ if [ "${1:-}" = "quick" ]; then
   exit "$FAIL"
 fi
 
+# A hung leg must not hang the gate forever, so a timed leg gets a ceiling
+# with roughly 3x headroom over its slowest HONEST run — and the honest run
+# time is the platform's. A full leg takes ~2m45s-3m15s on the Linux gate
+# box and ~10-14 minutes under Git Bash on Windows (measured 2026-11-23).
+# One Linux-calibrated 590s cut the Windows leg off at exactly 590s, before
+# pytest could print a summary; the workers then died with their controller
+# ("node down: Not properly terminated"), which reads like a crash and is
+# only the kill. LZ_GATE_LEG_TIMEOUT overrides the ceiling.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) LEG_TIMEOUT_S=1800 ;;
+  *) LEG_TIMEOUT_S=590 ;;
+esac
+LEG_TIMEOUT_S="${LZ_GATE_LEG_TIMEOUT:-$LEG_TIMEOUT_S}"
+
 step "5/7 Suite on 3.10"
 # per-checkout venv (unique by full path hash + lock hash), synced to drop stale packages
 VENV_KEY="$(echo "$(pwd)_$(sha256sum uv.lock | cut -c1-8)" | sha256sum | cut -c1-12)"
 VENV310="$RUN_DIR/venv310"  # inside the per-run scratch: no external parent dir, unique per run, trap-cleaned
-UV_PROJECT_ENVIRONMENT="$VENV310" timeout 590 "$UV_BIN" run --frozen --python 3.10 pytest tests/ -n auto --dist loadscope > "$RUN_DIR/suite-310.log" 2>&1 && ok "3.10: $(grep 'passed' "$RUN_DIR/suite-310.log" | tail -1)" || { bad "3.10 failed"; grep 'FAILED' "$RUN_DIR/suite-310.log" | head -3; }
+UV_PROJECT_ENVIRONMENT="$VENV310" timeout "$LEG_TIMEOUT_S" "$UV_BIN" run --frozen --python 3.10 pytest tests/ -n auto --dist loadscope > "$RUN_DIR/suite-310.log" 2>&1 && ok "3.10: $(grep 'passed' "$RUN_DIR/suite-310.log" | tail -1)" || { rc=$?; bad "3.10 failed"; if [ "$rc" -eq 124 ]; then echo "       the leg hit its ${LEG_TIMEOUT_S}s ceiling before pytest could print a summary (raise LZ_GATE_LEG_TIMEOUT or quiet the machine)"; fi; grep 'FAILED' "$RUN_DIR/suite-310.log" | head -3; }
 
 step "6/7 Suite + coverage on 3.13"
 COVERAGE_FILE="$RUN_DIR/.coverage" "$UV_BIN" run --frozen --python 3.13 pytest tests/ -n auto --dist loadscope --cov=core --cov=adapters --cov=database --cov=interfaces --cov=plugins --cov=benchmark --cov=scripts --cov=parsers --cov-report=term-missing --cov-report="json:$RUN_DIR/cov.json" > "$RUN_DIR/suite-313.log" 2>&1 && ok "3.13: $(grep 'passed' "$RUN_DIR/suite-313.log" | tail -1) — $(grep TOTAL "$RUN_DIR/suite-313.log")" || { bad "3.13 failed"; grep 'FAILED' "$RUN_DIR/suite-313.log" | head -3; grep 'Coverage failure' "$RUN_DIR/suite-313.log" | head -1; }
