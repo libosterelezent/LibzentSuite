@@ -43,7 +43,11 @@ SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13")
 #: changes.
 RULESET_LINUX_CONTEXTS = tuple(f"unittest ({v})" for v in SUPPORTED_PYTHONS)
 
-_BARE_PYTHON3 = re.compile(r"(?:^|[\s|;&(])python3(?=\s|$)")
+#: ``python3`` as a whole shell word: not part of a path, a version or
+#: another name (``/usr/bin/python3``, ``python3.10``, ``python3.exe``).
+#: Whatever shell syntax sits next to it does not matter: ``python3<<'PY'``
+#: (a heredoc), ``out=$(python3 x)`` and ``python3;`` all invoke it.
+_BARE_PYTHON3 = re.compile(r"(?<![\w./-])python3(?![\w.])")
 
 
 def _load_job() -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -155,3 +159,37 @@ class TestWorkflowSteps(unittest.TestCase):
                 if _BARE_PYTHON3.search(code):
                     offenders.append(f"{step['name']}: {line.strip()}")
         self.assertEqual(offenders, [])
+
+    def test_the_bare_python3_probe_catches_every_shell_form(self) -> None:
+        # The probe guards the workflow, and the workflow holds no offender
+        # for it to catch, so nothing else would notice a probe that had gone
+        # blind. Pin what it must catch and what it must spare.
+        invokes = (
+            "python3 -m pytest",
+            "  python3 x.py",
+            "python3<<'PY'",
+            "python3 < script.py",
+            "uv run ruff check && python3 x.py",
+            "uv run ruff check || python3 x.py",
+            "python3 a.py; python3 b.py",
+            "out=$(python3 x.py)",
+            "out=`python3 x.py`",
+            "out=$(python3 x.py | tail -1)",
+            "! python3 x.py",
+            "{ python3 x.py; }",
+            "( cd sub && python3 x.py )",
+            "if true; then python3 x.py; fi",
+        )
+        spares = (
+            "/usr/bin/python3 x.py",
+            "python3.10 x.py",
+            "python3.exe x.py",
+            "uv run --python 3.13 python -m pytest",
+            "pyenv install 3.13.0",
+        )
+        for line in invokes:
+            with self.subTest(line=line):
+                self.assertRegex(line, _BARE_PYTHON3)
+        for line in spares:
+            with self.subTest(line=line):
+                self.assertNotRegex(line, _BARE_PYTHON3)
