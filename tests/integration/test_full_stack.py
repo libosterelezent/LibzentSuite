@@ -105,7 +105,7 @@ class PacerStampAssertions:
     """The strict, clock-free pacing proofs shared by the pacing tests."""
 
     def assert_pacer_stamps_spaced(
-        self: unittest.TestCase, stamps: list[float], jitters: list[float], brackets: list[float]
+        self: unittest.TestCase, stamps: list[float], jitters: list[float]
     ) -> None:
         """Consecutive pacer stamps are at least ``POLICY_INTERVAL`` apart.
 
@@ -116,19 +116,11 @@ class PacerStampAssertions:
         The jitter is known (``jitters``, from ``Stack.grant_jitters``) and
         is subtracted here; only the lateness is left to hide a shorter
         interval behind.
-
-        Each stamp is reconstructed from a clock read taken BEFORE the
-        call that produced its age, so it is never later than the truth.
-        A stamp that is too early can only shrink the gap that ends at it,
-        so the later sample's ``brackets`` entry is added back.
         """
         self.assertEqual(len(jitters), len(stamps))
-        self.assertEqual(len(brackets), len(stamps))
         gaps = [
-            b - a - jitter + bracket
-            for (a, b), jitter, bracket in zip(
-                itertools.pairwise(stamps), jitters[1:], brackets[1:], strict=True
-            )
+            b - a - jitter
+            for (a, b), jitter in zip(itertools.pairwise(stamps), jitters[1:], strict=True)
         ]
         self.assertTrue(
             all(g >= POLICY_INTERVAL - STAMP_EPSILON for g in gaps),
@@ -140,9 +132,11 @@ class PacerStampAssertions:
 
         ``leads`` are per send ``wire time - stamp``, from
         ``Stack.pacing_stamps``: never negative on a healthy system, however
-        late load makes a send. A negative lead means the stamp sampled after
-        that send is newer than the send itself: it left without waiting for
-        the pacer, or the sampler missed its own send and read the next stamp.
+        late load makes a send, and exact up to the noise of the clock
+        offset (microseconds). A negative lead means the stamp sampled
+        after that send is newer than the send itself: it left without
+        waiting for the pacer, or the sampler missed its own send and read
+        the next stamp.
         """
         self.assertTrue(
             all(lead >= -STAMP_EPSILON for lead in leads),
@@ -261,9 +255,9 @@ class Stack:
 
     async def pacing_stamps(
         self, key: str, channel: int, authors: set[int], sends: int, limit: float = 30.0
-    ) -> tuple[list[float], list[float], list[float]]:
-        """The pacer's stamps for `key`, each send's lead over its stamp, and
-        how coarse each stamp is; one entry per send, oldest first.
+    ) -> tuple[list[float], list[float]]:
+        """The pacer's stamps for `key` and each send's lead over its stamp,
+        one entry per send, oldest first.
 
         When the pacer admits a send it stamps the key's clock at grant +
         jitter, and it admits the next send on that key no sooner than one
@@ -272,19 +266,20 @@ class Stack:
         between stamps, so this is the spacing proof a wire gap cannot be.
 
         Each stamp is sampled after its send lands in the journal, within
-        one poll of it. ``ratelimit_stats`` reports the stamp as its age
-        against a clock read taken inside the call. The reference clocks
-        are read here BEFORE that call: the pacer's read can only be later,
-        so a reconstructed stamp is never later than the truth. It may be
-        earlier, by up to the bracket (how long the call took; the third
-        list), and the assertions add the bracket where an earlier stamp
-        would shrink a gap. A thread descheduled inside the bracket widens
-        the tolerance by exactly that much, and does nothing else.
+        one poll of it. ``ratelimit_stats`` reports the stamp as its age at
+        a clock read taken inside the call, so the limiter's clock is
+        wrapped for the sampler's duration to record those readings, and
+        each stamp is rebuilt from the very read that produced its age.
+        Nothing is estimated: a thread the OS deschedules anywhere in the
+        sampler cannot move a stamp, in either direction.
 
-        The lead is ``send time - stamp`` on the wall clock, read the same
-        way: never more than the truth, and zero or more for a send that
+        The lead is ``send time - stamp``: zero or more for a send that
         waited for the pacer, since it left at or after the stamp that
-        admitted it.
+        admitted it. The journal times a send on the wall clock and the
+        pacer stamps on the monotonic one; the two are put on one scale by
+        an offset from the narrowest of a few back-to-back probes
+        (``_narrowest_wall_offset``), which bounds the lead's error at
+        microseconds.
 
         One limit, stated: the pacer keeps a single stamp per key and a
         later grant overwrites it, so a sample taken a whole interval
@@ -294,21 +289,58 @@ class Stack:
         the assertion messages name. A per-send record would need the
         pacer to expose it.
         """
+        clock = self.framework.limiter._clock
+        readings: list[float] = []
+        original_now = clock.now
+
+        def recording_now() -> float:
+            """The limiter's clock while the sampler runs: it records every reading."""
+            value = original_now()
+            readings.append(value)
+            return value
+
         stamps: list[float] = []
         leads: list[float] = []
-        brackets: list[float] = []
-        for count in range(1, sends + 1):
-            landed = await self._wait_for_sends(channel, authors, count, limit, key)
-            wall, mono = time.time(), time.monotonic()
-            ages = (await self.framework.api.ratelimit_stats())["last_fire_ages"]
-            brackets.append(time.monotonic() - mono)
-            if key not in ages:
-                raise AssertionError(
-                    f"{key}: send {count} landed, but the pacer never stamped this key"
-                )
-            stamps.append(mono - ages[key])
-            leads.append(landed[count - 1] - (wall - ages[key]))
-        return stamps, leads, brackets
+        clock.now = recording_now
+        try:
+            for count in range(1, sends + 1):
+                landed = await self._wait_for_sends(channel, authors, count, limit, key)
+                before = len(readings)
+                ages = (await self.framework.api.ratelimit_stats())["last_fire_ages"]
+                if key not in ages:
+                    raise AssertionError(
+                        f"{key}: send {count} landed, but the pacer never stamped this key"
+                    )
+                if len(readings) == before:
+                    raise AssertionError(f"{key}: ratelimit_stats read no clock")
+                stamp = readings[-1] - ages[key]
+                stamps.append(stamp)
+                leads.append(landed[count - 1] - (stamp + self._narrowest_wall_offset()))
+        finally:
+            clock.now = original_now
+        return stamps, leads
+
+    @staticmethod
+    def _narrowest_wall_offset(probes: int = 5) -> float:
+        """``wall clock - monotonic clock``, from the narrowest of `probes`
+        back-to-back readings of both.
+
+        The two clocks tick together, so their difference is constant. What
+        can corrupt it is a thread descheduled between reading one and the
+        other; keeping the probe with the smallest span makes that unlikely,
+        and bounds the error by half of that span.
+        """
+        best_span = float("inf")
+        best_offset = 0.0
+        for _ in range(probes):
+            early = time.monotonic()
+            wall = time.time()
+            late = time.monotonic()
+            span = late - early
+            if span < best_span:
+                best_span = span
+                best_offset = wall - (early + late) / 2
+        return best_offset
 
     def grant_jitters(self, accounts: set[str], action: str, sends: int) -> list[float]:
         """The grant jitter each of the first `sends` tasks of `accounts`/`action`
@@ -330,6 +362,11 @@ class Stack:
     async def _wait_for_sends(
         self, channel: int, authors: set[int], count: int, limit: float, who: str
     ) -> list[float]:
+        """Journal times of the first `count` sends, once that many have landed.
+
+        Polls the journal. When `limit` runs out first, it fails naming `who`
+        and quoting the framework's newest log lines.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + limit
         while loop.time() < deadline:
@@ -416,7 +453,7 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             # by the pacer for a full interval after the one before, however
             # long the DM phase took, which is why this reads a flow of four
             # sends and not a request and a single chunk.
-            stamps, leads, brackets = await stack.pacing_stamps(
+            stamps, leads = await stack.pacing_stamps(
                 "alpha:message", GUILD_CHANNEL, alpha, sends=4
             )
             sent = stack.world.messages_of(GUILD_CHANNEL)
@@ -428,7 +465,7 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             # STRICT, on the pacer's own clock: consecutive stamps on the key
             # are a full interval apart whatever the load (Stack.pacing_stamps)
             jitters = stack.grant_jitters({"alpha"}, "message", sends=4)
-            self.assert_pacer_stamps_spaced(stamps, jitters, brackets)
+            self.assert_pacer_stamps_spaced(stamps, jitters)
             # STRICT, on the wire: no send left before the pacer admitted it
             self.assert_no_send_before_its_stamp(leads)
         finally:
@@ -658,7 +695,7 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
             # deadline rather than a fixed count of polls: four paced sends
             # are three 1.5s intervals (~t=4.5s) and instrumentation load
             # can stretch that — the sampler returns the moment the last lands
-            stamps, leads, brackets = await stack.pacing_stamps(
+            stamps, leads = await stack.pacing_stamps(
                 f"group:{group}:message", GUILD_CHANNEL, members, sends=4
             )
             await asyncio.sleep(0.3)
@@ -673,7 +710,7 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
             # STRICT, on the pacer's own clock: consecutive stamps on the
             # SHARED clock are a full interval apart (Stack.pacing_stamps)
             jitters = stack.grant_jitters(set(stack.user_ids), "message", sends=4)
-            self.assert_pacer_stamps_spaced(stamps, jitters, brackets)
+            self.assert_pacer_stamps_spaced(stamps, jitters)
             # STRICT, on the wire: no send left before the pacer admitted it
             self.assert_no_send_before_its_stamp(leads)
         finally:
