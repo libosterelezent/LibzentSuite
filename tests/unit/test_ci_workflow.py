@@ -50,7 +50,8 @@ RULESET_LINUX_CONTEXTS = tuple(f"unittest ({v})" for v in SUPPORTED_PYTHONS)
 #: ``python3;`` all invoke it.
 _BARE_PYTHON3 = re.compile(r"(?<![\w./#-])python3(?![\w.])")
 
-#: a ``#`` opens a comment only at the start of a word
+#: a ``#`` opens a comment only at the start of a word: at the line start,
+#: or right after one of these
 _COMMENT_PREFIXES = " \t;&|("
 
 
@@ -60,22 +61,30 @@ def _command_part(line: str) -> str:
     Cut at the first ``#`` that opens a comment. A ``#`` does that only
     outside quotes and at the start of a word: in ``echo '#'; python3 x`` it
     is a quoted character and the second command stays, ``a#b`` is one word,
-    and ``echo ok # python3`` loses its tail.
+    and ``echo ok # python3`` loses its tail. Outside single quotes a
+    backslash makes the next character literal, so ``\\"`` opens nothing and
+    ``\\#`` is an ordinary character.
     """
     quote = ""
+    in_word = False
     index = 0
     while index < len(line):
         char = line[index]
+        if quote != "'" and char == "\\":
+            index += 2
+            in_word = True
+            continue
         if quote:
-            if quote == '"' and char == "\\":
-                index += 2
-                continue
             if char == quote:
                 quote = ""
+            in_word = True
         elif char in "'\"":
             quote = char
-        elif char == "#" and (index == 0 or line[index - 1] in _COMMENT_PREFIXES):
+            in_word = True
+        elif char == "#" and not in_word:
             return line[:index]
+        else:
+            in_word = char not in _COMMENT_PREFIXES
         index += 1
     return line
 
@@ -211,6 +220,28 @@ class TestWorkflowSteps(unittest.TestCase):
         self.assertEqual(_bare_python3_lines("echo ok #python3"), [])
         # a hash that does not start a word is part of the word
         self.assertEqual(_bare_python3_lines("echo a#python3"), [])
+
+    def test_an_escaped_quote_opens_nothing(self) -> None:
+        # Outside single quotes a backslash makes the next character
+        # literal. The scanner used to open a string at the escaped quote
+        # and then took the hash for a comment, missing the command.
+        self.assertEqual(
+            _bare_python3_lines('echo \\" " # "; python3 -m pytest'),
+            ['echo \\" " # "; python3 -m pytest'],
+        )
+        self.assertEqual(
+            _bare_python3_lines("echo \\' ' # '; python3 x.py"),
+            ["echo \\' ' # '; python3 x.py"],
+        )
+        # an escaped hash is a literal character, not a comment
+        self.assertEqual(
+            _bare_python3_lines("echo \\# ; python3 x.py"), ["echo \\# ; python3 x.py"]
+        )
+        # an escaped quote INSIDE a string does not end it, so the hash
+        # after the string is a real comment
+        self.assertEqual(_bare_python3_lines('echo "a\\"b" # python3 x.py'), [])
+        # inside single quotes a backslash is literal and escapes nothing
+        self.assertEqual(_bare_python3_lines("echo '\\' # python3 x.py"), [])
 
     def test_the_bare_python3_probe_catches_every_shell_form(self) -> None:
         # The probe guards the workflow, and the workflow holds no offender
