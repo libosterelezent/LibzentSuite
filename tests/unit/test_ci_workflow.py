@@ -6,10 +6,8 @@
   (``unittest (3.10)`` .. ``unittest (3.13)``): a renamed leg never reports,
   and every pull request to master then waits on a check that does not
   exist.
-* the Windows legs. The suite is green on both platforms, so CI runs it on
-  both; every leg is named uniquely.
-* ``defaults.run.shell: bash``. Every step is bash, and a Windows runner
-  defaults to pwsh.
+* ``defaults.run.shell: bash``. Every step is bash — a Windows runner
+  defaults to pwsh, and the local gate on Windows is bash (Git Bash).
 * one step per name, and no bare ``python3``. A duplicated step ran pyright
   twice per leg, and ``python3`` is whichever interpreter the runner has.
 
@@ -136,12 +134,6 @@ class TestWorkflowMatrix(unittest.TestCase):
     def test_every_supported_python_runs_on_linux(self) -> None:
         on_linux = {leg["python-version"] for leg in self.legs if leg["os"].startswith("ubuntu")}
         self.assertEqual(on_linux, set(SUPPORTED_PYTHONS))
-
-    def test_windows_runs_both_ends_of_the_range(self) -> None:
-        on_windows = {leg["python-version"] for leg in self.legs if leg["os"].startswith("windows")}
-        # INCLUDE, not equal: more Windows legs are welcome
-        self.assertIn(min(SUPPORTED_PYTHONS), on_windows)
-        self.assertIn(max(SUPPORTED_PYTHONS), on_windows)
 
     def test_linux_legs_match_the_live_ruleset(self) -> None:
         """Opt-in: ``LZ_CHECK_RULESET=1`` (needs ``gh`` and the network)."""

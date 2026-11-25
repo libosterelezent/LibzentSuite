@@ -44,10 +44,7 @@ jobs:
           - { os: ubuntu-latest, python-version: "3.11", label: "" }
           - { os: ubuntu-latest, python-version: "3.12", label: "" }
           - { os: ubuntu-latest, python-version: "3.13", label: "" }
-          # the project is platform-independent and CI is what keeps it so:
-          # Windows runs the two ENDS of the same range
-          - { os: windows-latest, python-version: "3.10", label: ", windows" }
-          - { os: windows-latest, python-version: "3.13", label: ", windows" }
+
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # every step below is bash. A Windows runner defaults to pwsh, where

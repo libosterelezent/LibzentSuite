@@ -46,7 +46,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 
 - **Agent rules and binding contracts** live only in `AGENTS.md` and `docs/architecture/`. Don't put coding rules, agent instructions, or lint policy in `docs/` or `knowledgebase/`.
 - **`docs/`** is the user-facing guide: installation, running the suite from the CLI and the UI, environment variables, commands, and plugin-author references. Keep it current with every feature or command change. It describes the code; when they disagree, the code wins.
-- **Platform note:** the project is platform-independent — no platform-only modules, and one suite that runs green on Linux and native Windows. CI runs the suite on both; keep both statements true.
+- **Platform note:** the project is platform-independent — no platform-only modules, and one suite that runs green on Linux and native Windows. CI runs it on Linux; the local gate covers Windows; keep both statements true.
 - **`knowledgebase/`** is local-only and append-only. Don't rewrite existing entries. Correct an earlier statement with a dated addendum. Record facts and decisions, never new rules.
 - **`dump/`** holds retired code. Leave it alone.
 - Public classes, functions, and subsystems get a docstring covering their contract. Add an append-only knowledgebase reference for them.

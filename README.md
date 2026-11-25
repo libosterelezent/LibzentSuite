@@ -74,12 +74,12 @@ Development and CI tooling (ruff, pyright, pytest + xdist) lives in the `dev`
 dependency group, which `uv sync --frozen` installs.
 
 > **Platforms** — the project is platform-independent: no platform-only
-> modules, and one suite that is green on every OS. CI runs the suite on
-> Linux (3.10–3.13) and on Windows (3.10 and 3.13); the benchmark and the
-> local gate run natively on Windows too, where seven capability-bound tests
-> skip with their reason (POSIX permission bits, symlinks without Developer
-> Mode). The commands below write `python3` for an ACTIVATED project
-> environment — `uv sync` installs it but does not activate it, so run
+> modules, and one suite that runs green on every OS. CI runs it on Linux
+> (3.10–3.13); the local gate and the benchmark run natively on Windows
+> too, where seven capability-bound tests skip with their reason (POSIX
+> permission bits, symlinks without Developer Mode). The commands below
+> write `python3` for an ACTIVATED project environment — `uv sync`
+> installs it but does not activate it, so run
 > `source .venv/bin/activate` first, or prefix any command with
 > `uv run --frozen` instead; that form needs no activation and is the one to
 > use on Windows.
@@ -299,8 +299,8 @@ additionally needs the user-account client fork `better.py-self`
 require a live network connection.
 
 > **Runtime environment note** — the project is platform-independent: its
-> whole test suite runs green on Linux and on native Windows, and CI runs
-> it on both.
+> whole test suite runs green on Linux and on native Windows. CI runs it
+> on Linux; the local gate (`scripts/local-ci.sh`, bash) covers Windows.
 
 ## Architecture: who calls what
 
