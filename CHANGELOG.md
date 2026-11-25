@@ -97,6 +97,13 @@ nothing can ship until that hold is lifted; see
   age. Reading the clocks around the call, as it first did, let a thread
   the OS descheduled in between move a stamp: later, and a healthy send
   failed; earlier, and a send that left early passed.
+- The pacing sampler refuses to record a stamp that does not advance:
+  two sends matched to one grant mean the sampler fell behind, and the
+  failure says that instead of reporting a zero gap that looked like a
+  pacing violation.
+- The workload test waits for the TaskCompleted event itself before
+  reading the log tail. The audit rows it waited for are written before
+  the event is published, so the assertion could race.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
   plugin BEFORE any state moves (an unknown account used to get a
