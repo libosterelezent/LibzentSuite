@@ -169,8 +169,7 @@ class TestWorkflowMatrix(unittest.TestCase):
             for rule in json.loads(rules)
             if rule["type"] == "required_status_checks"
         )
-        linux = [_leg_name(self.job, leg) for leg in self.legs if leg["os"].startswith("ubuntu")]
-        self.assertEqual(sorted(linux), sorted(c["context"] for c in required))
+        self.assertEqual(sorted(self.names), sorted(c["context"] for c in required))
 
 
 class TestWorkflowSteps(unittest.TestCase):

@@ -91,7 +91,14 @@ class ProcessSampler:
 
     # -------------------------------------------------------------- probes
     def _cpu(self) -> tuple[float, tuple[float, float] | None]:
-        """(total CPU seconds, (user, system) split or None) for the process."""
+        """(total CPU seconds, (user, system) split or None) for the process.
+
+        The total is only comparable between two calls when both used the
+        same source: psutil can error on one call and not the other, and
+        ``time.process_time()`` and psutil's user+system are different
+        clocks. The split is None when psutil is unavailable or errored;
+        the CALLER must not subtract totals across sources.
+        """
         if psutil is not None and self._proc is not None:
             try:
                 times = self._proc.cpu_times()

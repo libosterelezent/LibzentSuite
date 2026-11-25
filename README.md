@@ -82,7 +82,7 @@ dependency group, which `uv sync --frozen` installs.
 > project environment — `uv sync` installs it but does not activate it,
 > so run `source .venv/bin/activate` first, or prefix any command with
 > `uv run --frozen` instead; that form needs no activation and is the one
-> to use on Windows.
+> to use on Windows (where the interpreter is `python`, not `python3`).
 > sync with the `UV_PYTHON` environment variable: `export UV_PYTHON=3.13`
 > in a POSIX shell or Git Bash, `set UV_PYTHON=3.13` in cmd,
 > `$env:UV_PYTHON = "3.13"` in PowerShell. The

@@ -59,12 +59,13 @@ PACING_INTERVAL = 1.6
 #: pacing floor slack: the violation threshold is the interval minus this.
 #: The pacer stamps its spacing clock at the EXPECTED wire instant (grant +
 #: jitter), so a send delayed past that instant by load compresses the NEXT
-#: measured gap by exactly that lateness. Lateness is therefore part of
-#: every measured gap: the gate's coverage leg on Windows measured 1.473s
-#: between two sends of this healthy pacer. The check shows that pacing is
-#: IN FORCE (a bypass puts consecutive sends a few hundredths of a second
-#: apart); it cannot show the hard safety floor on the wire. 300ms is 2.4x
-#: that measured lateness. The floor itself is what the limiter is
+#: measured gap by exactly that lateness. The scheduler also writes the
+#: outbound audit row AFTER the history write, so a slow history write
+#: delays that row too — the measured gap includes both effects. The
+#: check shows that pacing is IN FORCE (a bypass puts consecutive sends
+#: a few hundredths of a second apart); it cannot show the hard safety
+#: floor on the wire. 300ms is the slack for both lateness and
+#: audit-recording delay. The floor itself is what the limiter is
 #: configured with, which needs no clock to assert.
 PACING_TOLERANCE = 0.3
 #: simulated 429 wait and the tolerance when verifying the retry gap

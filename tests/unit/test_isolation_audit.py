@@ -375,7 +375,9 @@ class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
         start = loop.time()
         await asyncio.gather(gate.acquire(), gate.acquire(), gate.acquire())
         elapsed = loop.time() - start
-        self.assertGreaterEqual(elapsed, 2 * 0.08)  # 3 identifies, 2 gaps
+        # a loaded loop can wake the timer slightly early (Windows
+        # resolution ~15ms): 10ms of slack absorbs it
+        self.assertGreaterEqual(elapsed, 2 * 0.08 - 0.01)
 
     async def test_connect_wires_gate_as_before_identify_hook(self) -> None:
         mod = _fake_discord_module()
