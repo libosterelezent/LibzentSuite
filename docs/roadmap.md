@@ -23,10 +23,6 @@ scheduling, rate-limit policies + the safety floor, credentials
 (encrypted at rest), logs and audit, simulation, workspace
 orchestration. Plugins stay independent of the interface layer.
 
-## Current State (2026-11-21)
-
-**1,678 tests green, CI green, pyright ZERO** (equality ratchet at
-`.github/pyright-baseline`). pytest + xdist owns the runner (`-n
 ## Current State (2026-11-25)
 
 **1,681 tests green, CI green, pyright ZERO** (equality ratchet at
@@ -44,10 +40,29 @@ landed with honest dependency extras (`[api]`, `[ui]`, `[all]`)
 ## Active Queue
 
 *In priority order. The engine, the data model, and every quality
-gate are done — what remains is connective: wiring the interfaces,
-then shipping the first release.*
+gate are done — what remains is the plugin surface, the core
+infrastructure that observes it, then the interfaces, then the
+first release.*
 
-### 1 — The Flet UI (the real interface)
+### 1 — Client capability adoption (the plugin surface)
+
+`docs/plans/client-capability-adoption.md`. Track B first: the
+`expect` primitive — a send-coupled reactive window that subscribes
+before the send, race-free by construction — because it unblocks
+game logic today. Then Track A reads (search, history, pins), then
+Track A lifecycle (edit, delete, reply, forward, ack). Track C
+(the direct client connection) is already shipped.
+
+### 2 — Overseer + Task Runner (core infrastructure)
+
+`docs/plans/overseer-future-planned-lifecycle-upgrade.md`. Overseer
+as a first-class monitoring service (health, security, data-flow
+observability), then the Task Runner — the future executor that
+registers with Overseer and replaces the scheduler's task dispatch
+with a richer, observable runtime. The scheduler stays until the
+runner proves itself.
+
+### 3 — The Flet UI (the real interface)
 
 The spec is the owner's contract: `docs/plans/flet_ui_design_contract.md`
 (strict ownership rules, FastAPI boundary, native-Flet-first component
@@ -57,7 +72,7 @@ presets**, Tasks, Logs/Audit. Today's `interfaces/ui/` is a four-page
 shell (status/accounts/workspaces/logs) — this replaces it with the
 contract's coherent operational control surface.
 
-### 2 — FastAPI wiring (serve the API)
+### 4 — FastAPI wiring (serve the API)
 
 `build_app` exists and is tested; nothing boots it. `main.py` gains a
 serve mode (uvicorn, the `[api]` extra now in the lock), the token
@@ -65,22 +80,18 @@ seam surfaces via env/config, and the health/status routes get their
 first live consumer (the Flet shell's ApiClient already points at the
 right URL shape).
 
-### 3 — WS event bridge (live events)
+### 5 — WS event bridge (live events)
 
 `/api/ws` is a 2s status-poll placeholder. The typed EventBus exists —
 bridge it: subscribe per-connection, forward account/plugin/task events
 as JSON frames, backpressure-bounded. The Flet pages want live
 updates, not polling.
 
-### 4 — Release enablement (when you say go)
+### 6 — Release enablement (when you say go)
 
 Lift the `v*` tag ruleset hold, cut `v0.1.0` through the pre-built
 pipeline (build from the exact tag, CHANGELOG notes, artifacts). The
 structure is tested and waiting.
-
----
-
-## Open Ideas (unscheduled)
 
 [ ] Framework control from accounts — the replacement method for the
     retired chat verbs (admin/prefix/help management) — owner design
