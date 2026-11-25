@@ -441,8 +441,16 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             self.assertTrue(hist)
             self.assertTrue(all(h["status"] == "completed" for h in hist))
 
-            # structured logging saw the lifecycle
-            logs = await stack.framework.api.logs_tail(n=50)
+            # structured logging saw the lifecycle. The audit row a send
+            # leaves behind is written BEFORE the TaskCompleted event is
+            # published, so the audit poll above is not a barrier for it:
+            # wait for the event itself, bounded, then assert.
+            logs: list[dict[str, Any]] = []
+            for _ in range(100):
+                logs = await stack.framework.api.logs_tail(n=50)
+                if any(entry.get("event") == "TaskCompleted" for entry in logs):
+                    break
+                await asyncio.sleep(0.05)
             events = [entry.get("event") for entry in logs if entry.get("event")]
             self.assertIn("TaskCompleted", events)
             self.assertIn("AccountConnected", events)
