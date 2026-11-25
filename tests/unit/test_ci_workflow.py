@@ -2,12 +2,11 @@
 
 ``.github/workflows/tests.yml`` is read as data. What is pinned here:
 
-* the Linux check names. master's ruleset requires four contexts BY NAME
+* the check names. master's ruleset requires four contexts BY NAME
   (``unittest (3.10)`` .. ``unittest (3.13)``): a renamed leg never reports,
   and every pull request to master then waits on a check that does not
   exist.
-* ``defaults.run.shell: bash``. Every step is bash — a Windows runner
-  defaults to pwsh, and the local gate on Windows is bash (Git Bash).
+* every leg runs on Windows, the owner's platform, under bash.
 * one step per name, and no bare ``python3``. A duplicated step ran pyright
   twice per leg, and ``python3`` is whichever interpreter the runner has.
 
@@ -122,20 +121,24 @@ class TestWorkflowMatrix(unittest.TestCase):
     def test_leg_names_are_unique(self) -> None:
         self.assertEqual(sorted(self.names), sorted(set(self.names)))
 
-    def test_linux_legs_are_exactly_the_required_contexts(self) -> None:
-        linux = [_leg_name(self.job, leg) for leg in self.legs if leg["os"].startswith("ubuntu")]
+    def test_legs_are_exactly_the_required_contexts(self) -> None:
         self.assertEqual(
-            sorted(linux),
+            sorted(self.names),
             sorted(RULESET_LINUX_CONTEXTS),
             "master's ruleset requires these four contexts by name: a renamed "
             "leg never reports and every PR to master then blocks",
         )
 
-    def test_every_supported_python_runs_on_linux(self) -> None:
-        on_linux = {leg["python-version"] for leg in self.legs if leg["os"].startswith("ubuntu")}
-        self.assertEqual(on_linux, set(SUPPORTED_PYTHONS))
+    def test_every_supported_python_runs(self) -> None:
+        self.assertEqual({leg["python-version"] for leg in self.legs}, set(SUPPORTED_PYTHONS))
 
-    def test_linux_legs_match_the_live_ruleset(self) -> None:
+    def test_every_leg_runs_on_windows(self) -> None:
+        self.assertTrue(
+            all(leg["os"].startswith("windows") for leg in self.legs),
+            f"every leg on windows, saw: {[leg['os'] for leg in self.legs]}",
+        )
+
+    def test_legs_match_the_live_ruleset(self) -> None:
         """Opt-in: ``LZ_CHECK_RULESET=1`` (needs ``gh`` and the network)."""
         if os.environ.get("LZ_CHECK_RULESET") != "1":
             self.skipTest("set LZ_CHECK_RULESET=1 to compare against the live ruleset")

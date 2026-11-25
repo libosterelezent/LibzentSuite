@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     name: Build sdist + wheel
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -28,7 +28,7 @@ jobs:
           uv build
           ls -1 dist/
 
-  # The job name is load-bearing. master's ruleset requires the four Linux
+  # The job name is load-bearing. master's ruleset requires the four
   # contexts BY NAME ("unittest (3.10)" .. "unittest (3.13)"), so each leg
   # carries its name suffix LITERALLY in the matrix — no expression logic
   # between the matrix and the names a ruleset depends on.
@@ -40,15 +40,15 @@ jobs:
         # the full support floor: 3.10 (the declared minimum) through
         # the newest stable — a green 3.11 proved nothing about the rest
         include:
-          - { os: ubuntu-latest, python-version: "3.10", label: "" }
-          - { os: ubuntu-latest, python-version: "3.11", label: "" }
-          - { os: ubuntu-latest, python-version: "3.12", label: "" }
-          - { os: ubuntu-latest, python-version: "3.13", label: "" }
+          - { os: windows-latest, python-version: "3.10", label: "" }
+          - { os: windows-latest, python-version: "3.11", label: "" }
+          - { os: windows-latest, python-version: "3.12", label: "" }
+          - { os: windows-latest, python-version: "3.13", label: "" }
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    # every step below is bash. A Windows runner defaults to pwsh, where
-    # $(...), && and [ ] all fail; `bash` there is the Git for Windows
+    # every step below is bash: a Windows runner defaults to pwsh, where
+    # $(...), && and [ ] all fail. `bash` there is the Git for Windows
     # shell the local gate was validated in.
     defaults:
       run:
