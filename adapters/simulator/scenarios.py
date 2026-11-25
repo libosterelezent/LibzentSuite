@@ -64,13 +64,14 @@ PACING_INTERVAL = 1.6
 #: delays that row too — the measured gap includes both effects. The
 #: check shows that pacing is IN FORCE (a bypass puts consecutive sends
 #: a few hundredths of a second apart); it cannot show the hard safety
-#: floor on the wire. 300ms is the slack for both lateness and
-#: audit-recording delay. The floor itself is what the limiter is
-#: configured with, which needs no clock to assert.
-PACING_TOLERANCE = 0.3
+#: floor on the wire. 450ms is the slack for both lateness and
+#: audit-recording delay (observed in-gate 2026-11-25: 0.32s of
+#: compression - a 0.203s stalled timer callback on top of the
+#: history write; 300ms was one stall short of it).
+PACING_TOLERANCE = 0.45
 #: simulated 429 wait and the tolerance when verifying the retry gap
 RETRY_AFTER = 0.8
-RETRY_TOLERANCE = 0.3
+RETRY_TOLERANCE = 0.45  # same lateness physics: the retry's audit row rides the same pipeline
 #: grace for a send already mid-flight when the estop cancellation lands
 #: (the next paced chunk would be >= 1.5s past the halt — anything inside
 #: the grace is an in-flight completion, not a pipeline leak)

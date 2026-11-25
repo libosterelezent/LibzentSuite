@@ -16,7 +16,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from adapters.simulator.client import SimClient
 from adapters.simulator.world import SimWorld
@@ -24,6 +24,9 @@ from core.bootstrap import build
 from core.credentials import Credentials
 from core.errors import AccountError
 from database.db import Database
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 OWNER_ID = 1001
 PRIMARY_BOT_ID = 999_999
@@ -254,10 +257,19 @@ class Stack:
         await self._wait_for_sends(channel, {self.user_ids[account]}, count, limit, account)
 
     async def pacing_stamps(
-        self, key: str, channel: int, authors: set[int], sends: int, limit: float = 30.0
+        self,
+        key: str,
+        channel: int,
+        authors: set[int],
+        sends: int,
+        limit: float = 30.0,
+        *,
+        first: int = 1,
     ) -> tuple[list[float], list[float]]:
         """The pacer's stamps for `key` and each send's lead over its stamp,
-        one entry per send, oldest first.
+        one entry per send, oldest first. ``first`` is the 1-based journal
+        index the sampled window starts at (a re-measurement window; 1
+        by default).
 
         When the pacer admits a send it stamps the key's clock at grant +
         jitter, and it admits the next send on that key no sooner than one
@@ -304,7 +316,7 @@ class Stack:
         leads: list[float] = []
         clock.now = recording_now
         try:
-            for count in range(1, sends + 1):
+            for count in range(first, first + sends):
                 landed = await self._wait_for_sends(channel, authors, count, limit, key)
                 before = len(readings)
                 ages = (await self.framework.api.ratelimit_stats())["last_fire_ages"]
@@ -329,6 +341,45 @@ class Stack:
         finally:
             clock.now = original_now
         return stamps, leads
+
+    async def pacing_stamps_with_retry(
+        self,
+        key: str,
+        channel: int,
+        authors: set[int],
+        sends: int,
+        resubmit: Callable[[], Awaitable[None]],
+        limit: float = 30.0,
+        attempts: int = 3,
+    ) -> tuple[list[float], list[float], int]:
+        """pacing_stamps with a re-measurement path for the sampler's own limit.
+
+        "pacing cannot be judged" is the sampler's honesty limit - a poll
+        more than an interval late means the sample fell behind (multi-
+        second callback stalls on a busy desktop; observed in-gate
+        2026-11-25) - and it is NOT a verdict about pacing. On that
+        specific error the flow is re-triggered (``resubmit``) and the
+        FRESH window is measured. A real spacing violation raises a
+        different assertion and never takes this path.
+
+        Returns ``(stamps, leads, first)``: ``first`` is the 1-based
+        journal index the returned window starts at, so jitter slices
+        and send-count asserts line up with the window actually
+        measured.
+        """
+        first = 1
+        for attempt in range(attempts):
+            try:
+                stamps, leads = await self.pacing_stamps(
+                    key, channel, authors, sends, limit, first=first
+                )
+                return stamps, leads, first
+            except AssertionError as exc:
+                if "pacing cannot be judged" not in str(exc) or attempt == attempts - 1:
+                    raise
+                first += sends
+                await resubmit()
+        raise AssertionError(f"{key}: unreachable - the loop returns or raises")
 
     @staticmethod
     def _narrowest_wall_offset(probes: int = 5) -> float:
@@ -467,22 +518,34 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
         try:
             alpha = {stack.user_ids["alpha"]}
             await stack.owner_says("export")
+
             # "$dump", then three chunks. Every chunk after the first is held
             # by the pacer for a full interval after the one before, however
             # long the DM phase took, which is why this reads a flow of four
             # sends and not a request and a single chunk.
-            stamps, leads = await stack.pacing_stamps(
-                "alpha:message", GUILD_CHANNEL, alpha, sends=4
+            async def rerun_export() -> None:
+                await stack.owner_says("export")
+
+            # "pacing cannot be judged" is the sampler's honesty limit (a
+            # poll more than an interval late on a busy desktop, observed
+            # in-gate 2026-11-25), not a pacing verdict: re-run the flow
+            # and measure the fresh window; a REAL spacing violation
+            # never takes that path.
+            stamps, leads, first = await stack.pacing_stamps_with_retry(
+                "alpha:message", GUILD_CHANNEL, alpha, 4, rerun_export
             )
             sent = stack.world.messages_of(GUILD_CHANNEL)
-            self.assertEqual(sum(1 for m in sent if m.startswith("$exporter ")), 3)
+            self.assertEqual(
+                sum(1 for m in sent if m.startswith("$exporter ")),
+                3 * ((first + 3) // 4),  # one flow (3 chunks) per attempt
+            )
             # STRICT, and no clock involved: what paces these sends is the
             # effective policy, and it is exactly the configured interval
             effective = await stack.framework.api.ratelimit_effective("message", "alpha")
             self.assertEqual(effective["interval"], POLICY_INTERVAL)
             # STRICT, on the pacer's own clock: consecutive stamps on the key
             # are a full interval apart whatever the load (Stack.pacing_stamps)
-            jitters = stack.grant_jitters({"alpha"}, "message", sends=4)
+            jitters = stack.grant_jitters({"alpha"}, "message", sends=first + 3)[first - 1 :]
             self.assert_pacer_stamps_spaced(stamps, jitters)
             # STRICT, on the wire: no send left before the pacer admitted it
             self.assert_no_send_before_its_stamp(leads)
@@ -700,25 +763,34 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
         await api.accounts_start()
         try:
             scheduler = stack.framework.scheduler
-            for account in ("alpha", "beta", "alpha", "beta"):
-                scheduler.submit(
-                    account,
-                    PROBE,
-                    "message",
-                    channel_id=GUILD_CHANNEL,
-                    content=f"hi-{account}",
-                )
+
+            async def submit_round() -> None:
+                for account in ("alpha", "beta", "alpha", "beta"):
+                    scheduler.submit(
+                        account,
+                        PROBE,
+                        "message",
+                        channel_id=GUILD_CHANNEL,
+                        content=f"hi-{account}",
+                    )
+
+            await submit_round()
             members = set(stack.user_ids.values())
             # sample the shared clock's stamp as each send lands, to a
             # deadline rather than a fixed count of polls: four paced sends
             # are three 1.5s intervals (~t=4.5s) and instrumentation load
-            # can stretch that — the sampler returns the moment the last lands
-            stamps, leads = await stack.pacing_stamps(
-                f"group:{group}:message", GUILD_CHANNEL, members, sends=4
+            # can stretch that — the sampler returns the moment the last
+            # lands. "pacing cannot be judged" is the sampler's honesty
+            # limit — a poll more than an interval late (multi-second
+            # callback stalls on a busy desktop, observed in-gate
+            # 2026-11-25) — not a pacing verdict: the retry re-measures a
+            # fresh window; a REAL spacing violation never takes that path.
+            stamps, leads, first = await stack.pacing_stamps_with_retry(
+                f"group:{group}:message", GUILD_CHANNEL, members, 4, submit_round
             )
             await asyncio.sleep(0.3)
             history = [m for m in stack.world.messages_of(GUILD_CHANNEL) if m.startswith("hi-")]
-            self.assertEqual(len(history), 4)
+            self.assertEqual(len(history), first + 3)  # four sends per attempt
             # STRICT, no clock: every member is paced at the configured
             # interval on its own (account, message) scope — the shared group
             # clock is what serializes the members against each other
@@ -727,7 +799,9 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(effective["interval"], POLICY_INTERVAL)
             # STRICT, on the pacer's own clock: consecutive stamps on the
             # SHARED clock are a full interval apart (Stack.pacing_stamps)
-            jitters = stack.grant_jitters(set(stack.user_ids), "message", sends=4)
+            jitters = stack.grant_jitters(set(stack.user_ids), "message", sends=first + 3)[
+                first - 1 :
+            ]
             self.assert_pacer_stamps_spaced(stamps, jitters)
             # STRICT, on the wire: no send left before the pacer admitted it
             self.assert_no_send_before_its_stamp(leads)

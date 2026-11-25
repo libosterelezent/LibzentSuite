@@ -14,7 +14,7 @@ from core.account_manager.lifecycle import (
     _TokenBucket,
 )
 from core.errors import AccountError
-from tests.unit.helpers import make_manager
+from tests.unit.helpers import make_manager, wait_until_async
 
 
 class _ManualClock:
@@ -174,8 +174,16 @@ class GovernorManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         h.manager._lifecycle = gov
         out = h.manager.emergency_stop("alpha")  # must NOT raise
         self.assertTrue(out["stop_initiated"])
-        await asyncio.sleep(0.1)
-        self.assertEqual(h.manager.get("alpha").runtime.status.value, "stopped")
+        # the status flip is async: poll the observable instead of
+        # sleeping past it (a stalled loop can outrun any fixed sleep
+        # - observed in-gate 2026-11-25)
+        self.assertTrue(
+            await wait_until_async(
+                lambda: h.manager.get("alpha").runtime.status.value == "stopped",
+                timeout=5.0,
+            ),
+            "the estop must stop the account with the governor bucket drained",
+        )
 
     async def test_remove_forgets_pacer(self) -> None:
         h = make_manager()

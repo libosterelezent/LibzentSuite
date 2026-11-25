@@ -26,11 +26,14 @@ nothing can ship until that hold is lifted; see
   dev group for flake hunts (runner-side use only — the gate never
   auto-reruns a failure).
 - The push protocol is machine-enforced: `scripts/local-ci.sh`
-  self-installs a `pre-push` hook and, on its green path, stamps the
-  tree it validated (the index tree); the hook refuses any push whose
-  HEAD tree has no matching stamp. AGENTS.md §10 tightened to match
-  — no equivalent-evidence substitutes for the gate, no authorizations
-  carried over from plans or summaries.
+  self-installs a `pre-push` hook and, on its green path, stamps
+  the tree it validated (the index tree — the gate fails fast
+  on unstaged tracked changes, so the tested tree and the
+  stamped tree are the same); the hook reads every update git
+  feeds it and refuses any push whose OUTGOING tree has no
+  matching stamp. AGENTS.md §10 tightened to match — no
+  equivalent-evidence substitutes for the gate, no
+  authorizations carried over from plans or summaries.
 
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);
@@ -83,6 +86,14 @@ nothing can ship until that hold is lifted; see
   runner took 5.014s (294.9859 against a 295.0 floor). The
   bound now tracks measured elapsed (300 — elapsed — 0.25s),
   which is what the test actually means.
+- The pacing sampler's honesty limit is a re-measurement, not a red
+  gate: "pacing cannot be judged for this run" fires when a poll lands
+  more than an interval late (multi-second callback stalls on a busy
+  desktop, observed in-gate 2026-11-25) — a limit of the MEASUREMENT,
+  not a verdict about pacing. `Stack.pacing_stamps` gained a `first`
+  window offset and `pacing_stamps_with_retry` re-triggers the flow
+  and measures the fresh window (a real spacing violation never takes
+  that path); both pacing tests use it.
 - Portability defects the first native-Windows run exposed: a hard
   `import resource` made the whole benchmark package unimportable;
   exception locations were built with a `/` split that returns the whole
