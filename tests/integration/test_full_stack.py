@@ -281,13 +281,14 @@ class Stack:
         (``_narrowest_wall_offset``), which bounds the lead's error at
         microseconds.
 
-        One limit, stated: the pacer keeps a single stamp per key and a
-        later grant overwrites it, so a sample taken a whole interval
-        after its send's own grant would read that later stamp. That takes
-        a send or a poll more than an interval late (209ms is the most
-        measured), and it shows as a negative lead or a zero gap, which
-        the assertion messages name. A per-send record would need the
-        pacer to expose it.
+        One limit, stated and detected: the pacer keeps a single stamp per
+        key and a later grant overwrites it, so a sample taken a whole
+        interval after its send's own grant would read that later stamp.
+        That takes a send or a poll more than an interval late (209ms is
+        the most measured). The sampler refuses to record a stamp that
+        does not advance: two sends matched to one grant mean it fell
+        behind, and that is reported as exactly that, not as a pacing
+        violation. A per-send record would need the pacer to expose it.
         """
         clock = self.framework.limiter._clock
         readings: list[float] = []
@@ -314,6 +315,15 @@ class Stack:
                 if len(readings) == before:
                     raise AssertionError(f"{key}: ratelimit_stats read no clock")
                 stamp = readings[-1] - ages[key]
+                if stamps and stamp <= stamps[-1]:
+                    # two sends matched to one grant: the sampler fell
+                    # behind, and the send between these samples had its
+                    # grant overwritten before it could be read
+                    raise AssertionError(
+                        f"{key}: the sampler fell behind between send {count - 1} and "
+                        f"send {count}: both matched the same grant (stamp {stamp:.3f}); "
+                        "pacing cannot be judged for this run"
+                    )
                 stamps.append(stamp)
                 leads.append(landed[count - 1] - (stamp + self._narrowest_wall_offset()))
         finally:
