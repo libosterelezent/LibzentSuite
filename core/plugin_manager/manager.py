@@ -1092,9 +1092,11 @@ class PluginManager:
         Every teardown path (deactivate, reload, the late-activation
         compensation) routes through here. A per-runtime event serializes
         concurrent attempts: a second teardown arriving while the first
-        is still awaiting an unload hook WAITS (bounded) and then leaves
-        — firing on_unload twice ran non-idempotent plugin cleanup
-        concurrently (review pass-6).
+        is in flight waits (bounded) on the OWNING TASK's outcome — it
+        returns if that attempt completed, TAKES OVER if it was
+        interrupted (the owed hooks re-run), and leaves only when the
+        owner is still genuinely live (firing on_unload twice ran
+        non-idempotent plugin cleanup concurrently, review pass-6).
 
         ``was_active``/``was_loaded`` default to the runtime's CURRENT
         flags; callers that mutated flags earlier (reload blocks
@@ -1138,17 +1140,32 @@ class PluginManager:
                 break
             # a LIVE attempt is in flight — wait bounded for its outcome
             if waited:
-                return  # bounded patience: the live owner owns the hooks
-            waited = True
-            try:
-                await asyncio.wait_for(ev.wait(), timeout=self._teardown_wait_timeout_s)
-            except asyncio.TimeoutError:
                 self._logger.warning(
                     "teardown of %s on %s did not settle within %.1fs",
                     runtime.name,
                     account,
                     self._teardown_wait_timeout_s,
                 )
+                return  # bounded patience: the live owner owns the hooks
+            waited = True
+            # Wait for the OWNER TASK, not the proxy event: an abandoned
+            # owner never sets the event, so an event-only wait burns the
+            # full patience before every takeover — and its timeout shares
+            # the race below. Waiting on the task wakes us at the owner's
+            # completion (a prompt takeover) with the timeout only
+            # bounding a genuinely parked owner; asyncio.wait never
+            # cancels what it waits on.
+            await asyncio.wait({owner}, timeout=self._teardown_wait_timeout_s)
+            # DRAIN (loop-traced 2026-11-25): the wait can return on its
+            # own timeout in the SAME ready-batch that carries the
+            # owner's cancellation — the timer pop queues our wakeup
+            # directly, while the owner's unwind (queued by the
+            # canceller's callback) is deferred past the batch snapshot,
+            # so a re-check made now reads a decided abandonment as a
+            # live owner and bails. One yield runs every already-queued
+            # step first; the re-check below then re-derives the true
+            # state.
+            await asyncio.sleep(0)
             if ev.is_set():
                 # that attempt COMPLETED — the hooks ran exactly once
                 return
