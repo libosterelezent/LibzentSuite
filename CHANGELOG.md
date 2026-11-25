@@ -16,6 +16,22 @@ nothing can ship until that hold is lifted; see
 
 ## [Unreleased]
 
+### Added
+- Anti-flake tooling for the test suite: every test now carries a
+  120 s per-test hang ceiling (`pytest-timeout`, thread method,
+  configured in `pyproject.toml` — a hang fails by name with every
+  thread's stack dumped, instead of a leg dying at its ceiling with no
+  attribution); `wait_until_async` lands in `tests/unit/helpers.py` as
+  the canonical observable-poll wait; `pytest-rerunfailures` joins the
+  dev group for flake hunts (runner-side use only — the gate never
+  auto-reruns a failure).
+- The push protocol is machine-enforced: `scripts/local-ci.sh`
+  self-installs a `pre-push` hook and, on its green path, stamps the
+  tree it validated (the index tree); the hook refuses any push whose
+  HEAD tree has no matching stamp. AGENTS.md §10 tightened to match
+  — no equivalent-evidence substitutes for the gate, no authorizations
+  carried over from plans or summaries.
+
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);
   `unittest discover` retired — each CI/gate leg drops from ~7.5
@@ -32,11 +48,41 @@ nothing can ship until that hold is lifted; see
   memory as unavailable — never zero — where neither can observe the
   process. The suite is green on native Windows (seven capability-bound
   tests skip with their reason); the local gate and `scripts/run_tests.sh`
-  run from Git Bash. CI runs the suite on Linux; the local gate covers
-  Windows. The duplicated pyright step is gone, and the step now parses
+  run from Git Bash. CI runs the suite on Windows (the owner's
+  platform) on 3.10; the local gate proves the same suite on any
+  machine, Linux included. The duplicated pyright step is gone, and the
+  step now parses
   its count with the project's own interpreter.
+- The local gate runs ONE suite leg (3.10 + coverage) instead of
+  two (3.10 plain; 3.13 + coverage): CI runs 3.10 only and never
+  ran the 3.13 leg — duplicated effort costing ~10 minutes per
+  gate run. The coverage floor is now measured on the 3.10 leg,
+  and the local `.venv` matches the gate interpreter.
 
 ### Fixed
+- Two timing flakes the first Windows CI run of the portability branch
+  exposed: the quiet-sender collector raced its own 0.05 s idle timeout
+  against a 0.02 s staging sleep (now 0.5 s vs 0.1 s — 5x margin), and
+  the PerfCollector p50 assertion hit Windows timer quantization (a
+  10 ms sleep measured 3.8 ms on the ~15.6 ms tick grid — now a 50 ms
+  sleep with a 20 ms floor, which undershoot cannot cross).
+- The teardown takeover race (reproduced deterministically,
+  2026-11-25): a second teardown waiting on an in-flight one
+  could observe an already-cancelled owner as still live when
+  its patience expired in the same event-loop batch as the
+  cancellation — it bailed, and the interrupted cleanup
+  The waiter now waits on the owning TASK's outcome (a prompt
+  takeover when the owner completes within patience), then drains
+  one loop turn before re-checking: the drain runs every
+  already-queued step first — including the owner's unwind — so
+  a decided abandonment is never misread as a live owner, and a
+  genuinely parked owner still bounds the wait. Regression test
+  included (coalesced-deadline coercion; fails on 3.12+ pre-fix).
+- The restart-matrix cooldown assertion bounded the whole
+  restart sequence at 5.000s of wall time — a loaded Windows
+  runner took 5.014s (294.9859 against a 295.0 floor). The
+  bound now tracks measured elapsed (300 — elapsed — 0.25s),
+  which is what the test actually means.
 - Portability defects the first native-Windows run exposed: a hard
   `import resource` made the whole benchmark package unimportable;
   exception locations were built with a `/` split that returns the whole

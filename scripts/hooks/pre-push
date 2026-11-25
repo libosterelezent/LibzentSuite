@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Refuse a push whose HEAD tree has no green gate stamp.
+# Installed automatically by scripts/local-ci.sh (step 0, idempotent).
+set -u
+STAMP="$(git rev-parse --git-path gate-stamp)"
+TREE="$(git rev-parse 'HEAD^{tree}')"
+if [ ! -f "$STAMP" ] || [ "$(head -n 1 "$STAMP")" != "$TREE" ]; then
+  echo "pre-push: no green gate stamp for HEAD's tree." >&2
+  echo "  Stage your work, run scripts/local-ci.sh until green, commit, retry." >&2
+  exit 1
+fi
