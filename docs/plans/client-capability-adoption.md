@@ -3,8 +3,10 @@
 **Status:** PLANNED (owner-directed 2026-11-17). Source study:
 `knowledgebase/FORK_ENDPOINT_ADOPTION.md` (the official better.py-self
 docs, every Tier-1 method verified against the installed fork) +
-`/home/libosterelezent/Workspace/Mudabot/` — the singleton-account
-reference whose cog model this plan measures us against.
+[mudabot-design-reference.md](mudabot-design-reference.md) — a documented
+copy of the two structures this plan measures against (the reactive wait
+and the cog–client binding). Mudabot itself is a sibling checkout at
+`D:\Workspace\Mudabot`, not part of this repository.
 
 ## The gap, stated honestly (the Mudabot fact)
 

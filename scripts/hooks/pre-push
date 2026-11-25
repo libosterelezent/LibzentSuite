@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Refuse a push whose OUTGOING tree has no green gate stamp.
+# Installed automatically by scripts/local-ci.sh (step 0, idempotent).
+# Git feeds each update on stdin: <local ref> <local sha> <remote ref> <remote sha>.
+set -u
+STAMP="$(git rev-parse --git-path gate-stamp)"
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    # a deletion publishes nothing - nothing to validate
+    if [ -z "${local_sha//0/}" ]; then
+        continue
+    fi
+    TREE="$(git rev-parse "$local_sha^{tree}")"
+    if [ ! -f "$STAMP" ] || [ "$(head -n 1 "$STAMP")" != "$TREE" ]; then
+        echo "pre-push: no green gate stamp for $local_sha ($_local_ref)." >&2
+        echo "  Stage your work, run scripts/local-ci.sh until green, commit, retry." >&2
+        exit 1
+    fi
+done
+exit 0

@@ -5,7 +5,9 @@ Currently provides the A6 account-manager test doubles:
   * dict-backed fake repositories (pinned repository method names),
   * a fake plugin manager / scheduler / settings / audit / limiter,
   * in-memory Discord clients (FakeClient) + factory + canned snapshots,
-  * an event collector and a one-call manager harness.
+  * an event collector and a one-call manager harness,
+  * wait_until_async — the observable-poll wait primitive (poll an
+    observable until true or a deadline; never a fixed sleep).
 
 They implement EXACTLY the duck-typed surfaces pinned in INTEGRATION.md, so
 tests never import the parallel-built real packages.
@@ -14,9 +16,15 @@ tests never import the parallel-built real packages.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import copy
 import logging
+import shutil
+import stat
+import tempfile
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +40,36 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
 LOG = logging.getLogger("tests.helpers")
+
+
+# ------------------------------------------------------------ platform probes
+# Capability probes, not platform names: the suite is platform-independent,
+# so a test skips exactly where THIS OS/filesystem cannot do the thing under
+# test, and still runs wherever it can (Developer Mode on Windows, a POSIX
+# mode on a mode-less filesystem, ...).
+def can_symlink() -> bool:
+    """Can this OS/filesystem create symlinks? Windows grants it only with
+    Developer Mode or SeCreateSymbolicLinkPrivilege (WinError 1314 otherwise)."""
+    with tempfile.TemporaryDirectory(prefix="lz-sym-") as tmp:
+        target = Path(tmp) / "t"
+        target.write_text("x")
+        try:
+            (Path(tmp) / "l").symlink_to(target)
+        except OSError:
+            return False
+    return True
+
+
+def enforces_file_modes() -> bool:
+    """Does this OS/filesystem honour POSIX permission bits? Windows accepts
+    chmod as a near no-op, so a 0600 file still reports 0o666 — privacy
+    assertions (key files, databases, report artifacts) are meaningful only
+    where the bits are enforced."""
+    with tempfile.TemporaryDirectory(prefix="lz-mode-") as tmp:
+        probe = Path(tmp) / "p"
+        probe.write_text("x")
+        probe.chmod(0o600)
+        return (stat.S_IMODE(probe.stat().st_mode) & 0o077) == 0
 
 
 # ------------------------------------------------------------ repositories
@@ -545,6 +583,15 @@ class ManagerHarness:
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
 
+#: Disposable per-process home for harness credential keys. Never a fixed
+#: shared path: the previous /tmp/opencode/... literal was a Linux-session
+#: artifact — unresolvable on Windows and shared across runs everywhere,
+#: against the disposable-storage rule. One dir per process keeps xdist
+#: workers isolated; removed at interpreter exit.
+_CRED_KEY_DIR = Path(tempfile.mkdtemp(prefix="lz-test-cred-"))
+atexit.register(shutil.rmtree, _CRED_KEY_DIR, ignore_errors=True)
+
+
 def make_manager(
     *,
     token_values: dict[str, str] | None = None,
@@ -596,7 +643,7 @@ def make_manager(
             return sorted(self.rows)
 
     cred_repo = _MemCredRepo()
-    credential_service = CredentialService(cred_repo, key_path="/tmp/opencode/test-cred.key")
+    credential_service = CredentialService(cred_repo, key_path=_CRED_KEY_DIR / "test-cred.key")
     seed = (
         token_values
         if token_values is not None
@@ -768,3 +815,22 @@ def fake_discord_sysmodules(lib_cls: Any) -> dict[str, Any]:
         "discord.ext": ext_mod,
         "discord.ext.commands": commands_mod,
     }
+
+
+async def wait_until_async(
+    predicate: Callable[[], Any], timeout: float = 5.0, interval: float = 0.02
+) -> bool:
+    """Poll a truthy predicate until true or timeout (the async wait_until).
+
+    The canonical replacement for every fixed ``asyncio.sleep`` that was
+    followed by an assertion. Returns ``True`` on success, ``False`` on
+    timeout -- callers should ``assertTrue`` with a message naming the
+    observable they waited for. Uses ``time.monotonic`` (immune to wall
+    clock steps) and the event loop's own sleep (no thread blocking).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return bool(predicate())

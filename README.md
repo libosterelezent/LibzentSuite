@@ -58,16 +58,35 @@ logic lives in pluggable parser packs, not the core.
 
 ```bash
 git clone <this repo> && cd LibzentSuite
-pip install -r requirements.txt       # pinned runtime dependency versions
+uv sync --frozen                      # the exact locked environment (runtime + dev tooling)
 cp .env.example .env                  # then edit it (see below)
-chmod 600 .env
+chmod 600 .env                        # POSIX — see the platform note below
 ```
+
+You need Git and [uv](https://docs.astral.sh/uv/) on `PATH` (the Discord client
+fork is a git dependency) and Python 3.10–3.13. A runtime-only install can
+also use `pip install -r requirements.txt`.
 
 Dependency versions are pinned by `uv.lock` (the universal resolution
 committed at the repo root); `requirements.txt` is a generated
 pip-compatible export of it — regenerate with `uv export`, never hand-edit.
-Development and CI tooling (ruff, mypy) lives in the `dev` dependency
-group: `uv sync --frozen` installs the exact locked environment.
+Development and CI tooling (ruff, pyright, pytest + xdist) lives in the `dev`
+dependency group, which `uv sync --frozen` installs.
+
+
+> **Platforms** — the project is platform-independent: no platform-only
+> modules, and one suite that runs green on every OS. CI runs it on Windows
+> (3.10) under bash; the local gate does the same. Seven capability-bound
+> tests skip with their reason (POSIX permission bits, symlinks without
+> Developer Mode). The commands below write `python3` for an ACTIVATED
+> project environment — `uv sync` installs it but does not activate it,
+> so run `source .venv/bin/activate` first, or prefix any command with
+> `uv run --frozen` instead; that form needs no activation and is the one
+> to use on Windows (where the interpreter is `python`, not `python3`).
+> sync with the `UV_PYTHON` environment variable: `export UV_PYTHON=3.13`
+> in a POSIX shell or Git Bash, `set UV_PYTHON=3.13` in cmd,
+> `$env:UV_PYTHON = "3.13"` in PowerShell. The
+> local gate `scripts/local-ci.sh` is bash — on Windows, run it from Git Bash.
 
 `.env` needs:
 
@@ -223,7 +242,7 @@ API calls — every call is a plugin action through the pipeline.
 | `invalid_credential` | token wrong/revoked — re-enter it |
 | Account keeps reconnecting | young accounts get culled by Discord; see `--debug` close codes |
 | "cannot boot" | unwritable `--db` path or malformed config — the message says which |
-| Boot warns about permissions | `chmod 600 state/credentials.key .env` |
+| Boot warns about permissions | `chmod 600 state/credentials.key .env` (POSIX only — on Windows the audit is skipped; restrict the `state/` folder with file-system ACLs instead) |
 | Key/DB mismatch warning | `state/credentials.key` doesn't match the stored tokens — restore the key or re-enter tokens |
 
 ---
@@ -278,9 +297,11 @@ additionally needs the user-account client fork `better.py-self`
 (included in the resolution), imported lazily — simulations/tests never
 require a live network connection.
 
-> **Runtime environment note** — the project was built and its whole
-> test suite runs green on Linux; other platforms are untested.
+> **Runtime environment note** — the project is platform-independent: its
 
+> **Runtime environment note** — the project is platform-independent: its
+> whole test suite runs green on Linux and on native Windows. CI runs it
+> on Windows; the local gate (`scripts/local-ci.sh`, bash) does the same.
 ## Architecture: who calls what
 
 ```
@@ -382,6 +403,9 @@ account's message interval at runtime.
 Tokens: Fernet-encrypted in the DB; master key outside it
 (`state/credentials.key` 0600 or `LZ_MASTER_KEY`). Boot audits permissions
 on db/key/.env, tightens WAL sidecars, and runs a key/DB decrypt canary.
+Permission bits are a POSIX mechanism: on Windows the audit is skipped and
+the key file carries no mode-based protection, so guard `state/` with
+file-system ACLs there or supply the key through `LZ_MASTER_KEY`.
 Diagnostic artifacts are 0600 and value-free (audited — no token material
 can reach benchmark/profile/tracemalloc output).
 
@@ -393,8 +417,8 @@ DM pairs, history, a scripted responder, one-shot 429s, channel deletion).
 temp master key — never touching production state) and produces a timed
 execution log, the audit trail and pass/fail checks. Scenarios:
 `export_basic`, `export_multichunk`, `pacing_respected`,
-`server_429_respected`, `channel_gone_aborts`, `control_mention`,
-`estop_halt`.
+`server_429_respected`, `channel_gone_aborts`, `estop_halt`
+(`python3 main.py --sim-list` is the source of truth).
 
 `benchmark/` (see `benchmark/README.md`): scenarios incl. cold boot,
 N-account start/stop, restart churn, message bursts; loop-lag

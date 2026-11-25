@@ -33,8 +33,12 @@ python -m benchmark --scenario message_burst --loop-interval-ms 1  # stall-hunt
 
 ## Metrics
 
-- Process: `rss_base/peak/end_kb`, `cpu_pct`, `cpu_user_s`, `cpu_sys_s`,
-  `fd_peak` (resource + /proc, stdlib only — no psutil dependency).
+- Process: `cpu_s`, `cpu_pct`, `fd_peak`, plus `rss_base/peak/end_kb` and
+  the `cpu_user_s`/`cpu_sys_s` split where they are observable. Portable
+  by construction: CPU comes from `time.process_time` (no `resource`
+  module); memory and handles come from `psutil` when installed (dev
+  group), else `/proc` on Linux — otherwise those keys are omitted, never
+  zeroed.
 - Event loop: sleep-drift lag histogram (p50/p95/p99/max; 0.25ms buckets
   to 100ms, 1ms to 2s; default 5ms interval, `--loop-interval-ms 1` for
   stall hunting).
@@ -53,6 +57,13 @@ using documented noise tolerances (`benchmark/report.py::TOLERANCES`).
 A single `REGRESSED` verdict means: **rerun with more cycles and compare
 medians** before believing it — wall times on a shared machine are noisy.
 
+**Baselines are per platform.** Compare a run only against a baseline
+recorded on the same OS. Wall-clock figures and the loop-lag histogram
+follow the platform's timer: Windows ticks near 15.6 ms by default, so
+loop-lag p50 sits near 20 ms there where Linux reports well under a
+millisecond. Memory keys are absent where neither `psutil` nor `/proc` can
+observe the process.
+
 ## Profiling modes
 
 - **normal** — the `benchmark` package is never imported; zero overhead.
@@ -60,7 +71,8 @@ medians** before believing it — wall times on a shared machine are noisy.
 - **`--profile`** — cProfile per scenario: `.pstats` dump under
   `state/benchmarks/profiles/` (or `--profile-dir`) + top-N cumulative/
   tottime embedded in the JSON. Main-thread profiler (the aiosqlite
-  worker thread's cost shows in cpu_sys_s but not function attribution).
+  worker thread's cost shows in `cpu_sys_s` (with psutil) but not function
+  attribution).
 - **`--tracemalloc`** — allocation sites per scenario boundary
   (`--trace-depth`, `--trace-top`); per-stage diffs via the existing
   `perf.stage()` seams; `clear_traces` + `reset_peak` between scenarios

@@ -579,7 +579,7 @@ class ServiceLogger:
             while tb.tb_next is not None:
                 tb = tb.tb_next
             code = tb.tb_frame.f_code
-            text += f" @ {code.co_filename.rsplit('/', 1)[-1]}:{tb.tb_lineno} in {code.co_name}"
+            text += f" @ {os.path.basename(code.co_filename)}:{tb.tb_lineno} in {code.co_name}"
         return text
 
     # ---------------------------------------------- stdlib logger surface

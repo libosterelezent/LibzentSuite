@@ -29,6 +29,7 @@ from __future__ import annotations
 import inspect
 import os
 import tempfile
+import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -231,6 +232,11 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
         await self.add_account_with_credential(api, "alpha", TOKEN_ALPHA, plugins=["spy"])
         await api.plugins_set_setting("alpha", "spy", "greeting", "hola")
         await api.ratelimit_set("message", 12.0, 0.1, 0.4, level="account", owner="alpha")
+        # stamp BEFORE the set: the service computes expires_at at
+        # call entry, before its awaited write - a post-set stamp
+        # would miss the write time and could bound above the true
+        # remaining (review round 5)
+        cd_set_at = time.time()
         await self.cooldown_service(fw).set("alpha", "spy", "restart-cd", 300)
         await self.plugin_state(fw).set_pair("alpha", "spy", "wins", 42)
         await self.shutdown(fw)
@@ -280,7 +286,14 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
             if not hasattr(fw2, "cooldowns"):
                 await cd.restore()  # bootstrap would have; direct service must
             remaining = await cd.remaining("alpha", "spy", "restart-cd")
-            self.assertGreaterEqual(remaining, 295.0)
+            # the cooldown survives the restart: remaining must track the
+            # wall time actually spent on it (300 — elapsed), not a fixed
+            # "the whole restart sequence runs in under 5s" budget — a
+            # loaded Windows runner took 5.014s once (2026-11-25:
+            # 294.9859 against a 295.0 floor) and the wall clock ticks
+            # in ~15.6ms steps. 0.25s covers the stamp ordering skew.
+            elapsed = time.time() - cd_set_at
+            self.assertGreaterEqual(remaining, 300.0 - elapsed - 0.25)
             self.assertLessEqual(remaining, 305.0)
             listing = await api2.cooldowns_list()
             self.assertIsInstance(listing, (list, dict))

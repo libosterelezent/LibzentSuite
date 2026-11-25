@@ -12,7 +12,6 @@ any response payload, audit entry or error message the facade produces.
 
 from __future__ import annotations
 
-import os
 import tempfile
 import time
 import unittest
@@ -27,6 +26,7 @@ from core.credentials import Credentials
 from core.errors import AccountError, SettingsValidationError
 from core.event_bus import EventBus
 from core.settings_manager import Setting, SettingsManager
+from tests.unit.helpers import enforces_file_modes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -884,10 +884,10 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CredentialsError):
             await svc.store("beta", "tok-2")
 
-    @unittest.skipIf(
-        os.name == "nt",
-        "Windows does not enforce POSIX permission bits - "
-        "the loose-keyfile warning is still verified at boot",
+    @unittest.skipUnless(
+        enforces_file_modes(),
+        "POSIX permission bits are not enforced here - the loose-keyfile "
+        "warning is still verified at boot",
     )
     async def test_loose_keyfile_permissions_warn_on_read(self) -> None:
         svc = CredentialService(FakeCredentialsRepo(), key_path=self.key_path)

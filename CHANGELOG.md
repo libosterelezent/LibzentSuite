@@ -16,6 +16,26 @@ nothing can ship until that hold is lifted; see
 
 ## [Unreleased]
 
+### Added
+- Anti-flake tooling for the test suite: every test now carries a
+  120 s per-test hang ceiling (`pytest-timeout`, thread method,
+  configured in `pyproject.toml` — a hang fails by name with every
+  thread's stack dumped, instead of a leg dying at its ceiling with no
+  attribution); `wait_until_async` lands in `tests/unit/helpers.py` as
+  the canonical observable-poll wait; `pytest-rerunfailures` joins the
+  dev group for flake hunts (runner-side use only — the gate never
+  auto-reruns a failure).
+- The push protocol is machine-enforced: `scripts/local-ci.sh`
+  self-installs a `pre-push` hook and, on its green path, stamps the
+  tree the run STARTED with — written only when the index and
+  worktree still match it at the end, so a mid-run stage cannot
+  name an untested tree (the gate also fails fast on unstaged
+  tracked changes); the hook reads every update git feeds it and
+  refuses any push whose OUTGOING tree has no
+  matching stamp. AGENTS.md 10 tightened to match - no
+  equivalent-evidence substitutes for the gate, no
+  authorizations carried over from plans or summaries.
+
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);
   `unittest discover` retired — each CI/gate leg drops from ~7.5
@@ -25,10 +45,131 @@ nothing can ship until that hold is lifted; see
   the lock. `scripts/local-ci.sh` is rewritten as the clean
   seven-step code-quality gate — the CodeRabbit machinery left the
   gate entirely (it reviews PRs on GitHub, not local runs).
+- The project is platform-independent. No platform-only modules remain:
+  the benchmark sampler and the DB worker-thread telemetry measure CPU,
+  memory and handles with a stdlib clock plus the optional `psutil` (dev
+  group), falling back to a plain `/proc` read on Linux and reporting
+  memory as unavailable — never zero — where neither can observe the
+  process. The suite is green on native Windows (seven capability-bound
+  tests skip with their reason); the local gate and `scripts/run_tests.sh`
+  run from Git Bash. CI runs the suite on Windows (the owner's
+  platform) on 3.10; the local gate proves the same suite on any
+  machine, Linux included. The duplicated pyright step is gone, and the
+  step now parses
+  its count with the project's own interpreter.
+- The local gate runs ONE suite leg (3.10 + coverage) instead of
+  two (3.10 plain; 3.13 + coverage): CI runs 3.10 only and never
+  ran the 3.13 leg — duplicated effort costing ~10 minutes per
+  gate run. The coverage floor is now measured on the 3.10 leg,
+  and the local `.venv` matches the gate interpreter.
 
 ### Fixed
+- Two timing flakes the first Windows CI run of the portability branch
+  exposed: the quiet-sender collector raced its own 0.05 s idle timeout
+  against a 0.02 s staging sleep (now 0.5 s vs 0.1 s — 5x margin), and
+  the PerfCollector p50 assertion hit Windows timer quantization (a
+  10 ms sleep measured 3.8 ms on the ~15.6 ms tick grid — now a 50 ms
+  sleep with a 20 ms floor, which undershoot cannot cross).
+- The teardown takeover race (reproduced deterministically,
+  2026-11-25): a second teardown waiting on an in-flight one
+  could observe an already-cancelled owner as still live when
+  its patience expired in the same event-loop batch as the
+  (`on_unload`) ran nowhere. The waiter now waits for
+  EITHER outcome - the completion event or the owner task, whichever
+  first (a prompt takeover), then drains
+  one loop turn before re-checking: the drain runs every
+  already-queued step first — including the owner's unwind — so
+  a decided abandonment is never misread as a live owner, and a
+  genuinely parked owner still bounds the wait. Regression test
+  included (coalesced-deadline coercion; fails on 3.12+ pre-fix).
+- The restart-matrix cooldown assertion bounded the whole
+  restart sequence at 5.000s of wall time — a loaded Windows
+  runner took 5.014s (294.9859 against a 295.0 floor). The
+  bound now tracks measured elapsed (300 — elapsed — 0.25s),
+  which is what the test actually means.
+- The pacing sampler's honesty limit is a re-measurement, not a red
+  gate: "pacing cannot be judged for this run" fires when a poll lands
+  more than an interval late (multi-second callback stalls on a busy
+  desktop, observed in-gate 2026-11-25) — a limit of the MEASUREMENT,
+  not a verdict about pacing. `Stack.pacing_stamps` gained a `first`
+  window offset and `pacing_stamps_with_retry` re-triggers the flow
+  and measures the fresh window (a real spacing violation never takes
+  that path); both pacing tests use it.
+- Portability defects the first native-Windows run exposed: a hard
+  `import resource` made the whole benchmark package unimportable;
+  exception locations were built with a `/` split that returns the whole
+  path on Windows; three tests hardcoded a `/tmp` key path; a test-side
+  directory fingerprint keyed on OS separators; the gate parsed its
+  pyright count with the system's `python3` (on Windows often the Store
+  stub) and a `/tmp` path embedded in a Python literal;
+  `scripts/run_tests.sh` still invoked the retired `unittest discover`
+  and only knew the POSIX virtualenv layout.
+- Three telemetry tests closed their database only after the temp
+  directory had been removed. POSIX forgave the unlink of an open file;
+  Windows refused the delete. Databases now close inside the scope that
+  removes them.
+- The scheduler unit tests slept for a fixed 10-500ms and then asserted
+  a state. On a loaded event loop (the 3.10 leg under four xdist
+  workers on a four-thread Windows machine) a task was still `queued`
+  when the 50ms sleep ended: five failed in the gate, eleven distinct
+  ones across three deliberately starved rounds. Every wait is now on
+  the observable — the published terminal event, the recorded acquire
+  call, a set event — and those rounds pass on 3.10 and 3.13.
+- The full-stack pacing tests prove spacing on the pacer's own
+  spacing-clock stamps (`ratelimit_stats`), which stay a full interval
+  apart under any load, and that no send reached the wire before its
+  stamp. No fixed floor is asked of a measured wire gap any more: the
+  pacer stamps at the expected wire instant, so a send that load delays
+  shortens the next gap by exactly its lateness (one send running 110ms
+  later than the next left a 1.3896s gap under the gate's coverage leg).
+  Regressing the pacer to 1.42s on purpose now fails both tests at the
+  stamp assertion; the exact interval itself is pinned by the engine's
+  unit tests under an injected clock. A sampler timeout carries the
+  framework's newest log lines.
+- The exporter fixture's DM idle window in the full-stack tests is 3.0s,
+  the value the simulation scenarios give it. At 0.6s the gate's
+  coverage leg collected no pages and the flow sent no chunk.
+- `test_rich_model`'s pipeline test read the audit rows the moment the
+  task statuses flipped; the rows are written in the finish tail, after
+  that. It waits for the published terminal events now.
+- The simulator's `pacing_respected` scenario measured wire gaps against
+  a 100ms budget and failed the gate's coverage leg on a healthy pacer
+  (1.473s for a 1.6s interval: one send 127ms late). Lateness is part of
+  a measured gap, so the budget is 300ms now, and the check is described
+  as what it shows (pacing in force; a bypass collapses the gaps) rather
+  than as the hard floor on the wire.
+- The CI-workflow guard against a bare `python3` missed the heredoc
+  and backtick forms, and no test checked that it could catch
+  anything. It now recognises the word in any shell position and has
+  a test of its own. A `#` inside quotes is no longer taken for a
+  comment, and an escaped quote no longer opens a string: both
+  `echo '#'; python3 -m pytest` and `echo \" " # "; python3 x` used to
+  pass the guard.
+- The README gave only cmd's `set UV_PYTHON=3.13` for pinning the
+  interpreter. In bash `set` assigns a positional parameter and exports
+  nothing, so Git Bash users got no pin. The `export` form comes first
+  now, with the cmd and PowerShell forms labelled.
+- The full-stack pacing sampler records the limiter's own clock
+  readings and rebuilds each stamp from the very one that produced its
+  age. Reading the clocks around the call, as it first did, let a thread
+  the OS descheduled in between move a stamp: later, and a healthy send
+  failed; earlier, and a send that left early passed.
+- The pacing sampler refuses to record a stamp that does not advance:
+  two sends matched to one grant mean the sampler fell behind, and the
+  failure says that instead of reporting a zero gap that looked like a
+  pacing violation.
+- The workload test waits for the TaskCompleted event itself before
+  reading the log tail. The audit rows it waited for are written before
+  the event is published, so the assertion could race.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
+
+- Dead code removed: the `[tool.mypy]` section in `pyproject.toml`
+  (mypy was retired from the dev group and the lock; the config
+  described a CI step that no longer runs) and two stale `__all__`
+  names in `interfaces/cli/__init__.py` (`format_group_snapshot`,
+  `format_groups` — functions that no longer exist in
+  `commands.py`).
   plugin BEFORE any state moves (an unknown account used to get a
   success echo plus an audit row — reconcile was silently no-op), and
   its `surface` default matches every sibling mutation (`"api"`);

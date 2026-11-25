@@ -37,6 +37,7 @@ def make_manager(plugin_dir: str | Path = "tests/fixtures/plugins") -> PluginMan
         plugin_dir=str(plugin_dir),
     )
 
+
 class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
     async def test_reload_restores_accounts(self) -> None:
         mgr = make_manager()
@@ -608,8 +609,70 @@ class TestPassSevenTeardownTakeover(unittest.IsolatedAsyncioTestCase):
         owner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await owner
-        # B times out on the (deliberately unset) event, sees the
-        # interruption marker and TAKES OVER the remaining work
+        # B wakes on A's completed task (the patience wait is on the
+        # owner itself), sees the interruption marker and TAKES OVER
+        # the remaining work
+        await waiter
+        self.assertFalse(rt.active, "the takeover must finish the interrupted cleanup")
+        self.assertFalse(rt.loaded)
+        self.assertGreaterEqual(calls["on_disable"], 1)
+        self.assertEqual(calls["on_unload"], 1)
+
+    async def test_coalesced_patience_expiry_still_takes_over(self) -> None:
+        # 2026-11-25 gate flake, reproduced deterministically: when the
+        # waiter's patience deadline and this test's staging wake expire
+        # in the SAME event-loop batch (a loaded machine coalesces them;
+        # a loop-thread stall does it here on demand), the owner's
+        # The fix waits on the OWNER TASK (a prompt takeover when it
+        # completes within patience) and then DRAINS one loop turn
+        # before re-checking: a timer wakeup enters its batch directly
+        # while the owner's unwind (queued by the canceller's callback)
+        # is deferred past the batch snapshot — the drain runs every
+        # already-queued step first, so a decided abandonment is never
+        # misread as a live owner. The stall below is a scheduling
+        # coercion, not a wait: every assert follows the forced
+        # interleaving immediately. It reproduces the bug on Python
+        # 3.12+ pre-fix (wait_for's timeout there cancels the task
+        # directly); on 3.10 the pre-3.12 timeout path takes extra
+        # hops and the unwind lands first — the test still pins the
+        # contract there.
+        # cancels the task directly, zero extra queue hops); on 3.10
+        # the pre-3.12 timeout path takes extra hops and the owner's
+        # unwind always lands first — the test still pins the contract.
+        import asyncio
+        import time
+
+        mgr = make_manager()
+        mgr._teardown_wait_timeout_s = 0.05
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        disable_parked = asyncio.Event()
+        calls = {"on_disable": 0, "on_unload": 0}
+
+        async def slow_disable(*a: Any) -> None:
+            calls["on_disable"] += 1
+            if calls["on_disable"] == 1:
+                disable_parked.set()
+                await asyncio.sleep(3600)  # parked until cancelled
+
+        async def count_unload(*a: Any) -> None:
+            calls["on_unload"] += 1
+
+        rt.instance.on_disable = slow_disable
+        rt.instance.on_unload = count_unload
+
+        owner = asyncio.create_task(mgr.deactivate_account("alpha"))
+        await disable_parked.wait()
+        waiter = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        await asyncio.sleep(0)  # let the waiter arm its patience timer
+        asyncio.get_running_loop().call_soon(lambda: time.sleep(0.15))
+        await asyncio.sleep(0.02)  # staging: coalesced with the expiry by the stall
+        self.assertFalse(waiter.done())
+        owner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await owner
         await waiter
         self.assertFalse(rt.active, "the takeover must finish the interrupted cleanup")
         self.assertFalse(rt.loaded)

@@ -170,11 +170,8 @@ def render_table(report: dict[str, Any]) -> str:
             f"peak={proc.get('rss_peak_kb', '?')}kB "
             f"end={proc.get('rss_end_kb', '?')}kB"
         )
-        lines.append(
-            f"  CPU: {proc.get('cpu_pct', '?')}% "
-            f"(u={proc.get('cpu_user_s')}s "
-            f"s={proc.get('cpu_sys_s')}s)"
-        )
+        split = f" (u={proc['cpu_user_s']}s s={proc['cpu_sys_s']}s)" if "cpu_user_s" in proc else ""
+        lines.append(f"  CPU: {proc.get('cpu_pct', '?')}% (cpu={proc.get('cpu_s', '?')}s){split}")
         lag = scen.get("loop_lag_ms", {})
         lines.append(
             f"  Loop lag ms: p50={lag.get('p50_ms')} "

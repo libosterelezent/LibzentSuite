@@ -22,6 +22,7 @@ from core.credentials import Credentials, CredentialsError
 from core.event_bus import EventBus
 from core.logging_service import LogService, ServiceLogger
 from core.rate_limit_manager import RateLimitManager
+from tests.unit.helpers import can_symlink
 
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
@@ -99,6 +100,9 @@ class TestParseEnvComments(unittest.TestCase):
 
 
 class TestFromFileSymlink(unittest.TestCase):
+    @unittest.skipUnless(
+        can_symlink(), "symlink creation needs Developer Mode or the symlink privilege"
+    )
     def test_symlinked_env_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-link-") as tmp:
             real = Path(tmp) / "real.env"
@@ -376,17 +380,22 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_early_failure_releases_the_claim(self) -> None:
         m = self._m
         m.stop_stderr_pipeline()
-        # a symlinked .env is hard-rejected by Credentials.from_file —
-        # a failure that lands AFTER the claim but BEFORE _assemble
+        # a Credentials.from_file failure lands AFTER the claim but
+        # BEFORE _assemble: patch it to raise instead of relying on
+        # a symlinked .env (which needs Developer Mode on Windows)
+        from core.credentials import Credentials as _Credentials
+
+        def _boom(path: object) -> None:
+            raise RuntimeError("credentials exploded")
+
         real_env = self.root / "real.env"
         real_env.write_text("DASHBOARD_TOKEN=x\n", encoding="utf-8")
-        linked = self.root / "linked.env"
-        linked.symlink_to(real_env)
         fw = None
         try:
-            fw = await self._build(env_file=linked)
-            self.fail("a symlinked env must fail the build")
-        except Exception:
+            with mock.patch.object(_Credentials, "from_file", _boom):
+                fw = await self._build(env_file=real_env)
+            self.fail("a credential failure must fail the build")
+        except RuntimeError:
             pass
         finally:
             if fw is not None:  # never returned, but stay safe

@@ -612,7 +612,10 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         runtime.client.drop("socket closed")
         # retries proceed instantly under the fake sleep — poll only for
         # the COUNT of attempts, never wall-clock
-        await _poll_until(lambda: len(recorded) >= 3, timeout=2.0)
+        # poll for the 4th client BUILD, not the 3rd sleep — the retry's
+        # client construction trails its backoff sleep (the count-aware
+        # cure; asserting sleeps then counting clients raced one step)
+        await _poll_until(lambda: len(h.factory.clients) >= 4, timeout=2.0)
         # overflow clamps to max (0.1 floor) with x[1.0,1.5) jitter
         self.assertTrue(
             all(0.1 <= d <= 0.15 for d in recorded), f"delays escaped the clamp: {recorded}"

@@ -8,9 +8,9 @@ record into `docs/reference/completed.rst`; the plan file itself is
 retired (git history and the local knowledgebase archive preserve the
 originals).
 
-.. toctree::
-   :maxdepth: 1
-
-   pivot-audit-fastapi-flet
-   flet_ui_design_contract
+  client-capability-adoption
+  mudabot-design-reference
+  overseer-future-planned-lifecycle-upgrade
+  flet_ui_design_contract
    client-capability-adoption
+   mudabot-design-reference

@@ -15,7 +15,7 @@ from core.account_manager.services import MessageWaiterRegistry
 from core.cooldowns import CooldownService
 from core.event_bus import EventBus, MessageReceived
 from core.rate_limit_manager.engine import RateLimitManager
-from tests.unit.helpers import make_manager
+from tests.unit.helpers import enforces_file_modes, make_manager
 from tests.unit.test_rate_engine import StubLogger
 
 if TYPE_CHECKING:
@@ -375,7 +375,10 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         await asyncio.gather(gate.acquire(), gate.acquire())
-        self.assertGreaterEqual(loop.time() - t0, 0.05)
+        # a loaded loop can wake the timer slightly early (Windows
+        # resolution ~15ms): 10ms of slack absorbs it - the same medicine
+        # its sibling test received in 151ea08
+        self.assertGreaterEqual(loop.time() - t0, 0.05 - 0.01)
 
 
 class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
@@ -385,6 +388,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SUPERSECRET-TOKEN-VALUE", rendered)
         self.assertIn("RealDiscordClient", rendered)
 
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_key_file_tightened_on_read(self) -> None:
         import tempfile
         from pathlib import Path

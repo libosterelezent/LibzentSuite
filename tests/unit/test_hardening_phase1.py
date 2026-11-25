@@ -31,6 +31,7 @@ from core.event_bus import Event, EventBus
 from core.logging_service import LogService, ServiceLogger
 from database.connection import DatabaseError as ConnDatabaseError
 from database.db import Database
+from tests.unit.helpers import enforces_file_modes
 
 #: fixture plugins (the framework ships none; the fixture keeps the boot
 #: path exercising plugin discovery/attachment)
@@ -60,6 +61,7 @@ class TestDatabaseLayer(_TmpCase):
         # not re-wrapped ("database add account failed: ...")
         self.assertEqual(str(ctx.exception), "account 'a' already exists")
 
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_file_created_private(self) -> None:
         await self.open_db()
         mode = stat.S_IMODE(os.stat(self.dir / "t.db").st_mode)
@@ -394,17 +396,27 @@ class TestCredentials(_TmpCase):
         self.assertEqual(first, frozenset({1, 2, 3}))
         self.assertIs(creds.owner_user_ids, first)
 
-    async def test_key_file_created_private_and_reused(self) -> None:
+    async def test_key_file_created_and_reused(self) -> None:
+        # creation and reuse hold on every platform: a second service over
+        # the same path must find the first one's key, never replace it
         path = self.dir / "k" / "credentials.key"
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LZ_MASTER_KEY", None)
             svc = CredentialService(None, key_path=path)
             _ = svc.fernet
-            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
+            self.assertTrue(path.is_file())
             key = path.read_text()
             self.assertEqual(
                 CredentialService(None, key_path=path)._load_or_create_key().decode(), key
             )
+
+    @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
+    async def test_key_file_created_private(self) -> None:
+        path = self.dir / "k" / "credentials.key"
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LZ_MASTER_KEY", None)
+            _ = CredentialService(None, key_path=path).fernet
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
 
     async def test_corrupt_key_is_credentials_error(self) -> None:
         path = self.dir / "bad.key"

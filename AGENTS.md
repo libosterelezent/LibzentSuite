@@ -46,7 +46,8 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 
 - **Agent rules and binding contracts** live only in `AGENTS.md` and `docs/architecture/`. Don't put coding rules, agent instructions, or lint policy in `docs/` or `knowledgebase/`.
 - **`docs/`** is the user-facing guide: installation, running the suite from the CLI and the UI, environment variables, commands, and plugin-author references. Keep it current with every feature or command change. It describes the code; when they disagree, the code wins.
-- **Platform note:** the project is built and tested on Linux only. Keep that stated until the suite runs green elsewhere.
+
+- **Platform note:** the project is platform-independent — no platform-only modules, and one suite that runs green on Linux and native Windows. CI runs it on Windows (the owner's platform) on 3.10; the suite stays green on Linux; keep both statements true.
 - **`knowledgebase/`** is local-only and append-only. Don't rewrite existing entries. Correct an earlier statement with a dated addendum. Record facts and decisions, never new rules.
 - **`dump/`** holds retired code. Leave it alone.
 - Public classes, functions, and subsystems get a docstring covering their contract. Add an append-only knowledgebase reference for them.
@@ -66,7 +67,12 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - Tests are deterministic and offline: injected clocks, seeded randomness, in-memory or simulated Discord, no real network, no live accounts, no wall-clock sleeps.
 - **Never touch the real `state/` directory** from tests or scripts. It holds the live databases and the credentials key. Tests use disposable storage and clean up only what their own run created.
 - Cover failure paths, cancellation, duplicate calls, and races. For stateful operations, assert both the result and what was persisted.
-- Run narrow tests first, then the adjacent suites, then the full suite. CI runs Python 3.10–3.13, so check 3.10 for changes touching dependencies, typing, or stdlib APIs.
+- Run narrow tests first, then the adjacent suites, then the full
+  suite. The one gated interpreter is Python 3.10 — CI and the local
+  gate both run it (the local 3.13 leg was retired 2026-11-25 as
+  duplicated effort; CI never had it), so keep every change 3.10-clean
+  for dependencies, typing, and stdlib APIs; other interpreters stay
+  supported but ungated.
 - Never weaken a test to get green. Fix the cause, or document a pre-existing failure with evidence.
 - Coverage measures production code only. The coverage floor only rises.
 - Report exactly what you ran and what you didn't. Never claim a check passed unless it did.
@@ -103,6 +109,17 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - **Never** run `git push`, `git reset`, `git clean`, or switch branches without explicit authorization in the same request.
 - **Never** create releases or `v*` tags. The tag ruleset is locked deliberately.
 - Push only with the owner's explicit approval, and only when at least five commits are pending.
+- Push authorization is per-request: the word must appear in the CURRENT
+  message. Plans, summaries, roadmap items, and earlier approvals never
+  carry over — "next: push" in any document is a plan, not permission.
+- The pre-push gate is a fixed protocol, not a judgment call. Never
+  substitute "equivalent" evidence — "CI will catch it", "it's only
+  docs", "ruff and pyright covered it". The gate runs on the exact tree
+  being pushed; `scripts/hooks/pre-push` (installed by the gate,
+  validating every update git feeds it against the green
+  stamp) enforces it mechanically.
+  The hook is a floor, not a replacement for the CodeRabbit review or
+  the owner's word.
 - Before any approved push: run the full local gate (`scripts/local-ci.sh`) until it is green, then run the CodeRabbit review over the pending range (see the `coderabbit-code-review` skill). Both are required. Neither replaces the other.
 - The local gate must never delete or overwrite `state/`. If a script would, stop and report it.
 - Leave the working tree clean. Say what you deliberately left uncommitted, and why.

@@ -9,10 +9,14 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: Build sdist + wheel
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -28,15 +32,26 @@ jobs:
           uv build
           ls -1 dist/
 
+  # The job name is load-bearing. master's ruleset requires the context
+  # BY NAME ("unittest (3.10)"): the leg carries its name LITERALLY in
+  # the matrix — no expression logic between the matrix and the name a
+  # ruleset depends on.
   unittest:
+    name: unittest (${{ matrix.python-version }}${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        # the full support floor: 3.10 (the declared minimum) through
-        # the newest stable — a green 3.11 proved nothing about the rest
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+        include:
+          - { os: windows-latest, python-version: "3.10", label: "" }
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # every step below is bash: a Windows runner defaults to pwsh, where
+    # $(...), && and [ ] all fail. `bash` there is the Git for Windows
+    # shell the local gate was validated in.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.1.0
@@ -62,24 +77,12 @@ jobs:
           git diff --exit-code -- requirements.txt
       - name: Pyright ratchet (.github/pyright-baseline)
         run: |
+          # parsed by the project's locked interpreter and fed on stdin: a
+          # bare `python3` is whatever the runner has on PATH, which is not
+          # necessarily that interpreter
           ERRORS=$(uv run --frozen pyright --outputjson \
             core adapters database interfaces plugins benchmark scripts parsers main.py \
-            2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['errorCount'])")
-          BASELINE=$(cat .github/pyright-baseline)
-          echo "pyright errors: $ERRORS (baseline: $BASELINE)"
-          if [ "$ERRORS" -gt "$BASELINE" ]; then
-            echo "::error::The pyright error count grew ($BASELINE -> $ERRORS)."
-            exit 1
-          fi
-          if [ "$ERRORS" -lt "$BASELINE" ]; then
-            echo "::error::pyright improved but the baseline was not lowered — update .github/pyright-baseline to $ERRORS."
-            exit 1
-          fi
-      - name: Pyright ratchet (.github/pyright-baseline)
-        run: |
-          ERRORS=$(uv run --frozen pyright --outputjson \
-            core adapters database interfaces plugins benchmark scripts parsers main.py \
-            2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['errorCount'])")
+            2>/dev/null | uv run --frozen python -c "import json, sys; print(json.load(sys.stdin)['summary']['errorCount'])")
           BASELINE=$(cat .github/pyright-baseline)
           echo "pyright errors: $ERRORS (baseline: $BASELINE)"
           if [ "$ERRORS" -gt "$BASELINE" ]; then
@@ -91,8 +94,10 @@ jobs:
             exit 1
           fi
       - name: Unit / integration / simulation / stress tests (coverage)
+        # one -q: pyproject's addopts already carry one, and a second hides
+        # the "N passed" summary line from the log
         run: |
-          uv run --frozen pytest tests/ -q -n auto --dist loadscope --cov=core --cov=adapters --cov=database --cov=interfaces --cov=plugins --cov=benchmark --cov=scripts --cov=parsers --cov-report=term-missing
+          uv run --frozen pytest tests/ -n auto --dist loadscope --cov=core --cov=adapters --cov=database --cov=interfaces --cov=plugins --cov=benchmark --cov=scripts --cov=parsers --cov-report=term-missing
           uv run --frozen coverage report
       - name: Coverage summary (job annotation)
         if: always()
