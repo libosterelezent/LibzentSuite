@@ -105,6 +105,13 @@ nothing can ship until that hold is lifted; see
   the event is published, so the assertion could race.
 - PR #27 review round 7 (2026-11-18), all nine findings:
   `ControlAPI.plugins_set_enabled` now validates the account and
+
+- Dead code removed: the `[tool.mypy]` section in `pyproject.toml`
+  (mypy was retired from the dev group and the lock; the config
+  described a CI step that no longer runs) and two stale `__all__`
+  names in `interfaces/cli/__init__.py` (`format_group_snapshot`,
+  `format_groups` — functions that no longer exist in
+  `commands.py`).
   plugin BEFORE any state moves (an unknown account used to get a
   success echo plus an audit row — reconcile was silently no-op), and
   its `surface` default matches every sibling mutation (`"api"`);

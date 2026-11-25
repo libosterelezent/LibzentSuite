@@ -27,15 +27,19 @@ orchestration. Plugins stay independent of the interface layer.
 
 **1,678 tests green, CI green, pyright ZERO** (equality ratchet at
 `.github/pyright-baseline`). pytest + xdist owns the runner (`-n
-auto --dist loadscope` — each gate leg ~3× faster); mypy retired
-with both its trees at ZERO. The two-level data model is live
-(profiles + presets +
-executions, migrations v12–v16). The FastAPI core API and the Flet UI
-shell are landed with honest dependency extras (`[api]`, `[ui]`,
-`[all]`) — the wiring is the remaining connective work. Full
-user-facing historical record: `docs/reference/completed.rst`.
+## Current State (2026-11-25)
 
----
+**1,681 tests green, CI green, pyright ZERO** (equality ratchet at
+`.github/pyright-baseline`). The project is platform-independent: one
+suite, no platform-only modules, green on Linux and native Windows.
+CI runs it on Windows (the owner's platform) on 3.10; the local gate
+(`scripts/local-ci.sh`, bash) proves the same on any machine.
+pytest + xdist owns the runner (`-n auto --dist loadscope`); mypy
+retired with both its trees at ZERO, its pyproject section removed.
+The two-level data model is live (profiles + presets + executions,
+migrations v12–v16). The FastAPI core API and the Flet UI shell are
+landed with honest dependency extras (`[api]`, `[ui]`, `[all]`)
+— the wiring is the remaining connective work.
 
 ## Active Queue
 

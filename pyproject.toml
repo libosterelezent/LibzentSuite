@@ -154,25 +154,6 @@ indent-style = "space"
 line-ending = "auto"
 docstring-code-format = true
 
-[tool.mypy]
-# AGENTS.md §8 mypy baseline. Strict checking; the production tree only
-# (tests are a later ratchet). Legacy debt is tracked — see the CI mypy
-# step and the baseline count it reports; do not add blanket ignores to
-# shrink it.
-python_version = "3.10"
-strict = true
-warn_unreachable = true
-warn_unused_configs = true
-show_error_codes = true
-pretty = true
-files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts","tests"]
-
-# narrow per-module exception: flet is deliberately absent from the
-# dev/CI environment (interfaces/ui imports it lazily — the API-client
-# core and tests run without the GUI dependency installed)
-[[tool.mypy.overrides]]
-module = "flet"
-ignore_missing_imports = true
 
 [tool.coverage.run]
 # the production tree only — tests measure the shipped code, not
