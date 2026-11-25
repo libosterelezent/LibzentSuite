@@ -265,6 +265,7 @@ class Stack:
         limit: float = 30.0,
         *,
         first: int = 1,
+        wire_floor: float | None = None,
     ) -> tuple[list[float], list[float]]:
         """The pacer's stamps for `key` and each send's lead over its stamp,
         one entry per send, oldest first. ``first`` is the 1-based journal
@@ -328,9 +329,24 @@ class Stack:
                     raise AssertionError(f"{key}: ratelimit_stats read no clock")
                 stamp = readings[-1] - ages[key]
                 if stamps and stamp <= stamps[-1]:
-                    # two sends matched to one grant: the sampler fell
-                    # behind, and the send between these samples had its
-                    # grant overwritten before it could be read
+                    # Two samples matched one grant. EITHER the sampler's
+                    # poll fell more than an interval behind (an honesty
+                    # limit of this MEASUREMENT, retried) OR the two sends
+                    # were granted so close that the later grant preceded
+                    # the first sample's read (a REAL violation - it must
+                    # not launder through a retry; review round 6). The
+                    # WIRE gap between the two sends discriminates: paced
+                    # sends stay a near-full interval apart on the wire
+                    # however late the grants read; violated sends are close.
+                    if (
+                        wire_floor is not None
+                        and (landed[count - 1] - landed[count - 2]) < wire_floor
+                    ):
+                        raise AssertionError(
+                            f"{key}: sends {count - 1} and {count} hit the wire "
+                            f"{landed[count - 1] - landed[count - 2]:.3f}s apart while "
+                            "sharing one grant - a pacing violation, not a sampling limit"
+                        )
                     raise AssertionError(
                         f"{key}: the sampler fell behind between send {count - 1} and "
                         f"send {count}: both matched the same grant (stamp {stamp:.3f}); "
@@ -348,9 +364,10 @@ class Stack:
         channel: int,
         authors: set[int],
         sends: int,
-        resubmit: Callable[[], Awaitable[None]],
+        resubmit: Callable[[int], Awaitable[None]],
         limit: float = 30.0,
         attempts: int = 3,
+        wire_floor: float | None = None,
     ) -> tuple[list[float], list[float], int]:
         """pacing_stamps with a re-measurement path for the sampler's own limit.
 
@@ -358,9 +375,16 @@ class Stack:
         more than an interval late means the sample fell behind (multi-
         second callback stalls on a busy desktop; observed in-gate
         2026-11-25) - and it is NOT a verdict about pacing. On that
-        specific error the flow is re-triggered (``resubmit``) and the
-        FRESH window is measured. A real spacing violation raises a
-        different assertion and never takes this path.
+        specific error the flow is re-triggered and the FRESH window is
+        measured. ``wire_floor`` (passed through to pacing_stamps) keeps
+        a REAL violation from laundering through the retry: sends that
+        hit the wire closer than the floor while sharing a grant raise
+        a non-retryable violation.
+
+        ``resubmit`` receives the 1-based journal index the fresh window
+        starts at - it must wait out any in-flight flow before
+        re-triggering (the exporter ignores a trigger mid-flow; review
+        round 6).
 
         Returns ``(stamps, leads, first)``: ``first`` is the 1-based
         journal index the returned window starts at, so jitter slices
@@ -371,14 +395,14 @@ class Stack:
         for attempt in range(attempts):
             try:
                 stamps, leads = await self.pacing_stamps(
-                    key, channel, authors, sends, limit, first=first
+                    key, channel, authors, sends, limit, first=first, wire_floor=wire_floor
                 )
                 return stamps, leads, first
             except AssertionError as exc:
                 if "pacing cannot be judged" not in str(exc) or attempt == attempts - 1:
                     raise
                 first += sends
-                await resubmit()
+                await resubmit(first)
         raise AssertionError(f"{key}: unreachable - the loop returns or raises")
 
     @staticmethod
@@ -523,7 +547,11 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             # by the pacer for a full interval after the one before, however
             # long the DM phase took, which is why this reads a flow of four
             # sends and not a request and a single chunk.
-            async def rerun_export() -> None:
+            async def rerun_export(total: int) -> None:
+                # wait out the in-flight flow first: the exporter ignores a
+                # trigger while its copy flow runs (review round 6) - a
+                # dropped re-trigger means the fresh window never arrives
+                await stack.wait_for_outbound(GUILD_CHANNEL, total - 1, "alpha")
                 await stack.owner_says("export")
 
             # "pacing cannot be judged" is the sampler's honesty limit (a
@@ -532,7 +560,14 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             # and measure the fresh window; a REAL spacing violation
             # never takes that path.
             stamps, leads, first = await stack.pacing_stamps_with_retry(
-                "alpha:message", GUILD_CHANNEL, alpha, 4, rerun_export
+                "alpha:message",
+                GUILD_CHANNEL,
+                alpha,
+                4,
+                rerun_export,
+                # the wire floor: interval minus the lateness budget (0.45s,
+                # matching scenarios.py's PACING_TOLERANCE)
+                wire_floor=POLICY_INTERVAL - 0.45,
             )
             sent = stack.world.messages_of(GUILD_CHANNEL)
             self.assertEqual(
@@ -764,7 +799,7 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
         try:
             scheduler = stack.framework.scheduler
 
-            async def submit_round() -> None:
+            async def submit_round(_total: int) -> None:  # the scheduler queues - no in-flight flow
                 for account in ("alpha", "beta", "alpha", "beta"):
                     scheduler.submit(
                         account,
@@ -774,7 +809,7 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
                         content=f"hi-{account}",
                     )
 
-            await submit_round()
+            await submit_round(1)
             members = set(stack.user_ids.values())
             # sample the shared clock's stamp as each send lands, to a
             # deadline rather than a fixed count of polls: four paced sends
@@ -786,7 +821,14 @@ class TestGroupRateScope(PacerStampAssertions, unittest.IsolatedAsyncioTestCase)
             # 2026-11-25) — not a pacing verdict: the retry re-measures a
             # fresh window; a REAL spacing violation never takes that path.
             stamps, leads, first = await stack.pacing_stamps_with_retry(
-                f"group:{group}:message", GUILD_CHANNEL, members, 4, submit_round
+                f"group:{group}:message",
+                GUILD_CHANNEL,
+                members,
+                4,
+                submit_round,
+                # the wire floor: interval minus the lateness budget (0.45s,
+                # matching scenarios.py's PACING_TOLERANCE)
+                wire_floor=POLICY_INTERVAL - 0.45,
             )
             await asyncio.sleep(0.3)
             history = [m for m in stack.world.messages_of(GUILD_CHANNEL) if m.startswith("hi-")]

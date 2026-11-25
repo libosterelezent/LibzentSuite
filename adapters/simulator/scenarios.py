@@ -71,7 +71,10 @@ PACING_INTERVAL = 1.6
 PACING_TOLERANCE = 0.45
 #: simulated 429 wait and the tolerance when verifying the retry gap
 RETRY_AFTER = 0.8
-RETRY_TOLERANCE = 0.45  # same lateness physics: the retry's audit row rides the same pipeline
+RETRY_TOLERANCE = 0.3  # world-side stamp lag only: the blocked-send
+# timestamp is written when the world processes the 429, after the
+# wait clock started - audit-row lateness does not apply here (the
+# 429 check reads the world's own timestamps, not audit rows)
 #: grace for a send already mid-flight when the estop cancellation lands
 #: (the next paced chunk would be >= 1.5s past the halt — anything inside
 #: the grace is an in-flight completion, not a pipeline leak)

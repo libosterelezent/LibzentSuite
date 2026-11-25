@@ -1148,14 +1148,27 @@ class PluginManager:
                 )
                 return  # bounded patience: the live owner owns the hooks
             waited = True
-            # Wait for the OWNER TASK, not the proxy event: an abandoned
-            # owner never sets the event, so an event-only wait burns the
-            # full patience before every takeover — and its timeout shares
-            # the race below. Waiting on the task wakes us at the owner's
-            # completion (a prompt takeover) with the timeout only
-            # bounding a genuinely parked owner; asyncio.wait never
-            # cancels what it waits on.
-            await asyncio.wait({owner}, timeout=self._teardown_wait_timeout_s)
+            # Wait for EITHER outcome, whichever comes first: the EVENT
+            # (this attempt COMPLETED — its hooks ran) or the OWNER TASK
+            # (abandoned or completed caller). An event-only wait burns
+            # the full patience before every takeover, and a task-only
+            # wait slept through a completed runtime while its caller
+            # stayed parked in a LATER runtime's hook (review round 6:
+            # a concurrent reload held the mutation lock for the whole
+            # patience). FIRST_COMPLETED of both restores the prompt wake
+            # AND observes abandonments; asyncio.wait never cancels what
+            # it waits on — the temporary event waiter is ours to cancel.
+            ev_wait = asyncio.ensure_future(ev.wait())
+            try:
+                await asyncio.wait(
+                    {ev_wait, owner},
+                    timeout=self._teardown_wait_timeout_s,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                ev_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ev_wait
             # DRAIN (loop-traced 2026-11-25): the wait can return on its
             # own timeout in the SAME ready-batch that carries the
             # owner's cancellation — the timer pop queues our wakeup

@@ -26,12 +26,13 @@ nothing can ship until that hold is lifted; see
   dev group for flake hunts (runner-side use only — the gate never
   auto-reruns a failure).
 - The push protocol is machine-enforced: `scripts/local-ci.sh`
-  self-installs a `pre-push` hook and, on its green path, stamps
-  the tree it validated (the index tree — the gate fails fast
-  on unstaged tracked changes, so the tested tree and the
-  stamped tree are the same); the hook reads every update git
-  feeds it and refuses any push whose OUTGOING tree has no
-  matching stamp. AGENTS.md §10 tightened to match — no
+  self-installs a `pre-push` hook and, on its green path, stamps the
+  tree the run STARTED with — written only when the index and
+  worktree still match it at the end, so a mid-run stage cannot
+  name an untested tree (the gate also fails fast on unstaged
+  tracked changes); the hook reads every update git feeds it and
+  refuses any push whose OUTGOING tree has no
+  matching stamp. AGENTS.md 10 tightened to match - no
   equivalent-evidence substitutes for the gate, no
   authorizations carried over from plans or summaries.
 
@@ -73,9 +74,9 @@ nothing can ship until that hold is lifted; see
   2026-11-25): a second teardown waiting on an in-flight one
   could observe an already-cancelled owner as still live when
   its patience expired in the same event-loop batch as the
-  cancellation — it bailed, and the interrupted cleanup
-  The waiter now waits on the owning TASK's outcome (a prompt
-  takeover when the owner completes within patience), then drains
+  (`on_unload`) ran nowhere. The waiter now waits for
+  EITHER outcome - the completion event or the owner task, whichever
+  first (a prompt takeover), then drains
   one loop turn before re-checking: the drain runs every
   already-queued step first — including the owner's unwind — so
   a decided abandonment is never misread as a live owner, and a

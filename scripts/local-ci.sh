@@ -32,6 +32,11 @@ if ! git diff --quiet; then
   echo "     but stamp the index tree. Stage your work (git add), then run the gate." >&2
   exit 1
 fi
+# The tree this gate is certifying, captured NOW: the stamp at the
+# end names this tree only if the index and worktree still match it
+# (content staged DURING the run would otherwise be stamped as
+# tested - review round 6).
+GATE_TREE="$(git write-tree)"
 # self-install the pre-push hook -- the machine-checkable half of
 # the push protocol (AGENTS.md 10). Idempotent, works across
 # worktrees (git-path resolves this checkout's hooks dir).
@@ -115,15 +120,12 @@ fi
 echo ""
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL GATES GREEN — safe to push"
-  # The stamp is the INDEX tree (git write-tree): the exact tree this
-  # gate just validated. The pre-push hook compares HEAD's tree against
-  # it and refuses the push on any mismatch -- stage before gating,
-  # commit after, never edit in between. Quick mode (no suites) never
-  # stamps: only the full path does.
-  if TREE="$(git write-tree 2>/dev/null)"; then
-    printf '%s\n' "$TREE" > "$(git rev-parse --git-path gate-stamp)" || true
+  # Stamp ONLY the tree this gate started with: a mid-run stage
+  # would otherwise name an untested tree (review round 6).
+  if [ "$(git write-tree)" = "$GATE_TREE" ] && git diff --quiet; then
+    printf '%s\n' "$GATE_TREE" > "$(git rev-parse --git-path gate-stamp)" || true
   else
-    echo "gate-stamp not written -- pre-push will refuse pushes until it is"
+    echo "gate-stamp NOT written - the tree changed during the run; rerun the gate" 
   fi
 else
   echo "GATES RED — DO NOT PUSH"
