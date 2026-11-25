@@ -116,7 +116,8 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
   substitute "equivalent" evidence — "CI will catch it", "it's only
   docs", "ruff and pyright covered it". The gate runs on the exact tree
   being pushed; `scripts/hooks/pre-push` (installed by the gate,
-  comparing HEAD's tree to the green stamp) enforces it mechanically.
+  validating every update git feeds it against the green
+  stamp) enforces it mechanically.
   The hook is a floor, not a replacement for the CodeRabbit review or
   the owner's word.
 - Before any approved push: run the full local gate (`scripts/local-ci.sh`) until it is green, then run the CodeRabbit review over the pending range (see the `coderabbit-code-review` skill). Both are required. Neither replaces the other.

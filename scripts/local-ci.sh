@@ -22,8 +22,18 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# 0/7 (silent): self-install the pre-push hook -- the machine-checkable
-# half of the push protocol (AGENTS.md 10). Idempotent, works across
+# 0/6 (silent): preflight - the stamp this gate writes names the
+# INDEX tree, but the suite below tests the WORKING tree; an
+# unstaged edit would let the stamp authorize a tree the gate
+# never ran against. The protocol is stage -> gate -> commit;
+# fail fast when it is not kept.
+if ! git diff --quiet; then
+  echo "FAIL unstaged tracked changes: the gate would test the working tree" >&2
+  echo "     but stamp the index tree. Stage your work (git add), then run the gate." >&2
+  exit 1
+fi
+# self-install the pre-push hook -- the machine-checkable half of
+# the push protocol (AGENTS.md 10). Idempotent, works across
 # worktrees (git-path resolves this checkout's hooks dir).
 HOOKS_DIR="$(git rev-parse --git-path hooks)"
 cp scripts/hooks/pre-push "$HOOKS_DIR/pre-push" 2>/dev/null \

@@ -232,10 +232,12 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
         await self.add_account_with_credential(api, "alpha", TOKEN_ALPHA, plugins=["spy"])
         await api.plugins_set_setting("alpha", "spy", "greeting", "hola")
         await api.ratelimit_set("message", 12.0, 0.1, 0.4, level="account", owner="alpha")
+        # stamp BEFORE the set: the service computes expires_at at
+        # call entry, before its awaited write - a post-set stamp
+        # would miss the write time and could bound above the true
+        # remaining (review round 5)
+        cd_set_at = time.time()
         await self.cooldown_service(fw).set("alpha", "spy", "restart-cd", 300)
-        cd_set_at = time.time()  # the wall clock the persisted
-        # cooldown decays on — stamp it so the lower bound tracks
-        # measured elapsed, not a hidden run-speed budget
         await self.plugin_state(fw).set_pair("alpha", "spy", "wins", 42)
         await self.shutdown(fw)
 

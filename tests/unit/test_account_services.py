@@ -325,16 +325,16 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         services = make_services(bus=bus)
         box: list[Any] = []
-        pending = asyncio.create_task(
-            services.collect_messages(lambda e: "page" in e.content, 0.15)
-        )
+        pending = asyncio.create_task(services.collect_messages(lambda e: "page" in e.content, 0.6))
 
         def done(future: asyncio.Future[Any]) -> None:
             box.extend(future.result() if not future.exception() else [])
 
         pending.add_done_callback(done)
         for index in range(3):
-            await asyncio.sleep(0.07)  # under the idle window
+            await asyncio.sleep(0.25)  # under the idle window (2.4x:
+            # a stalled loop - 0.2s observed in-gate 2026-11-25 -
+            # must not eat the window before the next match)
             await bus.publish(
                 MessageReceived(
                     account="alpha",
@@ -345,7 +345,7 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
                     dm=True,
                 )
             )
-        collected = await asyncio.wait_for(pending, 2.0)
+        collected = await asyncio.wait_for(pending, 5.0)
         self.assertEqual([e.content for e in collected], ["page 0", "page 1", "page 2"])
 
     async def test_quiet_sender_ends_collection(self) -> None:
@@ -356,12 +356,22 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
                 account="alpha", message_id=1, channel_id=100, author_id=1, content="hit"
             )
         )
-        # subscribe-late: publish again AFTER the collector starts
+        # subscribe-late: publish again AFTER the collector starts.
+        # The subscription is OBSERVED, not slept past (review round
+        # 5): the bus.subscribe seam fires an event when the
+        # collector's handler registers, so the second publish
+        # provably follows the live subscription - no margin can
+        # race.
+        subscribed = asyncio.Event()
+        real_subscribe = bus.subscribe
+
+        def traced_subscribe(*args: Any, **kwargs: Any) -> Any:
+            subscribed.set()
+            return real_subscribe(*args, **kwargs)
+
+        bus.subscribe = traced_subscribe
         pending = asyncio.create_task(services.collect_messages(lambda e: e.content == "hit", 0.5))
-        # staging: give the collector time to subscribe before the
-        # second publish. 0.1s against a 0.5s idle timeout is 5x margin:
-        # the old 0.02s/0.05s pair raced under load (0 != 1 on CI)
-        await asyncio.sleep(0.1)
+        await subscribed.wait()
         await bus.publish(
             MessageReceived(
                 account="alpha", message_id=2, channel_id=100, author_id=1, content="hit"
