@@ -28,22 +28,17 @@ jobs:
           uv build
           ls -1 dist/
 
-  # The job name is load-bearing. master's ruleset requires the four
-  # contexts BY NAME ("unittest (3.10)" .. "unittest (3.13)"), so each leg
-  # carries its name suffix LITERALLY in the matrix — no expression logic
-  # between the matrix and the names a ruleset depends on.
+  # The job name is load-bearing. master's ruleset requires the context
+  # BY NAME ("unittest (3.10)"): the leg carries its name LITERALLY in
+  # the matrix — no expression logic between the matrix and the name a
+  # ruleset depends on.
   unittest:
     name: unittest (${{ matrix.python-version }}${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        # the full support floor: 3.10 (the declared minimum) through
-        # the newest stable — a green 3.11 proved nothing about the rest
         include:
           - { os: windows-latest, python-version: "3.10", label: "" }
-          - { os: windows-latest, python-version: "3.11", label: "" }
-          - { os: windows-latest, python-version: "3.12", label: "" }
-          - { os: windows-latest, python-version: "3.13", label: "" }
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

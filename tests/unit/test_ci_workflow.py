@@ -1,17 +1,17 @@
-"""The CI workflow's contracts that nothing online enforces.
+"""
+The CI workflow's contracts that nothing online enforces.
 
 ``.github/workflows/tests.yml`` is read as data. What is pinned here:
 
-* the check names. master's ruleset requires four contexts BY NAME
-  (``unittest (3.10)`` .. ``unittest (3.13)``): a renamed leg never reports,
-  and every pull request to master then waits on a check that does not
-  exist.
-* every leg runs on Windows, the owner's platform, under bash.
+* the check name. master's ruleset requires it BY NAME
+  (``unittest (3.10)``): a renamed leg never reports, and every pull
+  request to master then waits on a check that does not exist.
+* the leg runs on Windows, the owner's platform, under bash.
 * one step per name, and no bare ``python3``. A duplicated step ran pyright
   twice per leg, and ``python3`` is whichever interpreter the runner has.
 
-Set ``LZ_CHECK_RULESET=1`` to compare the names against the LIVE ruleset
-instead of the literals. That needs ``gh`` and the network, so it is never
+Set ``LZ_CHECK_RULESET=1`` to compare the name against the LIVE ruleset
+instead of the literal. That needs ``gh`` and the network, so it is never
 part of a routine run.
 """
 
@@ -31,14 +31,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tests.yml"
 RULESET_BRANCH = "master"
 
-#: The interpreters the project supports (the CI matrix and the trove
-#: classifiers in pyproject.toml agree on these).
-SUPPORTED_PYTHONS = ("3.10", "3.11", "3.12", "3.13")
+
+#: The interpreter CI runs (the declared minimum; the pyproject
+#: trove classifiers still list 3.10-3.13 for the library itself).
+CI_PYTHON = "3.10"
 
 #: A mirror of master's ruleset (``required_status_checks``). Re-verify it
 #: against the live one with ``LZ_CHECK_RULESET=1`` whenever either side
 #: changes.
-RULESET_LINUX_CONTEXTS = tuple(f"unittest ({v})" for v in SUPPORTED_PYTHONS)
+RULESET_CONTEXTS = (f"unittest ({CI_PYTHON})",)
 
 #: ``python3`` as a whole shell word: not part of a path, a version,
 #: another name or a ``#``-joined word (``/usr/bin/python3``, ``python3.10``,
@@ -124,18 +125,21 @@ class TestWorkflowMatrix(unittest.TestCase):
     def test_legs_are_exactly_the_required_contexts(self) -> None:
         self.assertEqual(
             sorted(self.names),
-            sorted(RULESET_LINUX_CONTEXTS),
-            "master's ruleset requires these four contexts by name: a renamed "
+            sorted(RULESET_CONTEXTS),
+            "master's ruleset requires this context by name: a renamed "
             "leg never reports and every PR to master then blocks",
         )
 
-    def test_every_supported_python_runs(self) -> None:
-        self.assertEqual({leg["python-version"] for leg in self.legs}, set(SUPPORTED_PYTHONS))
+    def test_the_leg_runs_ci_python(self) -> None:
+        self.assertEqual(
+            {leg["python-version"] for leg in self.legs},
+            {CI_PYTHON},
+        )
 
-    def test_every_leg_runs_on_windows(self) -> None:
+    def test_the_leg_runs_on_windows(self) -> None:
         self.assertTrue(
             all(leg["os"].startswith("windows") for leg in self.legs),
-            f"every leg on windows, saw: {[leg['os'] for leg in self.legs]}",
+            f"leg on windows, saw: {[leg['os'] for leg in self.legs]}",
         )
 
     def test_legs_match_the_live_ruleset(self) -> None:

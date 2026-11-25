@@ -73,16 +73,16 @@ pip-compatible export of it — regenerate with `uv export`, never hand-edit.
 Development and CI tooling (ruff, pyright, pytest + xdist) lives in the `dev`
 dependency group, which `uv sync --frozen` installs.
 
+
 > **Platforms** — the project is platform-independent: no platform-only
 > modules, and one suite that runs green on every OS. CI runs it on Windows
-> (3.10–3.13) under bash; the local gate does the same. Seven
-> capability-bound tests skip with their reason (POSIX permission bits,
-> symlinks without Developer Mode). The commands below write `python3` for
-> an ACTIVATED project environment — `uv sync` installs it but does not
-> activate it, so run `source .venv/bin/activate` first, or prefix any
-> command with `uv run --frozen` instead; that form needs no activation
-> and is the one to use on Windows.
-> If the only Python installed is outside the tested range, pin one for the
+> (3.10) under bash; the local gate does the same. Seven capability-bound
+> tests skip with their reason (POSIX permission bits, symlinks without
+> Developer Mode). The commands below write `python3` for an ACTIVATED
+> project environment — `uv sync` installs it but does not activate it,
+> so run `source .venv/bin/activate` first, or prefix any command with
+> `uv run --frozen` instead; that form needs no activation and is the one
+> to use on Windows.
 > sync with the `UV_PYTHON` environment variable: `export UV_PYTHON=3.13`
 > in a POSIX shell or Git Bash, `set UV_PYTHON=3.13` in cmd,
 > `$env:UV_PYTHON = "3.13"` in PowerShell. The
@@ -298,9 +298,10 @@ additionally needs the user-account client fork `better.py-self`
 require a live network connection.
 
 > **Runtime environment note** — the project is platform-independent: its
+
+> **Runtime environment note** — the project is platform-independent: its
 > whole test suite runs green on Linux and on native Windows. CI runs it
 > on Windows; the local gate (`scripts/local-ci.sh`, bash) does the same.
-
 ## Architecture: who calls what
 
 ```
