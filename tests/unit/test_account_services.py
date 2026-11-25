@@ -357,14 +357,17 @@ class CollectMessagesTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         # subscribe-late: publish again AFTER the collector starts
-        pending = asyncio.create_task(services.collect_messages(lambda e: e.content == "hit", 0.05))
-        await asyncio.sleep(0.02)
+        pending = asyncio.create_task(services.collect_messages(lambda e: e.content == "hit", 0.5))
+        # staging: give the collector time to subscribe before the
+        # second publish. 0.1s against a 0.5s idle timeout is 5x margin:
+        # the old 0.02s/0.05s pair raced under load (0 != 1 on CI)
+        await asyncio.sleep(0.1)
         await bus.publish(
             MessageReceived(
                 account="alpha", message_id=2, channel_id=100, author_id=1, content="hit"
             )
         )
-        collected = await asyncio.wait_for(pending, 1.0)
+        collected = await asyncio.wait_for(pending, 5.0)
         self.assertEqual(len(collected), 1)
 
     async def test_nonpositive_idle_timeout_rejected(self) -> None:

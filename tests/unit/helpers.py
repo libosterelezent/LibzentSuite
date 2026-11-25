@@ -5,7 +5,9 @@ Currently provides the A6 account-manager test doubles:
   * dict-backed fake repositories (pinned repository method names),
   * a fake plugin manager / scheduler / settings / audit / limiter,
   * in-memory Discord clients (FakeClient) + factory + canned snapshots,
-  * an event collector and a one-call manager harness.
+  * an event collector and a one-call manager harness,
+  * wait_until_async — the observable-poll wait primitive (poll an
+    observable until true or a deadline; never a fixed sleep).
 
 They implement EXACTLY the duck-typed surfaces pinned in INTEGRATION.md, so
 tests never import the parallel-built real packages.
@@ -20,6 +22,7 @@ import logging
 import shutil
 import stat
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -812,3 +815,22 @@ def fake_discord_sysmodules(lib_cls: Any) -> dict[str, Any]:
         "discord.ext": ext_mod,
         "discord.ext.commands": commands_mod,
     }
+
+
+async def wait_until_async(
+    predicate: Callable[[], Any], timeout: float = 5.0, interval: float = 0.02
+) -> bool:
+    """Poll a truthy predicate until true or timeout (the async wait_until).
+
+    The canonical replacement for every fixed ``asyncio.sleep`` that was
+    followed by an assertion. Returns ``True`` on success, ``False`` on
+    timeout -- callers should ``assertTrue`` with a message naming the
+    observable they waited for. Uses ``time.monotonic`` (immune to wall
+    clock steps) and the event loop's own sleep (no thread blocking).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return bool(predicate())

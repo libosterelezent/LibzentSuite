@@ -53,7 +53,11 @@ class PerfCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         @perf.timed("async_fn")
         async def async_fn() -> int:
-            await asyncio.sleep(0.01)
+            # 50ms (not 10ms): Windows proactor waits quantize to the ~15.6ms
+            # timer grid, so a short sleep can complete early by up to that
+            # grid. 50ms keeps the measured p50 above the 20ms floor on every
+            # platform (CI saw 3.8ms for a 10ms sleep — flake, not jitter).
+            await asyncio.sleep(0.05)
             return 2
 
         with perf.stage("block"):
@@ -64,7 +68,7 @@ class PerfCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["block"]["count"], 1)
         self.assertEqual(snap["sync_fn"]["count"], 1)
         self.assertEqual(snap["async_fn"]["count"], 1)
-        self.assertGreaterEqual(snap["async_fn"]["p50_s"], 0.005)
+        self.assertGreaterEqual(snap["async_fn"]["p50_s"], 0.02)
 
     def test_error_path_counts_and_reraises(self) -> None:
         perf = PerfCollector()

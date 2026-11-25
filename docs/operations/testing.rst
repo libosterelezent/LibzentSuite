@@ -29,8 +29,9 @@ One suite, every platform
 The suite is platform-independent. A test that depends on an OS capability
 — POSIX permission bits, symlink creation — probes for that capability and
 skips with the reason where it is missing, so the same suite is green on
-Linux and on native Windows, and CI runs it on both (3.10–3.13 on Linux,
-3.10 and 3.13 on Windows). The probes live in ``tests/unit/helpers.py``
+Linux and on native Windows. CI runs it on Windows (the owner's
+platform) on 3.10; the local gate proves the same suite on any machine.
+The probes live in ``tests/unit/helpers.py``
 (``can_symlink``, ``enforces_file_modes``) and test the capability rather
 than the platform's name: they skip exactly where the OS cannot do the
 thing under test, and still run wherever it can (Developer Mode on
@@ -45,6 +46,16 @@ Two figures are not comparable across platforms: wall-clock timing, and the
 benchmark's loop-lag histogram (Windows timers tick near 15.6 ms by default,
 so its p50 sits near 20 ms where Linux reports well under a millisecond).
 Benchmark baselines are therefore kept per platform.
+
+Waits in tests are on observables, not the clock: poll the published
+event, the recorded call, or the set flag with ``wait_until_async``
+(in ``tests/unit/helpers.py``) until it turns true or a deadline
+passes. A fixed ``asyncio.sleep`` survives only where the sleep IS the
+property under test — staging with generous margins, negative-check
+windows (asserting nothing happened), and tolerance-bound timing gaps.
+Every test also carries a 120 s per-test ceiling (``pytest-timeout``,
+thread method): a hang fails by name with every thread's stack dumped,
+instead of a leg dying at its ceiling with no attribution.
 
 Soak tests are opt-in: ``LZ_SOAK=1`` (fleet soak) and ``LZ_CHAOS=1`` (chaos
 matrix).
