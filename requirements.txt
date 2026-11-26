@@ -34,9 +34,9 @@ cryptography==50.0.2
     # via libzentsuite
 curl-cffi==0.17.0
     # via discord-py-self
-discord-protos==1.2.427
+discord-protos==1.2.432
     # via discord-py-self
-discord-py-self @ git+https://github.com/Demonic1594/better.py-self.git@7b70d32c572fa17e9fcf5af9357e0c494bbfdf0e
+discord-py-self @ git+https://github.com/Demonic1594/better.py-self.git@a8873b510ad1eed44cb6f098e8fb417b83afa61f
     # via libzentsuite
 exceptiongroup==1.3.2 ; python_full_version < '3.11'
     # via anyio
@@ -86,7 +86,7 @@ starlette==1.7.0 ; python_full_version < '3.11'
     # via fastapi
 starlette==1.10.0 ; python_full_version >= '3.11'
     # via fastapi
-types-protobuf==7.35.1.20260906
+types-protobuf==7.35.1.20261122
     # via mypy-protobuf
 typing-extensions==4.16.0
     # via
