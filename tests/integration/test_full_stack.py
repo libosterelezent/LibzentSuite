@@ -606,10 +606,19 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
         try:
             alpha = {stack.user_ids["alpha"]}
             await stack.owner_says("export")
-            # negative-check window (the documented fixed-sleep use): the
-            # flow either aborted at the guard or never started - either
-            # way nothing may leave the account
-            await asyncio.sleep(0.5)
+            # wait for the flow's OWN abort observable first (the
+            # logged warning carries the bot_id reason), bounded: an
+            # unprocessed trigger must FAIL here, not pass on an
+            # empty journal (review round - owner_says delivers the
+            # event but does not wait for handle_event to run)
+            aborted = False
+            for _ in range(100):
+                logs = await stack.framework.api.logs_tail(n=50)
+                if any("bot_id" in str(entry) for entry in logs):
+                    aborted = True
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(aborted, "the flow must abort with the bot_id reason")
             self.assertEqual(
                 stack.outbound(GUILD_CHANNEL, alpha), [], "no send may leave on a bad bot_id"
             )
