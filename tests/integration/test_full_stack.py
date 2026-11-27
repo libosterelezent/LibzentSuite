@@ -587,6 +587,28 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
         finally:
             await stack.stop()
 
+    async def test_unset_bot_id_aborts_flow_without_sending(self) -> None:
+        # the plugin-owned bot_id guard (the retirement's reference
+        # pattern): an unset or zero id aborts the flow cleanly through the
+        # ValueError contract BEFORE any DM or export command is issued
+        stack = await Stack(
+            plugin_dir=SIM_PLUGINS,
+            settings={"exporter": {"bot_id": 0}},
+        ).boot()
+        await stack.start()
+        try:
+            alpha = {stack.user_ids["alpha"]}
+            await stack.owner_says("export")
+            # negative-check window (the documented fixed-sleep use): the
+            # flow either aborted at the guard or never started - either
+            # way nothing may leave the account
+            await asyncio.sleep(0.5)
+            self.assertEqual(
+                stack.outbound(GUILD_CHANNEL, alpha), [], "no send may leave on a bad bot_id"
+            )
+        finally:
+            await stack.stop()
+
 
 class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
     """Direct account→plugin assignments gate the attached set (the

@@ -129,8 +129,8 @@ class ExporterPlugin(PluginBase):
             ctx.logger.warning("flow aborted for %s: %s", ctx.account, flow_block_reason(exc))
         except (ValueError, CredentialsError, SchedulerError) as exc:
             # same clean-abort contract for the non-FlowBlocked failures the
-            # flow can actually hit: bad config (prefix > budget), missing
-            # PRIMARY_BOT_ID, cancelled/timed-out sends during a stop/estop
+            # flow can actually hit: bad config (prefix > budget, unset or
+            # zero bot_id), cancelled/timed-out sends during a stop/estop
             ctx.logger.warning("flow aborted for %s: %s", ctx.account, exc)
         finally:
             self._in_flight = False  # release the K16 single-flow latch
@@ -145,7 +145,15 @@ class ExporterPlugin(PluginBase):
         # cache-aware: validate BEFORE acting so a gone channel aborts the
         # flow before a single message leaves the account
         ctx.services.validate_channel(trigger_channel)
-        bot_id = int(ctx.settings["bot_id"])
+        # the target bot id is PLUGIN-OWNED (the reference pattern for the
+        # retirement): require an explicit positive one BEFORE any DM or
+        # export command is issued - unset/zero aborts the flow cleanly
+        # through the ValueError contract above
+        bot_id = int(ctx.settings.get("bot_id", 0))
+        if bot_id <= 0:
+            raise ValueError(
+                f"{ctx.plugin} needs an explicit positive bot_id setting (got {bot_id!r})"
+            )
         dm_channel = await ctx.services.open_dm(bot_id)
 
         async def _request_export() -> None:
