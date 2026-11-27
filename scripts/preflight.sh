@@ -23,7 +23,16 @@ step "Ruff format"
 "$UV_BIN" run --frozen ruff format --check $PROD && ok "ruff format" || bad "ruff format"
 
 step "Pyright ratchet"
-PYRIGHT_ERRS=$("$UV_BIN" run --frozen pyright core adapters database interfaces plugins benchmark scripts parsers main.py 2>&1 | tail -1 | grep -oE '[0-9]+ error' | grep -oE '[0-9]+' || echo "0")
+PYRIGHT_SUMMARY=$("$UV_BIN" run --frozen pyright core adapters database interfaces plugins benchmark scripts parsers main.py 2>&1 | tail -1)
+case "$PYRIGHT_SUMMARY" in
+  *" errors"*)
+    PYRIGHT_ERRS=$(echo "$PYRIGHT_SUMMARY" | grep -oE '[0-9]+' | head -1)
+    ;;
+  *)
+    echo "pyright produced no diagnostic summary: $PYRIGHT_SUMMARY" >&2
+    bad "pyright invocation failed (no error count found)"
+    ;;
+esac
 PYRIGHT_BASE=$(cat .github/pyright-baseline 2>/dev/null || echo 0)
 echo "pyright: $PYRIGHT_ERRS (baseline: $PYRIGHT_BASE)"
 [ "$PYRIGHT_ERRS" -eq "$PYRIGHT_BASE" ] && ok "pyright == baseline" || bad "pyright: $PYRIGHT_BASE -> $PYRIGHT_ERRS"

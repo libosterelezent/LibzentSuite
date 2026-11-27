@@ -365,11 +365,20 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
         # accounting for _depth, everyone projects 0.05 and passes.
         gate = IdentifyGate(interval=0.05, max_wait=0.175, time_fn=lambda: 0.0)
         start = asyncio.Event()
+        all_ready = asyncio.Event()
+        ready_count = 0
         results = []
 
         async def attempt(n: int) -> None:
-            await start.wait()  # one wake wave: every waiter enters before any
-            # completion beyond the instant first one
+            # readiness handshake (review round: the fixed staging sleep
+            # was wall-clock, not controlled): every task signals before
+            # parking on the start gate; the test waits for all twelve
+            nonlocal ready_count
+            ready_count += 1
+            if ready_count == 12:
+                all_ready.set()
+            await start.wait()  # one wake wave: every waiter enters before
+            # any completion beyond the instant first one
             try:
                 await gate.acquire()
                 results.append(("ok", n))
@@ -377,7 +386,7 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
                 results.append(("fail", n))
 
         tasks = [asyncio.create_task(attempt(n)) for n in range(12)]
-        await asyncio.sleep(0.05)  # staging: all twelve park on the gate first
+        await all_ready.wait()  # all twelve are parked on the gate
         start.set()
         await asyncio.gather(*tasks)
         ok = [n for status, n in results if status == "ok"]

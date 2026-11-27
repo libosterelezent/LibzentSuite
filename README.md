@@ -74,8 +74,8 @@ Development and CI tooling (ruff, pyright, pytest + xdist) lives in the `dev`
 dependency group, which `uv sync --frozen` installs.
 
 
-> **Platforms** — the project is platform-independent: no platform-only
-> (3.10) under bash; the preflight (`scripts/preflight.sh`, ruff + pyright) runs locally in seconds.
+> **Platforms** — the project is platform-independent: no platform-only modules, and one suite that runs green on every OS. CI runs it on Windows
+> (3.10) under bash; the preflight (`scripts/preflight.sh`, ruff + pyright) runs locally in seconds. Seven capability-bound
 > tests skip with their reason (POSIX permission bits, symlinks without
 > Developer Mode). The commands below write `python3` for an ACTIVATED
 > project environment — `uv sync` installs it but does not activate it,
