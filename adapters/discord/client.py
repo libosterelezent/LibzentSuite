@@ -34,6 +34,7 @@ import math
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1711,6 +1712,7 @@ class IdentifyGate:
         "_last",
         "_lock",
         "_lock_loop",
+        "_time_fn",
         "expected",
         "interval",
         "min_interval",
@@ -1724,6 +1726,7 @@ class IdentifyGate:
         min_interval: float = MIN_INTERVAL_S,
         wait_budget: float = WAIT_BUDGET_S,
         max_wait: float | None = None,
+        time_fn: Callable[[], float] | None = None,
     ) -> None:
         self.interval = float(interval)
         if max_wait is not None:  # upstream phase-4 alias (tests/config)
@@ -1736,6 +1739,9 @@ class IdentifyGate:
         self._lock_loop: Any = None  # the loop self._lock is bound to
         self._last: float = float("-inf")
         self._depth: int = 0  # FINAL-PHASE (F4): FIFO waiters ahead-of-lock
+        #: injectable clock - tests drive the projection math from
+        # one frozen instant; production leaves it None and reads the loop
+        self._time_fn = time_fn
 
     def _lock_for(self, loop: Any) -> asyncio.Lock:
         """A gate lock bound to the CURRENT loop (see _headers_lock_for).
@@ -1752,6 +1758,12 @@ class IdentifyGate:
             self._lock_loop = loop
             self._last = float("-inf")
         return self._lock
+
+    def _now(self) -> float:
+        """The gate's clock: the injected one, or the running loop's."""
+        if self._time_fn is not None:
+            return self._time_fn()
+        return asyncio.get_running_loop().time()
 
     def release(self) -> None:
         """Return one fleet slot (a client's PERMANENT teardown).
@@ -1783,7 +1795,7 @@ class IdentifyGate:
         # projected wait BEFORE queueing: residual + the queue depth ahead
         # of us each costs a full interval (FIFO under the held lock)
         projected = (
-            (self._last + interval * (self._depth + 1) - loop.time())
+            (self._last + interval * (self._depth + 1) - self._now())
             if self._last != float("-inf")
             else 0.0
         )
@@ -1796,12 +1808,11 @@ class IdentifyGate:
         self._depth += 1
         try:
             async with lock:  # FIFO: hold while sleeping so waiters queue
-                now = loop.time()
+                now = self._now()
                 wait = self._last + self.effective_interval - now
                 if wait > 0:
                     await asyncio.sleep(wait)
-                    now = loop.time()
-                self._last = now
+                self._last = self._now()
         finally:
             self._depth -= 1
 

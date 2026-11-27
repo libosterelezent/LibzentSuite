@@ -37,7 +37,7 @@ nothing can ship until that hold is lifted; see
   authorizations carried over from plans or summaries.
 
 ### Removed
-- The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 deletes the stored `access:primary_bot_id` kv row.
+- The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 folds the stored `access:primary_bot_id` value into a `access:primary_bot_id.retired` archive row, then deletes the live key — the operator's configured id stays recoverable, not destroyed.
 
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);

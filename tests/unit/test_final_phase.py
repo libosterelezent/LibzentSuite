@@ -350,20 +350,18 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
     async def test_projected_depth_fast_fail(self) -> None:
         from adapters.discord.client import IdentifyGate
 
-        # deterministic wave (review round: the wall-clock arrival
-        # race once left the queue too shallow for the projection to
-        # fire - nothing controlled WHEN the twelve waiters enter):
-        # arm the gate as if an IDENTIFY left 0.5s IN THE FUTURE, so
-        # every waiter's projection includes that residual and all
-        # twelve fast-fail the moment they enter, whatever the loop's
-        # arrival scheduling does. The leader-passes side of the
-        # contract is covered by the spacing and wave-budget tests.
+        # deterministic wave (review rounds: the wall-clock arrival race
+        # once left the queue too shallow for the projection to fire,
+        # and a future-armed _last rejected on RESIDUAL alone - depth
+        # never mattered): the gate runs on a FROZEN clock, so every
+        # waiter projects from one instant and the rejection is purely
+        # depth-scaled - waiters 0-3 fit the 0.20 budget (0.05 x 1..4),
+        # waiters 4+ cross it. Arrival scheduling cannot touch it, and
+        # if acquire ever stops accounting for _depth, every waiter
+        # projects 0.05 and passes - the test fails.
         loop = asyncio.get_running_loop()
-        gate = IdentifyGate(interval=0.05, max_wait=0.20)
-        # pre-bind the loop's lock FIRST: _lock_for's lazy init resets
-        # _last to -inf, which would wipe the arming below
-        gate._lock_for(loop)
-        gate._last = loop.time() + 0.5
+        frozen = loop.time()
+        gate = IdentifyGate(interval=0.05, max_wait=0.20, time_fn=lambda: frozen)
         results = []
 
         async def attempt(n: int) -> None:
@@ -376,9 +374,8 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*[attempt(n) for n in range(12)])
         ok = [n for status, n in results if status == "ok"]
         failed = [n for status, n in results if status == "fail"]
-        self.assertEqual(len(ok) + len(failed), 12)
-        self.assertEqual(failed, list(range(12)))  # every projection past the budget
-        self.assertEqual(ok, [])
+        self.assertEqual(ok, [0, 1, 2, 3])  # the depth that fits the budget
+        self.assertEqual(failed, list(range(4, 12)))  # the depth past it
         ok = [n for status, n in results if status == "ok"]
         failed = [n for status, n in results if status == "fail"]
         self.assertEqual(len(ok) + len(failed), 12)

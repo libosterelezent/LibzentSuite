@@ -619,9 +619,16 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(aborted, "the flow must abort with the bot_id reason")
-            self.assertEqual(
-                stack.outbound(GUILD_CHANNEL, alpha), [], "no send may leave on a bad bot_id"
-            )
+            # the contract forbids EVERY outbound message, not just the
+            # trigger channel's - a DM to the bad bot_id would not show in
+            # GUILD_CHANNEL's journal (review round)
+            sent_anywhere = [
+                m
+                for messages in stack.world.history.values()
+                for m in messages
+                if m.author_id in alpha
+            ]
+            self.assertEqual(sent_anywhere, [], "no send may leave on a bad bot_id")
         finally:
             await stack.stop()
 

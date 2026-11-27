@@ -1279,6 +1279,13 @@ class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
             return loop.time() - t0
 
         waits = await asyncio.gather(*(waiter(k) for k in range(8)))
+        # clock-free regression check (review round: a wall-clock bound
+        # cannot separate runner lateness from a pacing regression by
+        # construction): the wave budget SCALES the interval to fit the
+        # expected fleet - wait_budget / expected - and that math is
+        # immune to lateness. The controlled-clock release-time
+        # choreography is future hardening alongside this.
+        self.assertAlmostEqual(gate.effective_interval, 0.30 / 8)
         # budget + slack: the waits include scheduler lateness under
         # 4-worker gate load (0.232s observed, 2026-11-27 — 0.20 of
         # slack was 32ms short). A structurally broken wait budget

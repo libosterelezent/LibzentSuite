@@ -880,8 +880,9 @@ MIGRATIONS: list[tuple[int, str, str]] = [
     ),
     (
         17,
-        "retire the framework primary-bot id (game-agnostic owner rule)",
-        "DELETE FROM kv WHERE key = 'access:primary_bot_id';",
+        "retire the framework primary-bot id (game-agnostic owner rule): "
+        "the stored row folds into a retired-key archive, retiring the live key",
+        "UPDATE kv SET key = 'access:primary_bot_id.retired' WHERE key = 'access:primary_bot_id';",
     ),
 ]
 
