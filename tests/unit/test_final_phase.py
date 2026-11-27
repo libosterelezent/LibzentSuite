@@ -351,36 +351,39 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
         from adapters.discord.client import IdentifyGate
 
         # deterministic wave (review rounds: the wall-clock arrival race
-        # once left the queue too shallow for the projection to fire,
-        # and a future-armed _last rejected on RESIDUAL alone - depth
-        # never mattered): the gate runs on a FROZEN clock, so every
-        # waiter projects from one instant and the rejection is purely
-        # depth-scaled - waiters 0-3 fit the 0.20 budget (0.05 x 1..4),
-        # waiters 4+ cross it. Arrival scheduling cannot touch it, and
-        # if acquire ever stops accounting for _depth, every waiter
-        # projects 0.05 and passes - the test fails.
-        loop = asyncio.get_running_loop()
-        frozen = loop.time()
-        gate = IdentifyGate(interval=0.05, max_wait=0.20, time_fn=lambda: frozen)
+        # left the queue too shallow; a future-armed _last rejected on
+        # residual alone; and a frozen clock at loop.time()'s LARGE
+        # monotonic value made frozen + 0.20 - frozen cancel to
+        # 0.1999... - admitting the boundary waiter on rounding, as
+        # the runner proved). The final shape: frozen = 0.0 (exact
+        # projections, no cancellation), budget 0.175 (every depth
+        # projection clears the boundary by >= 0.025), and a START
+        # GATE so all twelve waiters enter in one wake wave - task 0
+        # completes instantly (no _last yet), tasks 1-3 project
+        # 0.05/0.10/0.15 within the budget, task 4+ project 0.20+
+        # past it. Depth IS the rejection driver: if acquire stops
+        # accounting for _depth, everyone projects 0.05 and passes.
+        gate = IdentifyGate(interval=0.05, max_wait=0.175, time_fn=lambda: 0.0)
+        start = asyncio.Event()
         results = []
 
         async def attempt(n: int) -> None:
+            await start.wait()  # one wake wave: every waiter enters before any
+            # completion beyond the instant first one
             try:
                 await gate.acquire()
                 results.append(("ok", n))
             except ConnectionError:
                 results.append(("fail", n))
 
-        await asyncio.gather(*[attempt(n) for n in range(12)])
+        tasks = [asyncio.create_task(attempt(n)) for n in range(12)]
+        await asyncio.sleep(0.05)  # staging: all twelve park on the gate first
+        start.set()
+        await asyncio.gather(*tasks)
         ok = [n for status, n in results if status == "ok"]
         failed = [n for status, n in results if status == "fail"]
         self.assertEqual(ok, [0, 1, 2, 3])  # the depth that fits the budget
         self.assertEqual(failed, list(range(4, 12)))  # the depth past it
-        ok = [n for status, n in results if status == "ok"]
-        failed = [n for status, n in results if status == "fail"]
-        self.assertEqual(len(ok) + len(failed), 12)
-        self.assertGreater(len(failed), 0)  # depth projection fired
-        self.assertLess(len(ok), 12)
 
     async def test_spacing_still_honored(self) -> None:
         from adapters.discord.client import IdentifyGate

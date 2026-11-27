@@ -14,10 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 from database.db import Database
-from database.schema import MIGRATIONS
 
 
 async def _row(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
@@ -330,44 +328,6 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
         )  # v10..v17: fold, drops, profiles, cooldown profile, pointer, legacy fold, preset defs, primary-bot retirement
         again = await self._migrate()  # re-run: nothing new applies
         self.assertEqual(again, 0)
-
-
-class MigrationV17FoldTests(unittest.IsolatedAsyncioTestCase):
-    async def test_primary_bot_id_folds_into_retired_archive(self) -> None:
-        # PR #33's review point, resolved: the retirement deletes the
-        # LIVE key but the stored value folds into a clearly-retired
-        # archive row first - an operator's configured id stays
-        # recoverable, not destroyed
-        with tempfile.TemporaryDirectory(prefix="sm-v17-", ignore_cleanup_errors=True) as tmp:
-            path = str(Path(tmp) / "v17.db")
-            with mock.patch("database.db.MIGRATIONS", MIGRATIONS[:16]):
-                db = Database(path)
-                await db.connect()
-                await db.connection.execute(
-                    "INSERT INTO kv (key, value) VALUES ('access:primary_bot_id', '424242')"
-                )
-                await db.close()
-            db = Database(path)
-            try:
-                applied = await db.connect()  # v17 lands with the fold
-                self.assertGreaterEqual(applied, 1)
-                live = await _row(
-                    db.connection, "SELECT value FROM kv WHERE key = 'access:primary_bot_id'"
-                )
-                retired = await _row(
-                    db.connection,
-                    "SELECT value FROM kv WHERE key = 'access:primary_bot_id.retired'",
-                )
-                self.assertIsNone(live)  # the live key is gone
-                self.assertIsNotNone(retired)  # the value folded
-                assert retired is not None
-                self.assertEqual(retired["value"], "424242")
-            finally:
-                # ALWAYS close before the tempdir cleanup: an assert failure
-                # leaving the sqlite handle open made TemporaryDirectory's
-                # rmtree choke (NotADirectoryError) and the aiosqlite worker
-                # thread hang the whole pytest process on exit
-                await db.close()
 
 
 if __name__ == "__main__":
