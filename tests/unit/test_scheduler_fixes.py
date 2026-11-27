@@ -361,7 +361,10 @@ class TestLowAging(unittest.IsolatedAsyncioTestCase):
         ]
         await asyncio.sleep(0.05)
         gate.set()
-        deadline = time.monotonic() + 5.0
+        # patience only, not a property: a stalled runner (0.594s lane
+        # steps observed in-gate 2026-11-27) can outrun 5s of wall clock
+        # before 11 gated tasks finish; the loop exits the moment they do
+        deadline = time.monotonic() + 20.0
         pending = [low, *normals]
         while any(not t.is_terminal for t in pending) and time.monotonic() < deadline:
             await asyncio.sleep(0.005)
@@ -385,7 +388,7 @@ class TestLowAging(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(scheduler.cancel(stale.id))
         await asyncio.sleep(0.05)
         gate.set()
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 20.0  # same stalled-runner patience as the sibling above
         pending = [low, *normals]
         while any(not t.is_terminal for t in pending) and time.monotonic() < deadline:
             await asyncio.sleep(0.005)
