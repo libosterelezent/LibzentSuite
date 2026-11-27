@@ -350,8 +350,13 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
     async def test_projected_depth_fast_fail(self) -> None:
         from adapters.discord.client import IdentifyGate
 
-        gate = IdentifyGate(interval=0.05, max_wait=0.45)
-        # 12 waiters queue: those projected beyond 0.45s fast-fail
+        # 12 waiters queue: those projected beyond the wait budget
+        # fast-fail. max_wait 0.20 (not 0.45): a loaded loop staggers
+        # the waiters' arrival, and with 0.45 the queue never reached
+        # projection depth — zero failed (2026-11-27). At depth 5
+        # (5 x 0.05s spacing) the projection crosses 0.20 under any
+        # staggering 12 gathered waiters can produce.
+        gate = IdentifyGate(interval=0.05, max_wait=0.20)
         results = []
 
         async def attempt(n: int) -> None:

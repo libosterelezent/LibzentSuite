@@ -73,6 +73,16 @@ nothing can ship until that hold is lifted; see
   the PerfCollector p50 assertion hit Windows timer quantization (a
   10 ms sleep measured 3.8 ms on the ~15.6 ms tick grid — now a 50 ms
   sleep with a 20 ms floor, which undershoot cannot cross).
+- The identify-gate timing family gets the margin medicine: the wave
+  budget's slack covers the 0.232s of scheduler lateness a 4-worker
+  gate run produces (0.20 was 32ms short), the depth projection fires
+  under any arrival staggering a loaded loop produces (max_wait
+  0.45 to 0.20 - at 0.45 the queue never reached projection depth and
+  zero waiters failed), and the pacing sampler's second honesty limit
+  ("read no clock" under a stalled stats call) joins the re-measurement
+  path alongside "cannot be judged". Riding along: the exporter
+  fixture's plugin-owned bot_id guard (PR #33's review finding, parked
+  through the merge).
 - The teardown takeover race (reproduced deterministically,
   2026-11-25): a second teardown waiting on an in-flight one
   could observe an already-cancelled owner as still live when

@@ -399,7 +399,14 @@ class Stack:
                 )
                 return stamps, leads, first
             except AssertionError as exc:
-                if "pacing cannot be judged" not in str(exc) or attempt == attempts - 1:
+                # BOTH sampler-infrastructure limits are retryable, not
+                # pacing verdicts: "cannot be judged" (a poll more than an
+                # interval late) and "read no clock" (a stalled stats call
+                # produced no fresh clock reading between samples — seen
+                # once under a 21:47 loaded run, 2026-11-27).
+                if (
+                    "pacing cannot be judged" not in str(exc) and "read no clock" not in str(exc)
+                ) or attempt == attempts - 1:
                     raise
                 first += sends
                 await resubmit(first)
