@@ -101,7 +101,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 
 - Work on a **feature branch**. Confirm it with `git branch --show-current` before the first edit. Never commit to `master`, `main`, or `dev`.
 - Stop any running service that hosts the changed code before committing, so the committed state is the tested state.
-- Run `scripts/preflight.sh` before every commit (ruff + pyright, seconds). The full suite runs on the CI runner — that is the enforcement point.
+- Run `scripts/preflight.sh` before every commit (ruff + pyright, seconds), and run the **narrow tests** for every file you touched (the affected test files, not the full suite). The CI runner validates the full suite — it is the backstop, not the substitute for narrow verification.
 - Review `git diff` and `git status` before each commit. Never commit a file you can't describe.
 - One logical change per commit, in dependency order: foundation → feature → tests → docs.
 - Commit messages: `type(scope): what changed — and why it matters to users`. Name the trigger (bug report, audit finding, CI failure) when relevant.

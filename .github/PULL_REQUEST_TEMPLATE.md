@@ -7,7 +7,7 @@
 - **[test file]**: [what was tested, count]
 - **ruff**: clean
 - **pyright**: 0 errors
-- **Full suite**: [N] passed on CI (the runner is the enforcement point)
+- **Full suite**: [N] passed on CI (the runner is the backstop; the narrow tests ran locally before push)
 - **Docs**: [what was updated, or "not needed"]
 
 ## Pre-PR review
