@@ -24,13 +24,16 @@ step "Ruff format"
 
 step "Pyright ratchet"
 PYRIGHT_SUMMARY=$("$UV_BIN" run --frozen pyright core adapters database interfaces plugins benchmark scripts parsers main.py 2>&1 | tail -1)
+# strict format match: pyright's summary line is "N errors, N warnings, ..."
+# (starts with a digit, then " errors, "). Rejects anything else — a
+# malformed line like "version 0: errors" must not read as zero.
 case "$PYRIGHT_SUMMARY" in
-  *" errors"*)
-    PYRIGHT_ERRS=$(echo "$PYRIGHT_SUMMARY" | grep -oE '[0-9]+' | head -1)
+  [0-9]*" errors, "*)
+    PYRIGHT_ERRS="${PYRIGHT_SUMMARY%% errors*}"
     ;;
   *)
-    echo "pyright produced no diagnostic summary: $PYRIGHT_SUMMARY" >&2
-    bad "pyright invocation failed (no error count found)"
+    echo "pyright produced no valid diagnostic summary: $PYRIGHT_SUMMARY" >&2
+    bad "pyright failed (summary does not match 'N errors, N warnings, ...')"
     ;;
 esac
 PYRIGHT_BASE=$(cat .github/pyright-baseline 2>/dev/null || echo 0)
