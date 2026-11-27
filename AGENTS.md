@@ -101,7 +101,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 
 - Work on a **feature branch**. Confirm it with `git branch --show-current` before the first edit. Never commit to `master`, `main`, or `dev`.
 - Stop any running service that hosts the changed code before committing, so the committed state is the tested state.
-- A red suite blocks the commit. Fix it first.
+- Run `scripts/preflight.sh` before every commit (ruff + pyright, seconds). The full suite runs on the CI runner — that is the enforcement point.
 - Review `git diff` and `git status` before each commit. Never commit a file you can't describe.
 - One logical change per commit, in dependency order: foundation → feature → tests → docs.
 - Commit messages: `type(scope): what changed — and why it matters to users`. Name the trigger (bug report, audit finding, CI failure) when relevant.
@@ -112,16 +112,15 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - Push authorization is per-request: the word must appear in the CURRENT
   message. Plans, summaries, roadmap items, and earlier approvals never
   carry over — "next: push" in any document is a plan, not permission.
-- The pre-push gate is a fixed protocol, not a judgment call. Never
-  substitute "equivalent" evidence — "CI will catch it", "it's only
-  docs", "ruff and pyright covered it". The gate runs on the exact tree
-  being pushed; `scripts/hooks/pre-push` (installed by the gate,
-  validating every update git feeds it against the green
-  stamp) enforces it mechanically.
-  The hook is a floor, not a replacement for the CodeRabbit review or
-  the owner's word.
-- Before any approved push: run the full local gate (`scripts/local-ci.sh`) until it is green, then run the CodeRabbit review over the pending range (see the `coderabbit-code-review` skill). Both are required. Neither replaces the other.
-- The local gate must never delete or overwrite `state/`. If a script would, stop and report it.
+- Every PR carries its **tags** (from the repo's label set) and its
+  **body format** (`.github/PULL_REQUEST_TEMPLATE.md`): Summary,
+  Testing, Pre-PR review, General Info. The body IS the certification
+  narrative — the Testing section states what was verified, and what
+  was NOT re-verified, honestly.
+- Before any approved push: run the CodeRabbit review over the pending
+  range (see the `coderabbit-code-review` skill). CI green on the runner
+  is the merge prerequisite. One review round per wave — no infinite
+  loops.
 - Leave the working tree clean. Say what you deliberately left uncommitted, and why.
 
 ## 11. Naming

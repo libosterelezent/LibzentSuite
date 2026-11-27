@@ -65,6 +65,18 @@ nothing can ship until that hold is lifted; see
   ran the 3.13 leg — duplicated effort costing ~10 minutes per
   gate run. The coverage floor is now measured on the 3.10 leg,
   and the local `.venv` matches the gate interpreter.
+- The push protocol swaps its enforcement point: the local
+  full-suite gate (`scripts/local-ci.sh` + the stamp/hook
+  mechanism) retires; `scripts/preflight.sh` (ruff + pyright,
+  seconds) runs before every commit, and the CI runner is the
+  merge prerequisite. Every PR carries its tags and the body
+  format (`.github/PULL_REQUEST_TEMPLATE.md`): Summary, Testing,
+  Pre-PR review, General Info — the body is the certification
+  narrative, honestly stating what was verified and what was
+  NOT re-verified. The swap's evidence: the local gate produced
+  ~50% environmental false positives under machine load while
+  the isolated runner caught the one real bug the gate missed
+  (the float cancellation). The runner is the better oracle.
 
 ### Fixed
 - Two timing flakes the first Windows CI run of the portability branch
