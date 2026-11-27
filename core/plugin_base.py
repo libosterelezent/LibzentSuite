@@ -137,7 +137,7 @@ class PluginServices(Protocol):
     never sleep to self-throttle.
 
     NOTE: ``open_dm`` was added by A3 (see module docstring) — flow
-    plugins use it to learn the primary bot's DM channel id before collecting
+    plugins use it to open a target user's DM channel before collecting
     pages.
 
     PERSISTENT PLUGIN API (public, documented): ``cooldown_*`` and ``state_*``
@@ -331,7 +331,7 @@ class PluginServices(Protocol):
 
     @property
     def credentials(self) -> Credentials:
-        """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
+        """Fleet credentials (owner ids) — never hardcoded."""
 
         raise NotImplementedError
 

@@ -36,6 +36,9 @@ nothing can ship until that hold is lifted; see
   equivalent-evidence substitutes for the gate, no
   authorizations carried over from plans or summaries.
 
+### Removed
+- The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 deletes the stored `access:primary_bot_id` kv row.
+
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);
   `unittest discover` retired — each CI/gate leg drops from ~7.5

@@ -15,8 +15,9 @@ Flow (behavior ported from the audited original onto the task pipeline):
      triggering channel with inter_chunk_delay between chunks — every send
      goes through ctx.services (task scheduler -> rate pacing -> audit).
 
-Every tunable is a declared Setting; the the_bot id and the allowed owner ids
-come from credentials (.env) — nothing is hardcoded.
+Every tunable is a declared Setting — including the target bot id (this
+plugin's own schema; the framework is game-agnostic and owns no bot concept).
+The allowed owner ids come from credentials (.env) — nothing is hardcoded.
 
 Flow safety (unchanged contract):
   The services/cache raise FlowBlocked subclasses when this flow's target is
@@ -87,6 +88,12 @@ class ExporterPlugin(PluginBase):
         ),
         Setting("export_command", "str", "$dump", "the_bot command that DMs the soulmate list."),
         Setting("import_prefix", "str", DEFAULT_PREFIX, "Prefix used for the produced chunks."),
+        Setting(
+            "bot_id",
+            "int",
+            0,
+            "The target bot this flow talks to (THIS plugin's schema — the framework owns no primary-bot concept).",
+        ),
     )
 
     # -------------------------------------------------------------- lifecycle
@@ -138,7 +145,7 @@ class ExporterPlugin(PluginBase):
         # cache-aware: validate BEFORE acting so a gone channel aborts the
         # flow before a single message leaves the account
         ctx.services.validate_channel(trigger_channel)
-        bot_id = ctx.services.credentials.primary_bot_id
+        bot_id = int(ctx.settings["bot_id"])
         dm_channel = await ctx.services.open_dm(bot_id)
 
         async def _request_export() -> None:

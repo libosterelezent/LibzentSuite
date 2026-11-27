@@ -558,7 +558,6 @@ class PassthroughTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(settings_dict=settings_dict)
         self.assertEqual(services.account, "alpha")
         self.assertEqual(services.plugin, "exporter")
-        self.assertEqual(services.credentials.primary_bot_id, 123)
         self.assertIs(services.settings, settings_dict)  # live reference kept
         settings_dict["live"] = False
         self.assertFalse(services.settings["live"])

@@ -89,6 +89,7 @@ DEMO_PLUGIN_SETTINGS: dict[str, dict[str, Any]] = {
         "dm_read_timeout": 3.0,
         "inter_chunk_delay": 0.05,
         "max_chunk_length": MAX_CHUNK_LENGTH,
+        "bot_id": SYNTHETIC_BOT_ID,
     }
 }
 

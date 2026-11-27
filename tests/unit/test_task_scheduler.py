@@ -403,9 +403,7 @@ class TestLanes(SchedulerTestBase):
         gate = self.limiter.block_acquires()
         low = self.scheduler.submit("alpha", "p", "message", priority=Priority.LOW)
         high = self.scheduler.submit("beta", "p", "message", priority=Priority.HIGH)
-        self.assertTrue(
-            await self.wait_until(lambda: len(self.limiter.acquire_order) == 2)
-        )
+        self.assertTrue(await self.wait_until(lambda: len(self.limiter.acquire_order) == 2))
         # the shared grant gate lets the HIGH task enter limiter.acquire first
         self.assertEqual(self.limiter.acquire_order, ["beta", "alpha"])
         gate.set()
@@ -455,8 +453,7 @@ class TestCancel(SchedulerTestBase):
         gate.set()  # the parked worker wakes and aborts at its checkpoint
         self.assertTrue(
             await self.wait_until(
-                lambda: len(self.repo.add_calls) == 1
-                and len(self.recorder.of(TaskCancelled)) == 1
+                lambda: len(self.repo.add_calls) == 1 and len(self.recorder.of(TaskCancelled)) == 1
             )
         )
         self.assertEqual(self.sender.calls, [])
@@ -522,9 +519,11 @@ class TestRetry(SchedulerTestBase):
         self.sender.outcomes.append(("raise", ServerRateLimit(2.0, True)))
         self.assertTrue(
             await self.wait_until(
-                lambda: len(self.limiter.reports) == 1
-                and len(self.sender.calls) == 2
-                and len(self.audit.calls) == 1
+                lambda: (
+                    len(self.limiter.reports) == 1
+                    and len(self.sender.calls) == 2
+                    and len(self.audit.calls) == 1
+                )
             )
         )
 
@@ -640,7 +639,9 @@ class TestRetry(SchedulerTestBase):
         task = self.scheduler.submit("alpha", "p", "message", retries=0)
         self.sender.outcomes.append(("raise", ServerRateLimit(1.0, True)))
         self.assertTrue(
-            await self.wait_until(lambda: task.status == "completed" and len(self.sender.calls) == 2)
+            await self.wait_until(
+                lambda: task.status == "completed" and len(self.sender.calls) == 2
+            )
         )
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 2)  # failed once, retried
@@ -870,9 +871,11 @@ class TestExactlyOnceRaces(SchedulerTestBase):
         self.assertFalse(self.scheduler.cancel(task.id))
         self.assertTrue(
             await self.wait_until(
-                lambda: len(self.repo.add_calls) == 1
-                and len(self.audit.calls) == 1
-                and len(self.recorder.of(TaskCompleted)) == 1
+                lambda: (
+                    len(self.repo.add_calls) == 1
+                    and len(self.audit.calls) == 1
+                    and len(self.recorder.of(TaskCompleted)) == 1
+                )
             )
         )
         self.assertEqual(task.status, "completed")
@@ -1225,9 +1228,7 @@ class TestFailedStopHardening(SchedulerTestBase):
         hold.set()
         with self.assertRaises(asyncio.CancelledError):
             await owner
-        self.assertTrue(
-            await self.wait_until(lambda: t1.is_terminal and t2.status == "cancelled")
-        )
+        self.assertTrue(await self.wait_until(lambda: t1.is_terminal and t2.status == "cancelled"))
 
         self.assertTrue(t1.is_terminal)  # abort drove it terminal
         self.assertEqual(t2.status, "cancelled")  # NOT left for a respawn

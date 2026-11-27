@@ -477,7 +477,6 @@ class SimulationRunner:
                 # break owner-gating and the primary bot-page matching in every scenario
                 merged = {
                     **self._credentials.snapshot(),
-                    "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                     "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                     f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                 }
@@ -485,7 +484,6 @@ class SimulationRunner:
             else:
                 credentials = Credentials.from_values(
                     {
-                        "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                         "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                         f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                     }

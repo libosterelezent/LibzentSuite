@@ -388,7 +388,6 @@ class TestCredentials(_TmpCase):
     def test_env_bom_and_inline_comments(self) -> None:
         env = Credentials.parse_env('\ufeffPRIMARY_BOT_ID=123 # the bot\nTOKEN=ab#cd\nQ="x # y"\n')
         self.assertEqual(env, {"PRIMARY_BOT_ID": "123", "TOKEN": "ab#cd", "Q": "x # y"})
-        self.assertEqual(Credentials(env).primary_bot_id, 123)
 
     def test_owner_ids_parsed_once(self) -> None:
         creds = Credentials({"OWNER_USER_IDS": "1, 2;3"})
