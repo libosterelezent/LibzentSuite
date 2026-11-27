@@ -29,7 +29,7 @@ orchestration. Plugins stay independent of the interface layer.
 `.github/pyright-baseline`). The project is platform-independent: one
 suite, no platform-only modules, green on Linux and native Windows.
 CI runs it on Windows (the owner's platform) on 3.10; the local gate
-(`scripts/local-ci.sh`, bash) proves the same on any machine.
+(`scripts/preflight.sh`, bash) proves the fast checks on any machine.
 pytest + xdist owns the runner (`-n auto --dist loadscope`); mypy
 retired with both its trees at ZERO, its pyproject section removed.
 The two-level data model is live (profiles + presets + executions,

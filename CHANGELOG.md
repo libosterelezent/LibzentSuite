@@ -37,7 +37,7 @@ nothing can ship until that hold is lifted; see
   authorizations carried over from plans or summaries.
 
 ### Removed
-- The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 deletes the stored `access:primary_bot_id` kv row.
+- The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 folds the stored `access:primary_bot_id` value into a `access:primary_bot_id.retired` archive row, then deletes the live key — the operator's configured id stays recoverable, not destroyed.
 
 ### Changed
 - The test runner is pytest + xdist (`-n auto --dist loadscope`);
@@ -65,6 +65,18 @@ nothing can ship until that hold is lifted; see
   ran the 3.13 leg — duplicated effort costing ~10 minutes per
   gate run. The coverage floor is now measured on the 3.10 leg,
   and the local `.venv` matches the gate interpreter.
+- The push protocol swaps its enforcement point: the local
+  full-suite gate (`scripts/local-ci.sh` + the stamp/hook
+  mechanism) retires; `scripts/preflight.sh` (ruff + pyright,
+  seconds) runs before every commit, and the CI runner is the
+  merge prerequisite. Every PR carries its tags and the body
+  format (`.github/PULL_REQUEST_TEMPLATE.md`): Summary, Testing,
+  Pre-PR review, General Info — the body is the certification
+  narrative, honestly stating what was verified and what was
+  NOT re-verified. The swap's evidence: the local gate produced
+  ~50% environmental false positives under machine load while
+  the isolated runner caught the one real bug the gate missed
+  (the float cancellation). The runner is the better oracle.
 
 ### Fixed
 - Two timing flakes the first Windows CI run of the portability branch
@@ -73,6 +85,16 @@ nothing can ship until that hold is lifted; see
   the PerfCollector p50 assertion hit Windows timer quantization (a
   10 ms sleep measured 3.8 ms on the ~15.6 ms tick grid — now a 50 ms
   sleep with a 20 ms floor, which undershoot cannot cross).
+- The identify-gate timing family gets the margin medicine: the wave
+  budget's slack covers the 0.232s of scheduler lateness a 4-worker
+  gate run produces (0.20 was 32ms short), the depth projection fires
+  under any arrival staggering a loaded loop produces (max_wait
+  0.45 to 0.20 - at 0.45 the queue never reached projection depth and
+  zero waiters failed), and the pacing sampler's second honesty limit
+  ("read no clock" under a stalled stats call) joins the re-measurement
+  path alongside "cannot be judged". Riding along: the exporter
+  fixture's plugin-owned bot_id guard (PR #33's review finding, parked
+  through the merge).
 - The teardown takeover race (reproduced deterministically,
   2026-11-25): a second teardown waiting on an in-flight one
   could observe an already-cancelled owner as still live when

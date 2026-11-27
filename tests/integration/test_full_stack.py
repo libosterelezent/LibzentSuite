@@ -399,7 +399,14 @@ class Stack:
                 )
                 return stamps, leads, first
             except AssertionError as exc:
-                if "pacing cannot be judged" not in str(exc) or attempt == attempts - 1:
+                # BOTH sampler-infrastructure limits are retryable, not
+                # pacing verdicts: "cannot be judged" (a poll more than an
+                # interval late) and "read no clock" (a stalled stats call
+                # produced no fresh clock reading between samples — seen
+                # once under a 21:47 loaded run, 2026-11-27).
+                if (
+                    "pacing cannot be judged" not in str(exc) and "read no clock" not in str(exc)
+                ) or attempt == attempts - 1:
                     raise
                 first += sends
                 await resubmit(first)
@@ -584,6 +591,44 @@ class TestFullStackWorkloadFlow(PacerStampAssertions, unittest.IsolatedAsyncioTe
             self.assert_pacer_stamps_spaced(stamps, jitters)
             # STRICT, on the wire: no send left before the pacer admitted it
             self.assert_no_send_before_its_stamp(leads)
+        finally:
+            await stack.stop()
+
+    async def test_unset_bot_id_aborts_flow_without_sending(self) -> None:
+        # the plugin-owned bot_id guard (the retirement's reference
+        # pattern): an unset or zero id aborts the flow cleanly through the
+        # ValueError contract BEFORE any DM or export command is issued
+        stack = await Stack(
+            plugin_dir=SIM_PLUGINS,
+            settings={"exporter": {"bot_id": 0}},
+        ).boot()
+        await stack.start()
+        try:
+            alpha = {stack.user_ids["alpha"]}
+            await stack.owner_says("export")
+            # wait for the flow's OWN abort observable first (the
+            # logged warning carries the bot_id reason), bounded: an
+            # unprocessed trigger must FAIL here, not pass on an
+            # empty journal (review round - owner_says delivers the
+            # event but does not wait for handle_event to run)
+            aborted = False
+            for _ in range(100):
+                logs = await stack.framework.api.logs_tail(n=50)
+                if any("bot_id" in str(entry) for entry in logs):
+                    aborted = True
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(aborted, "the flow must abort with the bot_id reason")
+            # the contract forbids EVERY outbound message, not just the
+            # trigger channel's - a DM to the bad bot_id would not show in
+            # GUILD_CHANNEL's journal (review round)
+            sent_anywhere = [
+                m
+                for messages in stack.world.history.values()
+                for m in messages
+                if m.author_id in alpha
+            ]
+            self.assertEqual(sent_anywhere, [], "no send may leave on a bad bot_id")
         finally:
             await stack.stop()
 

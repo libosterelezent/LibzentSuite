@@ -16,8 +16,7 @@ always share a worker — two classes from the same module may not):
 
    scripts/run_tests.sh                 # the locked environment, serial
    scripts/run_tests.sh -n auto         # parallel
-   scripts/local-ci.sh quick            # lint, format, export sync, pyright ratchet
-   scripts/local-ci.sh                  # the full gate — what CI runs
+   scripts/preflight.sh                 # ruff + pyright (seconds; the runner does the suite)
    python3 main.py --sim export_basic   # one scenario, end to end
 
 The two shell scripts are bash: on Windows run them from Git Bash (they come
@@ -30,7 +29,7 @@ The suite is platform-independent. A test that depends on an OS capability
 — POSIX permission bits, symlink creation — probes for that capability and
 skips with the reason where it is missing, so the same suite is green on
 Linux and on native Windows. CI runs it on Windows (the owner's
-platform) on 3.10; the local gate proves the same suite on any machine.
+platform) on 3.10; the preflight (ruff + pyright) runs locally in seconds, and the CI runner validates the suite.
 The probes live in ``tests/unit/helpers.py``
 (``can_symlink``, ``enforces_file_modes``) and test the capability rather
 than the platform's name: they skip exactly where the OS cannot do the

@@ -204,7 +204,7 @@ addopts = "-q --ignore=dump"
 timeout = 120
 timeout_method = "thread"
 
-# The distribution strategy lives in the RUNNER (local-ci.sh, CI), not
+# The distribution strategy lives in the RUNNER (preflight.sh, CI), not
 # here: the full suite runs parallel (-n auto --dist loadscope) — the
 # serial-unittest fallback for test_rich_model.py was retired with the
 # click-cancellation isolation fix (2026-11-19); keeping addopts bare
