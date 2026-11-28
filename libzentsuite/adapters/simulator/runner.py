@@ -114,7 +114,6 @@ from libzentsuite.core.credentials import Credentials
 from libzentsuite.core.errors import SimulationError
 from libzentsuite.core.event_bus import EventBus, ScenarioFinished, ScenarioStarted
 from libzentsuite.core.logging_service import LogService, ServiceLogger
-from libzentsuite.core.plugin_manager.commands import COMMAND_HUB
 from libzentsuite.core.settings_manager import SettingsManager
 
 if TYPE_CHECKING:
@@ -323,25 +322,7 @@ class SimulationRunner:
         #: loader modules created by THIS run's discover (sys.modules purge
         #: set — see _purge_plugin_modules)
         sim_plugin_modules: set[str] = set()
-        # HUB SAVE (sim-leak fix): the ephemeral PluginManager binds the
-        # PROCESS-WIDE command hub on construction (last-wins), which
-        # silently steals the binding from the live production manager —
-        # and its close() then unbinds, leaving the hub with NO manager:
-        # every live self-command died after one dashboard simulation.
-        # Save the current binding and restore it on EVERY exit path.
-        saved_hub_manager = COMMAND_HUB.bound_manager
         plugins_mgr: Any = None  # None until assembly binds the ephemeral manager
-
-        def _restore_command_hub() -> None:
-            """Put the production manager back behind the process hub."""
-            try:
-                if saved_hub_manager is None:
-                    if plugins_mgr is not None:
-                        COMMAND_HUB.unbind(plugins_mgr)
-                else:
-                    COMMAND_HUB.bind(saved_hub_manager)
-            except Exception:
-                pass  # teardown must never fail on hub bookkeeping
 
         try:  # assembly guard: a failure below must close the ephemeral DB
             await settings.load()
@@ -535,7 +516,6 @@ class SimulationRunner:
                     continue
                 with contextlib.suppress(Exception):
                     await stopper()
-            _restore_command_hub()
             _purge_plugin_modules(sim_plugin_modules)
             shutil.rmtree(key_dir, ignore_errors=True)
             await db.close()
@@ -742,10 +722,6 @@ class SimulationRunner:
             # sim-only cleanups: this run's plugin modules and temp key
             _purge_plugin_modules(sim_plugin_modules)
             shutil.rmtree(key_dir, ignore_errors=True)
-            # HUB RESTORE (see the save above): even a clean teardown
-            # leaves the sim manager unbinding the process hub — put
-            # the production manager back or live self-commands die
-            _restore_command_hub()
 
         # publish AFTER teardown: the finally block above can still append
         # failures — the event must agree with the returned report

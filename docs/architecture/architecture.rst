@@ -435,13 +435,15 @@ The live Discord client is the better.py-self fork, adopted fully
   plugin-data store → database), every step fault-tolerant.
 - Tests are deterministic: injected clocks, in-memory databases, the
   simulator adapter. No real credentials or network in routine tests.
-  Focused suites first, then adjacent, then the full suite (~1,680
-  tests in CI: 3.10–3.13 on Linux, 3.10 and 3.13 on Windows). Never
-  weaken a test to reach green.
+  Focused suites first, then adjacent, then the full suite (~1,715
+  tests; CI gates it on 3.10 on Windows — the same interpreter the
+  root ``.python-version`` pin enforces locally; other versions stay
+  supported but ungated). Never weaken a test to reach green.
 - The project is platform-independent: no platform-only modules, and
-  one suite that runs green on Linux and on native Windows — CI runs it
-  on both. Tests that need an OS capability probe for it and skip with
-  the reason where it is missing.
+  one suite that runs green on Linux and on native Windows — CI gates
+  the Windows leg (the owner's platform); Linux stays supported. Tests
+  that need an OS capability probe for it and skip with the reason
+  where it is missing.
 
 9. Recorded architecture decisions
 ----------------------------------

@@ -11,8 +11,7 @@ generic formats...) plug in WITHOUT touching plugin or framework code::
         ...
 
 Design:
-  * REGISTRY, not a framework service — a process-wide singleton
-    (the same pattern as ``core.plugin_manager.commands.COMMAND_HUB``);
+  * REGISTRY, not a framework service — a process-wide singleton;
     nothing in ``core/`` imports this, keeping the parser subsystem
     decoupled (per the parsers/ design contract);
   * LAZY backends — a registered factory builds on first use and the
@@ -202,7 +201,7 @@ class ParserManager:
             self._instances.clear()
 
 
-#: process-wide singleton (one registry per process, like COMMAND_HUB)
+#: process-wide singleton (one registry per process)
 PARSER_MANAGER = ParserManager()
 
 

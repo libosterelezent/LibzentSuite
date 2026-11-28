@@ -17,6 +17,16 @@ nothing can ship until that hold is lifted; see
 ## [Unreleased]
 
 ### Added
+- The root `.python-version` pins the project interpreter to 3.10 — the
+  gated interpreter, locally and on CI, by construction: uv builds the
+  project environment on the pin (the local `.venv` converted), so every
+  `uv run` — tests, preflight, the fast-edit tooling — matches the runner
+  exactly instead of riding the dev interpreter (a full local suite green
+  on 3.13 certified nothing about 3.10; PR #37's runner legs exposed the
+  split). Every CI job provisions the pinned interpreter now — the
+  audit/build legs rode a 3.11 runner default that uv's only-system
+  mode could not reconcile with the pin. Other interpreters stay
+  supported but ungated.
 - The `expect` primitive (client-capability Track B): a send-coupled
   reactive window on the plugin services surface —
   `async with ctx.services.expect(check, timeout) as window:` enters
@@ -51,6 +61,16 @@ nothing can ship until that hold is lifted; see
   authorizations carried over from plans or summaries.
 
 ### Removed
+- The self-command hub (`core.plugin_manager.commands`): `COMMAND_HUB`,
+  `SelfCommandHub`, and its process-global seams. Command registration
+  is the library's cog surface (COG declarations hosted per
+  (account, plugin)) — the framework holds no command machinery of its
+  own. The account manager's access seam is direct constructor
+  injection (`AccountManager(access=...)`, wired by the bootstrap); the
+  simulator runner's hub save/restore dance and the test package's
+  seam-isolation wrapper went with it (the leakage class they guarded
+  is structurally impossible without the global). The file lives on in
+  `dump/fragments/commands_hub_seam_holder.py`.
 - The framework-level primary-bot id: `AccessManager.primary_bot_id`/`set_primary_bot_id`, the `Credentials.primary_bot_id` env fallback, the `admin_primary_bot_id*` API verbs, and the `PRIMARY_BOT_ID` env key. The suite is game-agnostic — a target-bot id is plugin-schema domain now (the exporter sim fixture declares its own `bot_id` setting). Migration v17 folds the stored `access:primary_bot_id` value into a `access:primary_bot_id.retired` archive row, then deletes the live key — the operator's configured id stays recoverable, not destroyed.
 
 ### Changed

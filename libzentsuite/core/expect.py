@@ -230,12 +230,13 @@ class ExpectWindow:
     def _scan_collect(self, matches: list[MessageReceived], n: int) -> None:
         """Gather up to ``n`` matches from the cursor, advancing it
         past everything examined."""
+        checks = (self._check,)  # once per scan, not per event
         evicted = self._evicted()
         start = max(self._consumed, evicted)
         while start < self._appended and len(matches) < n:
             event = self._ring[start - evicted]
             start += 1
-            if self._passes((self._check,), event):
+            if self._passes(checks, event):
                 matches.append(event)
         self._consumed = start
 

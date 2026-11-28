@@ -36,7 +36,7 @@ stdlib bridge) → EventBus → RateLimitManager (config policies, lane from
 kv) → SettingsManager → AuditRecorder → TaskScheduler (late-bound sender)
 → PluginManager.discover → AccountManager (restores
 persisted accounts) → sender bound → scheduler start →
-ControlAPI (self-command hub bridged via ``COMMAND_HUB.api_provider``) →
+ControlAPI →
 surface (REPL / one-shot CLI / headless).
 
 Full digest: ``knowledgebase/ARCHITECTURE.md`` and

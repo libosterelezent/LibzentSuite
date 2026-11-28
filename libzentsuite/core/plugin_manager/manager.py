@@ -41,13 +41,11 @@ from libzentsuite.core.event_bus import (
     ReactionAdded,
 )
 
-from .commands import COMMAND_HUB
 from .loader import PluginLoader
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from libzentsuite.core.access_manager import AccessManager
     from libzentsuite.core.plugin_base import PluginServices
     from libzentsuite.core.settings_manager import Setting, SettingsManager
 
@@ -97,11 +95,6 @@ class PluginManager:
     #: the C2 cog-host seam — bootstrap injects the process's PluginCogHost
     #: (None on direct-construction stacks; cog verbs are then unavailable)
     cog_host: PluginCogHost | None = None
-
-    #: the invoker gate's access seam — bootstrap wires the DB-backed
-    #: AccessManager here (None on direct-construction stacks, where the
-    #: gate falls back to the legacy env owner-ids grant)
-    _access_manager: AccessManager | None = None
 
     def __init__(
         self,
@@ -207,15 +200,10 @@ class PluginManager:
         self._unsub_deleted = bus.subscribe(MessageDeleted, self._on_message)
         self._unsub_reaction = bus.subscribe(ReactionAdded, self._on_message)
         self._discovered = False
-        # self-command registry: this manager is the process's registry
-        # source (last-wins across test-built managers — see commands.py).
-        # The attribute form lets tests substitute a private hub.
-        self.command_hub = COMMAND_HUB
         #: C2: the cog host — when wired, attach/detach drives
         #: add_cog/remove_cog per (account, plugin); COG-declaring
         #: plugins ride it (the retired COMMANDS registry went to dump/)
         self.cog_host = None
-        COMMAND_HUB.bind(self)
 
     # ------------------------------------------------------------- discovery
     def discover(self) -> dict[str, Any]:
@@ -863,15 +851,6 @@ class PluginManager:
         for task in [t for t in list(self._pending) if not t.done()]:
             task.cancel()
         self._pending_by_account.clear()
-        COMMAND_HUB.unbind(self)  # self-command invocations route nowhere now
-        # the bootstrap registers THIS manager's AccessManager on the
-        # process hub; leaving it there after the owning stack shut down
-        # hands every later direct-construction stack (tests, nested
-        # sims) a DEAD gate that fails every invocation closed — drop
-        # the process reference when this manager owns it
-        own_access = getattr(self, "_access_manager", None)
-        if own_access is not None and getattr(self.command_hub, "access", None) is own_access:
-            self.command_hub.access = None
 
     async def deactivate_account(self, account: str) -> None:
         """Fire on_disable + on_unload for the account's active plugins.

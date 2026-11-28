@@ -69,12 +69,8 @@ Plugins
 -------
 .. automodule:: core.plugin_manager.manager
    :members: PluginManager
-.. automodule:: core.plugin_manager.commands
-   :members: SelfCommandHub, FRAMEWORK_COMMANDS, PacingBackend, render_help
 .. automodule:: core.plugin_base
-   :members: PluginBase, PluginContext, PluginServices, CommandSpec,
-             ArgSpec, CommandContext, CommandSettingsApi, StatCard,
-             PanelSection, UIPanel, parse_command_args, usage_line
+   :members: PluginBase, PluginContext, PluginServices
 .. automodule:: core.plugin_scopes
    :members: validate, channel_allowed, CHANNELS_KEY
 

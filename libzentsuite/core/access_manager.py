@@ -44,12 +44,19 @@ def account_key(name: str) -> str:
 #: prefix modes accepted by the admin panel + adminprefix command
 PREFIX_MODES = ("mention", "symbol", "both")
 
+#: the prefix pair an unconfigured account resolves to — ONE source for
+#: the row default, the warm's field fallbacks, and the client factory's
+#: build-time snapshot (the client used to hardcode "mention"/"")
+DEFAULT_PREFIX_CONFIG: dict[str, Any] = {
+    "prefix_mode": "mention",  # operator default: mentionable
+    "prefix_symbol": "",
+}
+
 #: the per-account row's defaults (also the create shape)
 DEFAULT_ACCOUNT_ROW: dict[str, Any] = {
     "is_admin": False,
-    "prefix_mode": "mention",  # operator default: mentionable
-    "prefix_symbol": "",
     "allowed_user_ids": [],
+    **DEFAULT_PREFIX_CONFIG,
 }
 
 
@@ -215,28 +222,34 @@ class AccessManager:
         """Last-known per-account prefix config (no I/O — the factory
         reads this at client-build time; None until first async load).
 
-        The bootstrap WARMS the cache for every known account at boot and
-        after every admin-panel prefix mutation, so the sync read is only
-        stale between a DB write and the next warm — bounded by the
-        operator's own edit cadence, and the authoritative async path
-        (:meth:`prefix_config`) serves every later rebuild."""
+        Coherence contract: the bootstrap warms the cache at boot and
+        every in-process mutation updates it under the same lock, so
+        the sync read is only stale for prefix rows written by ANOTHER
+        process against the same database. The suite is single-process
+        by design (see the class docstring); a second writer surface
+        would need a scheduled re-warm or a read-through with a TTL."""
         return self._prefix_cache.get(name)
 
     async def warm_prefix_cache(self, names: Sequence[str] | None = None) -> None:
-        """Load prefix rows for the given accounts (all when None)."""
-        if names is None:
-            rows = await self._kv.prefix("access:account:") or {}
-            self._prefix_cache = {
-                key.rsplit(":", 1)[-1]: {
-                    "prefix_mode": row.get("prefix_mode", "mention"),
-                    "prefix_symbol": row.get("prefix_symbol", ""),
+        """Load prefix rows for the given accounts (all when None).
+
+        Serialized with the mutators through the same lock: a full warm
+        racing a set_prefix_config used to replace the cache from a
+        pre-mutation snapshot and silently lose the write."""
+        async with self._lock:
+            if names is None:
+                rows = await self._kv.prefix("access:account:") or {}
+                self._prefix_cache = {
+                    key.rsplit(":", 1)[-1]: {
+                        **DEFAULT_PREFIX_CONFIG,
+                        **{field: row[field] for field in DEFAULT_PREFIX_CONFIG if field in row},
+                    }
+                    for key, row in rows.items()
+                    if isinstance(row, dict)
                 }
-                for key, row in rows.items()
-                if isinstance(row, dict)
-            }
-        else:
-            for name in names:
-                self._prefix_cache[name] = await self.prefix_config(name)
+            else:
+                for name in names:
+                    self._prefix_cache[name] = await self.prefix_config(name)
 
     async def set_prefix_config(self, name: str, mode: str, symbol: str = "") -> dict[str, Any]:
         mode = str(mode).strip().lower()
@@ -257,7 +270,7 @@ class AccessManager:
             row["prefix_mode"] = mode
             row["prefix_symbol"] = symbol
             await self._write(name, row)
-        self._prefix_cache[name] = {"prefix_mode": mode, "prefix_symbol": symbol}
+            self._prefix_cache[name] = {"prefix_mode": mode, "prefix_symbol": symbol}
         self._log.info("account %s prefix -> mode=%s symbol=%r", name, mode, symbol)
         return {"prefix_mode": mode, "prefix_symbol": symbol}
 
@@ -333,6 +346,7 @@ class AccessManager:
 
 __all__ = [
     "DEFAULT_ACCOUNT_ROW",
+    "DEFAULT_PREFIX_CONFIG",
     "KEY_ADMINS",
     "PREFIX_MODES",
     "AccessManager",
