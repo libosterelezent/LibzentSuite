@@ -4,10 +4,21 @@
 
 ## Testing
 
-- **[test file]**: [what was tested, count]
+### Test Suite (hard requirement — merge blocked until green)
+
+- **Total tests**: [N] passed, [N] skipped, [N] xfailed on CI (`unittest (3.10)`)
+- **Suite status**: [✅ GREEN / ❌ RED — link to the run]
+- **Local verification**: [N] narrow tests passed locally before push
+
+### Static checks
+
 - **ruff**: clean
 - **pyright**: 0 errors
-- **Full suite**: [N] passed on CI (the runner is the backstop; the narrow tests ran locally before push)
+- **Preflight**: green
+
+### Details
+
+- **[test file]**: [what was tested, count]
 - **Docs**: [what was updated, or "not needed"]
 
 ## Pre-PR review
