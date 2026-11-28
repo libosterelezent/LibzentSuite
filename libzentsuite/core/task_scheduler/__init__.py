@@ -4,7 +4,7 @@ Public surface (INTEGRATION 'core/task_scheduler'):
     TaskScheduler — queue/priority/cancel/retry/timeout/history
     Task          — the task dataclass
     TaskStatus    — status literal type (see tasks.STATUS_* constants)
-    SchedulerError — re-exported from core.errors for caller convenience
+    SchedulerError — re-exported from libzentsuite.core.errors for caller convenience
 """
 
 from libzentsuite.core.errors import SchedulerError

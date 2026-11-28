@@ -402,7 +402,7 @@ class TaskScheduler:
 
         Late-binding on purpose: bootstrap wires the policy engine after
         the account manager exists. The guard is duck-typed and never
-        imported from core.workspace — the scheduler stays generic.
+        imported from libzentsuite.core.workspace — the scheduler stays generic.
         """
         self._guard = guard
 

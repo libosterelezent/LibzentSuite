@@ -43,8 +43,8 @@ from typing import TypedDict
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from core.logging_service import LogService  # noqa: E402
-from database.db import Database  # noqa: E402
+from libzentsuite.core.logging_service import LogService  # noqa: E402
+from libzentsuite.database.db import Database  # noqa: E402
 
 LOGS_DDL = """
 CREATE TABLE IF NOT EXISTS logs (

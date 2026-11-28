@@ -28,12 +28,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from core.event_bus import Event, MessageReceived
-from core.plugin_base import PluginBase
-from core.settings_manager import Setting
+from libzentsuite.core.event_bus import Event, MessageReceived
+from libzentsuite.core.plugin_base import PluginBase
+from libzentsuite.core.settings_manager import Setting
 
 if TYPE_CHECKING:
-    from core.plugin_base import PluginContext
+    from libzentsuite.core.plugin_base import PluginContext
 
 LOG = logging.getLogger("libzent.ldp_worker")
 

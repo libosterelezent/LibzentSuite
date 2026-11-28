@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 # RICH MODEL (adapters/model.py) — the full stable projection (embeds,
 # components, attachments, reactions, reference, author/channel/guild,
 # created_at, runtime-only raw escape hatch). Re-exported here so every
-# existing ``from adapters.base import DiscordMessage`` keeps working.
+# existing ``from libzentsuite.adapters.base import DiscordMessage`` keeps working.
 from .model import (  # compatibility re-exports (``as``-alias = PEP 484
     # re-export convention; pyflakes, unlike flake8, ignores ``noqa``)
     DiscordAttachment as DiscordAttachment,

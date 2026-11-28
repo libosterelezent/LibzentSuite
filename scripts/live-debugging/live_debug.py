@@ -67,13 +67,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core.errors import AccountError, UnsafePolicyError  # noqa: E402  # needs the sys.path setup above
-from core.workspace.runtime import ChainRuntime  # noqa: E402  # definition validation before persist
+from libzentsuite.core.errors import AccountError, UnsafePolicyError  # noqa: E402  # needs the sys.path setup above
+from libzentsuite.core.workspace.runtime import ChainRuntime  # noqa: E402  # definition validation before persist
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
-    from core.logging_service import LogEntry
+    from libzentsuite.core.logging_service import LogEntry
 
 TOOLKIT_DIR = Path(__file__).resolve().parent
 TOOLKIT_PLUGINS = TOOLKIT_DIR / "plugins"
@@ -460,11 +460,11 @@ class Harness:
     # ----------------------------------------------------------------- boot
     async def boot(self) -> None:
         """Stage the disposable workdir and build the real stack."""
-        from adapters.simulator.client import SimClient
-        from adapters.simulator.world import SimWorld
-        from core.bootstrap import build
-        from core.credentials import Credentials
-        from database.db import Database
+        from libzentsuite.adapters.simulator.client import SimClient
+        from libzentsuite.adapters.simulator.world import SimWorld
+        from libzentsuite.core.bootstrap import build
+        from libzentsuite.core.credentials import Credentials
+        from libzentsuite.database.db import Database
 
         self.workdir = Path(tempfile.mkdtemp(prefix="libzent-live-debug-"))
         config_dir = self.workdir / "config"
@@ -2092,7 +2092,7 @@ async def phase_observability(h: Harness) -> None:
 async def phase_simulation(h: Harness) -> None:
     """The simulator surface: the facade verb, the CURRENT --sim default
     positively, and the production-dir override failing honestly."""
-    from adapters.simulator import SimulationRunner
+    from libzentsuite.adapters.simulator import SimulationRunner
 
     scenarios = await h.step("simulation_list", h.api.simulation_list)
     names = sorted(s.get("name") for s in scenarios or [])

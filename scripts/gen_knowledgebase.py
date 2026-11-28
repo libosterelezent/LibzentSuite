@@ -275,7 +275,7 @@ def plugin_manifests() -> list[dict[str, Any]]:
     beyond the loader's own create() (a plain constructor).
     """
     sys.path.insert(0, str(ROOT))
-    from core.plugin_manager.loader import PluginLoader
+    from libzentsuite.core.plugin_manager.loader import PluginLoader
 
     manifests: list[dict[str, Any]] = []
     loader = PluginLoader(ROOT / "plugins")
