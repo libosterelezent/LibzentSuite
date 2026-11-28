@@ -23,7 +23,10 @@ nothing can ship until that hold is lifted; see
   `uv run` — tests, preflight, the fast-edit tooling — matches the runner
   exactly instead of riding the dev interpreter (a full local suite green
   on 3.13 certified nothing about 3.10; PR #37's runner legs exposed the
-  split). Other interpreters stay supported but ungated.
+  split). Every CI job provisions the pinned interpreter now — the
+  audit/build legs rode a 3.11 runner default that uv's only-system
+  mode could not reconcile with the pin. Other interpreters stay
+  supported but ungated.
 - The `expect` primitive (client-capability Track B): a send-coupled
   reactive window on the plugin services surface —
   `async with ctx.services.expect(check, timeout) as window:` enters
