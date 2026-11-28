@@ -246,7 +246,9 @@ class TestCancelPendingReplies(unittest.IsolatedAsyncioTestCase):
         world = SimWorld(
             responder_id=SYNTHETIC_BOT_ID,
             responses={"$dump": ["page-one"]},
-            reply_delay=0.01,
+            # the reply (2x delay) must LOSE the 0.02 cancel race AND land
+            # inside the quiet window below — 0.01 tied the cancel exactly
+            reply_delay=0.2,
         )
         world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
@@ -260,7 +262,9 @@ class TestCancelPendingReplies(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(world.messages_of(dm), [])
 
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$dump")
-        await world.wait_for_quiet(dm, quiet=0.15, limit=2.0)
+        # the new flow's reply rides 2x reply_delay; the quiet window must
+        # outlast it (0.15 expired before a slowed reply arrived)
+        await world.wait_for_quiet(dm, quiet=0.8, limit=2.0)
         self.assertEqual(world.messages_of(dm), ["page-one"])
         world.cancel_pending_replies()  # idempotent second call
 
