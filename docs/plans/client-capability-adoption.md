@@ -44,7 +44,7 @@ This plan closes that depth gap WITHOUT abandoning the middleware
 Reads ride the account-scoped cache (a read pacing class, not the
 send lane); writes ride the EXISTING paced pipeline unchanged.
 
-## Track B — Mudabot-grade reactive waits (race-free by construction)
+## Track B — Mudabot-grade reactive waits ✅ SHIPPED 2026-11-28
 
 **The flaw this track must NOT inherit** (owner review 2026-11-17):
 `wait_for` subscribes at call time — a reply arriving between the
@@ -81,6 +81,14 @@ Semantics:
   `await window.collect(n=2)`, `await window.first_of(check_a,
   check_b)`. Events stay framework-mediated — the window subscribes
   to the bus; it never touches the client's socket.
+
+Shipped 2026-11-28 as `libzentsuite/core/expect.py` (`ExpectWindow`)
+plus the `PluginServices.expect` facade verb: entering subscribes
+before the send, the bounded ring + consuming cursor anchors matching
+at window entry (all events since entry buffered, flood-bounded), and
+`match` / `collect(n)` / `first_of` ride the window with one shared
+deadline. Checks run at read time and raise `AccountError` to the
+awaiting plugin; the framework unwires the waiter at exit.
 
 ## Track C — the direct client connection ✅ SHIPPED 2026-11-17
 

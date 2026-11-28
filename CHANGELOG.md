@@ -17,6 +17,19 @@ nothing can ship until that hold is lifted; see
 ## [Unreleased]
 
 ### Added
+- The `expect` primitive (client-capability Track B): a send-coupled
+  reactive window on the plugin services surface —
+  `async with ctx.services.expect(check, timeout) as window:` enters
+  the subscription BEFORE the send runs inside the block, so a reply
+  landing during the send's queue wait matches exactly like one
+  landing after (the race a `wait_for` issued after the send loses,
+  closed by construction; the framework owns and unwires the waiter).
+  Await surface: `window.match()` (first match, `None` on deadline),
+  `window.collect(n)` (up to `n`, partial on deadline),
+  `window.first_of(*checks)` (any-check match over the same buffer).
+  Checks see the frozen `MessageReceived` DTO; raising checks surface
+  as `AccountError`; `wait_for_message`/`collect_messages` now share
+  the window's subscription seam (`_subscribe_waits`).
 - Anti-flake tooling for the test suite: every test now carries a
   120 s per-test hang ceiling (`pytest-timeout`, thread method,
   configured in `pyproject.toml` — a hang fails by name with every
