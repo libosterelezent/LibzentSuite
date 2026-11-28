@@ -18,9 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
 
-from core.workspace.runtime import ChainRuntime, TerminalTrigger
-from core.workspace.service import WorkspaceService
-from database.db import Database
+from libzentsuite.core.workspace.runtime import ChainRuntime, TerminalTrigger
+from libzentsuite.core.workspace.service import WorkspaceService
+from libzentsuite.database.db import Database
 
 
 class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
@@ -105,7 +105,7 @@ class MechanicalTriggerTests(RuntimeTestBase):
 
 class SignalTriggerTests(RuntimeTestBase):
     async def test_signal_fires_matching_chain(self) -> None:
-        from core.workspace.signals import SignalOutbox
+        from libzentsuite.core.workspace.signals import SignalOutbox
 
         outbox = SignalOutbox(self.db.signals)
         signal_id = await outbox.accept("A", "grinder", "claim_done")
@@ -115,7 +115,7 @@ class SignalTriggerTests(RuntimeTestBase):
         self.assertEqual(self.invocations[0][1], "cleaner")
 
     async def test_foreign_namespace_never_fires(self) -> None:
-        from core.workspace.signals import SignalOutbox
+        from libzentsuite.core.workspace.signals import SignalOutbox
 
         outbox = SignalOutbox(self.db.signals)
         signal_id = await outbox.accept("A", "grinder", "claim_done")
@@ -306,7 +306,7 @@ class WorkspaceReconcilerLoopTests(unittest.IsolatedAsyncioTestCase):
     outbox sweeps, deletion resumes, and run repairs silently stopped."""
 
     async def test_loop_survives_many_intervals_and_stops_cleanly(self) -> None:
-        from core.workspace.guard import WorkspaceReconciler
+        from libzentsuite.core.workspace.guard import WorkspaceReconciler
 
         calls = 0
 
@@ -342,7 +342,7 @@ class TerminalTriggerNurseryTests(unittest.IsolatedAsyncioTestCase):
     task's exception is retrieved (never 'was never retrieved')."""
 
     async def test_spawn_refuses_after_close_and_tasks_are_reaped(self) -> None:
-        from core.bootstrap import _TerminalTriggerNursery
+        from libzentsuite.core.bootstrap import _TerminalTriggerNursery
 
         nursery = _TerminalTriggerNursery()
         started = asyncio.Event()
@@ -367,7 +367,7 @@ class TerminalTriggerNurseryTests(unittest.IsolatedAsyncioTestCase):
         was still unwinding against. The join must COMPLETE (children
         terminal, cleanup tails done) before the cancellation
         propagates."""
-        from core.bootstrap import _TerminalTriggerNursery
+        from libzentsuite.core.bootstrap import _TerminalTriggerNursery
 
         nursery = _TerminalTriggerNursery()
         started = asyncio.Event()
@@ -403,7 +403,7 @@ class TerminalTriggerNurseryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.done())
 
     async def test_done_task_exception_is_retrieved(self) -> None:
-        from core.bootstrap import _TerminalTriggerNursery
+        from libzentsuite.core.bootstrap import _TerminalTriggerNursery
 
         nursery = _TerminalTriggerNursery()
 

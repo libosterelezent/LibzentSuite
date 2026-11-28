@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
-from parsers import (
+from libzentsuite.parsers import (
     InvalidMessageError,
     ParserManager,
     UnknownParserError,

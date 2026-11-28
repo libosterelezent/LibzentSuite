@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.errors import DatabaseError
-from database.db import Database
+from libzentsuite.core.errors import DatabaseError
+from libzentsuite.database.db import Database
 
 
 class PluginProfilesTestBase(unittest.IsolatedAsyncioTestCase):

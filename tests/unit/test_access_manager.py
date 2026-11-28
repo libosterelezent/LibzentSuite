@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from core.access_manager import (
+from libzentsuite.core.access_manager import (
     AccessManager,
 )
 
@@ -139,7 +139,7 @@ class TestPrefixConfig(unittest.IsolatedAsyncioTestCase):
 
     async def test_symbol_requires_symbol(self) -> None:
         am = make()
-        from core.errors import CredentialsError
+        from libzentsuite.core.errors import CredentialsError
 
         with self.assertRaises(CredentialsError):
             await am.set_prefix_config("a", "symbol", "")
@@ -148,7 +148,7 @@ class TestPrefixConfig(unittest.IsolatedAsyncioTestCase):
 
     async def test_symbol_validation(self) -> None:
         am = make()
-        from core.errors import CredentialsError
+        from libzentsuite.core.errors import CredentialsError
 
         with self.assertRaises(CredentialsError):  # too long
             await am.set_prefix_config("a", "symbol", "toolong")
@@ -157,7 +157,7 @@ class TestPrefixConfig(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_mode_rejected(self) -> None:
         am = make()
-        from core.errors import CredentialsError
+        from libzentsuite.core.errors import CredentialsError
 
         with self.assertRaises(CredentialsError):
             await am.set_prefix_config("a", "bogus")
@@ -225,8 +225,8 @@ class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
     async def test_account_manager_records_user_id_for_admin_gate(self) -> None:
         import logging
 
-        from core.account_manager import AccountManager
-        from core.plugin_manager.commands import COMMAND_HUB
+        from libzentsuite.core.account_manager import AccountManager
+        from libzentsuite.core.plugin_manager.commands import COMMAND_HUB
 
         am = make()
         await am.set_admin_flag("alpha", True)

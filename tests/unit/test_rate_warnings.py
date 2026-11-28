@@ -9,9 +9,9 @@ from __future__ import annotations
 import unittest
 from typing import TYPE_CHECKING, Any
 
-from core.event_bus import EventBus
-from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
-from core.rate_limit_manager.warnings import (
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
+from libzentsuite.core.rate_limit_manager.warnings import (
     describe_scope,
     evaluate_policies,
     evaluate_policy,

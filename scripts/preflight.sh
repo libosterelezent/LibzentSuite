@@ -6,7 +6,7 @@
 # positives, faster feedback).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PROD="main.py core adapters interfaces database benchmark scripts parsers plugins"
+PROD="libzentsuite"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m OK  %s\033[0m\n' "$*"; }
@@ -23,7 +23,7 @@ step "Ruff format"
 "$UV_BIN" run --frozen ruff format --check $PROD && ok "ruff format" || bad "ruff format"
 
 step "Pyright ratchet"
-PYRIGHT_SUMMARY=$("$UV_BIN" run --frozen pyright core adapters database interfaces plugins benchmark scripts parsers main.py 2>&1 | tail -1)
+PYRIGHT_SUMMARY=$("$UV_BIN" run --frozen pyright libzentsuite 2>&1 | tail -1)
 # strict format match: pyright's summary line is "N errors, N warnings, ..."
 # (starts with a digit, then " errors, "). Rejects anything else — a
 # malformed line like "version 0: errors" must not read as zero.

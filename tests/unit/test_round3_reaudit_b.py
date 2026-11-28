@@ -29,21 +29,21 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.account_manager import DiscordCache
-from core.account_manager.services import (
+from libzentsuite.core.account_manager import DiscordCache
+from libzentsuite.core.account_manager.services import (
     AccountPluginServices,
     TaskAckRegistry,
 )
-from core.api import ControlAPI
-from core.errors import SchedulerError, TargetGone
-from core.event_bus import EventBus, MessageReceived
-from core.settings_manager import Setting, SettingsManager
-from core.task_scheduler import Task, TaskScheduler
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.errors import SchedulerError, TargetGone
+from libzentsuite.core.event_bus import EventBus, MessageReceived
+from libzentsuite.core.settings_manager import Setting, SettingsManager
+from libzentsuite.core.task_scheduler import Task, TaskScheduler
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from database.db import Database
+    from libzentsuite.database.db import Database
 
 LOG = logging.getLogger("reaudit-b")
 FIXTURES = os.path.join(
@@ -301,7 +301,7 @@ class TestJitterStampWireGaps(unittest.IsolatedAsyncioTestCase):
     async def test_same_group_wire_gaps_hold_under_rigged_draws(self) -> None:
         """Two accounts share one group clock; alternating tiny/huge jitter
         draws must not compress wire gaps below the interval."""
-        from core.rate_limit_manager import RateLimitManager
+        from libzentsuite.core.rate_limit_manager import RateLimitManager
 
         limiter = RateLimitManager(EventBus(), QuietLog())
         limiter._jitter_rng = RiggedRng()
@@ -336,7 +336,7 @@ class TestJitterStampWireGaps(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_waiter_leaks_no_draw(self) -> None:
         """Cancelling a queued waiter mid-acquire neither corrupts the
         pacing clocks (next wire send still spaced) nor strands anyone."""
-        from core.rate_limit_manager import RateLimitManager
+        from libzentsuite.core.rate_limit_manager import RateLimitManager
 
         limiter = RateLimitManager(EventBus(), QuietLog())
         limiter._jitter_rng = RiggedRng()
@@ -373,7 +373,7 @@ class TestSettingsUnpinCycle(unittest.IsolatedAsyncioTestCase):
     GLOBAL: ClassVar[dict[str, dict[str, float]]] = {"roll": {"roll_interval": 4.5}}
 
     async def _fresh_manager(self, db_path: str) -> tuple[Database, SettingsManager]:
-        from database.db import Database
+        from libzentsuite.database.db import Database
 
         db = Database(db_path)
         await db.connect()
@@ -431,7 +431,7 @@ class TestSettingsUnpinCycle(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 class TestDispatchQuiesceOrdering(unittest.IsolatedAsyncioTestCase):
     async def test_deactivate_joins_handler_before_cascade_runs(self) -> None:
-        from core.plugin_manager.manager import PluginManager
+        from libzentsuite.core.plugin_manager.manager import PluginManager
 
         bus = EventBus()
         settings = SettingsManager(bus, LOG)
@@ -465,7 +465,7 @@ class TestDocumentedRegressions(unittest.IsolatedAsyncioTestCase):
     async def test_null_reset_refreshes_live_plugin_view(self) -> None:
         """FIXED (round-3 re-audit): PluginManager.clear_setting now exists —
         the RUNNING plugin's live settings view follows a null-reset."""
-        from core.plugin_manager.manager import PluginManager
+        from libzentsuite.core.plugin_manager.manager import PluginManager
 
         schema = (Setting("count", "int", 3, "n", min_value=0, max_value=10),)
         bus = EventBus()

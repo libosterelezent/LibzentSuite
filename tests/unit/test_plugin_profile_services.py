@@ -17,9 +17,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.account_manager.services import AccountPluginServices
-from core.errors import PluginError
-from database.db import Database
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.errors import PluginError
+from libzentsuite.database.db import Database
 
 #: the facade types bus/cache as REQUIRED, but these tests exercise the
 #: deliberately unwired construction — bind None through Any (runtime

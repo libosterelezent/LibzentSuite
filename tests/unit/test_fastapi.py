@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from interfaces.api.app import build_app
+from libzentsuite.interfaces.api.app import build_app
 
 
 def _stub_api() -> NS:

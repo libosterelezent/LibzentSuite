@@ -83,18 +83,12 @@ Changelog = "https://github.com/libosterelezent/LibzentSuite/blob/master/CHANGEL
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["main"]
+[project.scripts]
+libzentsuite = "libzentsuite.__main__:main"
 
 [tool.setuptools.packages.find]
 include = [
-    "core*",
-    "adapters*",
-    "database*",
-    "interfaces*",
-    "benchmark*",
-    "parsers*",
-    "scripts*",
+    "libzentsuite*",
 ]
 
 [dependency-groups]
@@ -208,15 +202,9 @@ timeout_method = "thread"
 # here: the full suite runs parallel (-n auto --dist loadscope) — the
 # serial-unittest fallback for test_rich_model.py was retired with the
 # click-cancellation isolation fix (2026-11-19); keeping addopts bare
-# means `pytest tests/unit/test_x.py` Just Works for iteration without
-# pulling in xdist.
 
 [tool.pyright]
-# pyright owns static typing (adopted 2026-11-19; mypy shelved to the
-# lock with honor — both trees reached ZERO under its ratchets).
-# The baseline ratchet lives at .github/pyright-baseline (81 minus
-# the 5 flet missing-imports = 76): grow fails, shrink locks in.
-include = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts", "parsers", "main.py"]
+include = ["libzentsuite"]
 exclude = ["dump", "**/__pycache__", ".venv"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"

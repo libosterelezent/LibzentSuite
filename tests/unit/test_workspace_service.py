@@ -18,11 +18,11 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.workspace.service import WorkspaceService
-from database.db import Database
+from libzentsuite.core.workspace.service import WorkspaceService
+from libzentsuite.database.db import Database
 
 if TYPE_CHECKING:
-    from database.models import PresetTemplateRecord, WorkspaceMemberRecord
+    from libzentsuite.database.models import PresetTemplateRecord, WorkspaceMemberRecord
 
 
 class StubSettings:

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-from core._persist_queue import PersistQueue
+from libzentsuite.core._persist_queue import PersistQueue
 
 
 class ListRepo:

@@ -19,13 +19,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from core.api import ControlAPI
-from core.cooldowns import CooldownService
-from core.credential_service import CredentialService
-from core.credentials import Credentials
-from core.errors import AccountError, SettingsValidationError
-from core.event_bus import EventBus
-from core.settings_manager import Setting, SettingsManager
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.cooldowns import CooldownService
+from libzentsuite.core.credential_service import CredentialService
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import AccountError, SettingsValidationError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.settings_manager import Setting, SettingsManager
 from tests.unit.helpers import enforces_file_modes
 
 if TYPE_CHECKING:
@@ -879,7 +879,7 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         self.key_path.write_text("")  # disaster: key lost
         await svc.refresh()  # DB still has a row
         svc._fernet = None  # next use re-reads the file
-        from core.errors import CredentialsError
+        from libzentsuite.core.errors import CredentialsError
 
         with self.assertRaises(CredentialsError):
             await svc.store("beta", "tok-2")
@@ -915,7 +915,7 @@ class TestPluginStateSingleEncoding(unittest.IsolatedAsyncioTestCase):
     async def test_raw_kv_rows_read_back_instead_of_default(self) -> None:
         import json as _json
 
-        from core.plugin_state import PluginStateService
+        from libzentsuite.core.plugin_state import PluginStateService
 
         class MiniKv:
             """Mirrors KvRepository's contract: JSON-encode on set,

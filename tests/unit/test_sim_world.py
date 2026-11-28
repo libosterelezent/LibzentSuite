@@ -7,7 +7,7 @@ import time
 import unittest
 from typing import TYPE_CHECKING, Any
 
-from adapters.simulator.world import (
+from libzentsuite.adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
     SYNTHETIC_BOT_ID,
@@ -16,10 +16,10 @@ from adapters.simulator.world import (
     SimWorld,
     WorldMessage,
 )
-from core.errors import ServerRateLimit
+from libzentsuite.core.errors import ServerRateLimit
 
 if TYPE_CHECKING:
-    from adapters.model import DiscordMessage
+    from libzentsuite.adapters.model import DiscordMessage
 
 
 class _Recorder:
@@ -386,7 +386,7 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
     """Edit/reaction events cross with the SAME rich shape as live."""
 
     def _rich_world(self) -> SimWorld:
-        from adapters.model import DiscordComponent, DiscordEmbed
+        from libzentsuite.adapters.model import DiscordComponent, DiscordEmbed
 
         world = _basic_world()
         embed = DiscordEmbed(title="roster", description="Alice\nBob")
@@ -476,7 +476,7 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
 
     async def test_to_discord_message_is_the_one_boundary_builder(self) -> None:
         """deliveries (client.receive) and edits share to_discord_message."""
-        from adapters.simulator.world import to_discord_message
+        from libzentsuite.adapters.simulator.world import to_discord_message
 
         world = self._rich_world()
         message = world.journal[-1]

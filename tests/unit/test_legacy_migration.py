@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from database.db import Database
-from database.schema import MIGRATIONS
+from libzentsuite.database.db import Database
+from libzentsuite.database.schema import MIGRATIONS
 
 
 class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):

@@ -100,13 +100,13 @@ database (see [Setting up accounts](#setting-up-accounts)).
 
 ```bash
 # 30-second offline tour — no Discord account needed
-python3 main.py --sim-list              # list scenarios
-python3 main.py --sim export_basic    # full pipeline over the simulator
+python3 -m libzentsuite --sim-list              # list scenarios
+python3 -m libzentsuite --sim export_basic    # full pipeline over the simulator
 
 # go live
-python3 main.py                        # interactive REPL
-python3 main.py accounts list          # one-shot command mode
-python3 main.py --start-all            # boot + start every enabled account
+python3 -m libzentsuite                        # interactive REPL
+python3 -m libzentsuite accounts list          # one-shot command mode
+python3 -m libzentsuite --start-all            # boot + start every enabled account
 ```
 
 > **One-time migration** — on the first boot the framework seeds the DB
@@ -118,11 +118,11 @@ python3 main.py --start-all            # boot + start every enabled account
 
 ## Setting up accounts
 
-1. **Add the account** — `python3 main.py accounts add myaccount`
+1. **Add the account** — `python3 -m libzentsuite accounts add myaccount`
    (name plus optionally the plugin(s) it should run; assign more later
    with `accounts plugin-add`). Put it in a **workspace** with
    `workspaces add-member <workspace> <account>`.
-2. **Store its token** — `python3 main.py accounts credential
+2. **Store its token** — `python3 -m libzentsuite accounts credential
    myaccount <token>`. The token is Fernet-encrypted at rest; the key
    lives in `state/credentials.key` (back that file up — losing it
    means re-entering tokens).
@@ -137,12 +137,12 @@ The workspace is the ONE orchestration concept (it replaced sync groups
 + the fleet module on 2026-11-14):
 
 ```bash
-python3 main.py workspaces list                       # every workspace + members
-python3 main.py workspaces create grind-team "the grind"
-python3 main.py workspaces add-member grind-team alpha
-python3 main.py workspaces add-member grind-team bravo
-python3 main.py workspaces pause grind-team           # fences new work (generation bump)
-python3 main.py workspaces tasks grind-team           # the work units
+python3 -m libzentsuite workspaces list                       # every workspace + members
+python3 -m libzentsuite workspaces create grind-team "the grind"
+python3 -m libzentsuite workspaces add-member grind-team alpha
+python3 -m libzentsuite workspaces add-member grind-team bravo
+python3 -m libzentsuite workspaces pause grind-team           # fences new work (generation bump)
+python3 -m libzentsuite workspaces tasks grind-team           # the work units
 ```
 
 **Chains** — the coordinated flows: a plugin on account A finishes a
@@ -174,10 +174,10 @@ optional chain declarations (`EMITS` / `FOLLOWS`).
 `core/plugin_base.py` and `docs/plugins/writing_plugins.rst`.
 
 ```bash
-python3 main.py plugins list               # nothing until you add one
+python3 -m libzentsuite plugins list               # nothing until you add one
 # drop a package under plugins/ (or pass --plugins <dir>), then:
-python3 main.py accounts add alpha <plugin>   # name + the plugin it runs
-python3 main.py accounts plugin-add alpha <plugin>
+python3 -m libzentsuite accounts add alpha <plugin>   # name + the plugin it runs
+python3 -m libzentsuite accounts plugin-add alpha <plugin>
 ```
 
 The test suite exercises the framework through fixture plugins
@@ -203,14 +203,14 @@ estop`), and admins get `adminlist` / `adminperms` / `adminprefix`.
 From the shell:
 
 ```bash
-python3 main.py accounts list|start|stop|remove
-python3 main.py accounts plugin-add alpha <plugin>
-python3 main.py plugins list
-python3 main.py workspaces list
-python3 main.py ratelimit effective message alpha
-python3 main.py estop                  # framework-wide halt
-python3 main.py --sim pacing_respected # offline sanity check
-python3 main.py --bench                # performance benchmarks
+python3 -m libzentsuite accounts list|start|stop|remove
+python3 -m libzentsuite accounts plugin-add alpha <plugin>
+python3 -m libzentsuite plugins list
+python3 -m libzentsuite workspaces list
+python3 -m libzentsuite ratelimit effective message alpha
+python3 -m libzentsuite estop                  # framework-wide halt
+python3 -m libzentsuite --sim pacing_respected # offline sanity check
+python3 -m libzentsuite --bench                # performance benchmarks
 ```
 
 Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
@@ -416,7 +416,7 @@ temp master key — never touching production state) and produces a timed
 execution log, the audit trail and pass/fail checks. Scenarios:
 `export_basic`, `export_multichunk`, `pacing_respected`,
 `server_429_respected`, `channel_gone_aborts`, `estop_halt`
-(`python3 main.py --sim-list` is the source of truth).
+(`python3 -m libzentsuite --sim-list` is the source of truth).
 
 `benchmark/` (see `benchmark/README.md`): scenarios incl. cold boot,
 N-account start/stop, restart churn, message bursts; loop-lag

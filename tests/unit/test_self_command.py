@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import unittest
 
-from adapters.discord.client import RealClientFactory, RealDiscordClient
+from libzentsuite.adapters.discord.client import RealClientFactory, RealDiscordClient
 
 
 def _make_client(prefix: str = "sm!") -> RealDiscordClient:
@@ -39,7 +39,7 @@ class FactoryWiringTests(unittest.TestCase):
         self.assertEqual(client._command_prefix, "")
 
     def test_env_default_is_empty(self) -> None:
-        from core.credentials import Credentials
+        from libzentsuite.core.credentials import Credentials
 
         creds = Credentials.from_values({})
         self.assertEqual(creds.self_command_prefix, "")

@@ -3,7 +3,7 @@
 import unittest
 from typing import ClassVar
 
-from core.plugin_scopes import channel_allowed, validate
+from libzentsuite.core.plugin_scopes import channel_allowed, validate
 
 
 class ValidateTests(unittest.TestCase):

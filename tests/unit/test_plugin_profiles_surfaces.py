@@ -18,11 +18,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from core.api import ControlAPI
-from core.errors import AccountError, SettingsValidationError
-from core.plugin_scopes import validate as validate_scope
-from core.settings_manager import Setting
-from database.db import Database
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.errors import AccountError, SettingsValidationError
+from libzentsuite.core.plugin_scopes import validate as validate_scope
+from libzentsuite.core.settings_manager import Setting
+from libzentsuite.database.db import Database
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

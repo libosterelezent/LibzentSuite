@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from core.errors import DatabaseError as CoreDatabaseError
-from database.connection import DatabaseError as ConnectionDatabaseError
-from database.db import Database
-from database.models import AccountRecord, RatePolicyRecord
-from database.schema import MIGRATIONS, latest_version
+from libzentsuite.core.errors import DatabaseError as CoreDatabaseError
+from libzentsuite.database.connection import DatabaseError as ConnectionDatabaseError
+from libzentsuite.database.db import Database
+from libzentsuite.database.models import AccountRecord, RatePolicyRecord
+from libzentsuite.database.schema import MIGRATIONS, latest_version
 
 #: both flavors are RuntimeError subclasses raised by different layers
-#: (repositories import core.errors, base wraps into connection) — accept either
+#: (repositories import libzentsuite.core.errors, base wraps into connection) — accept either
 ANY_DB_ERROR = (ConnectionDatabaseError, CoreDatabaseError)
 
 
@@ -73,7 +73,7 @@ class TestMigrations(AsyncDatabaseTestCase):
             await db.close()
 
     async def test_connect_required_before_use(self) -> None:
-        from database.connection import DatabaseError
+        from libzentsuite.database.connection import DatabaseError
 
         db = Database(Path(self.tmp.name) / "unconnected.db")
         with self.assertRaises(DatabaseError):
@@ -941,7 +941,7 @@ class TestPruningBounds(AsyncDatabaseTestCase):
             await db.close()
 
     async def test_task_history_custom_keep(self) -> None:
-        from database.repositories.tasks import TaskHistoryRepository
+        from libzentsuite.database.repositories.tasks import TaskHistoryRepository
 
         repo = TaskHistoryRepository(self.db, keep=5)
         for i in range(30):

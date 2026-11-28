@@ -18,12 +18,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from adapters.simulator.client import SimClient
-from adapters.simulator.world import SimWorld
-from core.bootstrap import build
-from core.credentials import Credentials
-from core.errors import AccountError
-from database.db import Database
+from libzentsuite.adapters.simulator.client import SimClient
+from libzentsuite.adapters.simulator.world import SimWorld
+from libzentsuite.core.bootstrap import build
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import AccountError
+from libzentsuite.database.db import Database
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -805,7 +805,7 @@ class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
             out = await api.emergency_stop_all()
             self.assertTrue(out["halted"])
             # halted: every submit is rejected
-            from core.errors import SchedulerError
+            from libzentsuite.core.errors import SchedulerError
 
             with self.assertRaises(SchedulerError):
                 stack.framework.scheduler.submit(

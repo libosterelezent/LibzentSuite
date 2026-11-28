@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from database.db import Database
+from libzentsuite.database.db import Database
 
 
 async def _legacy_state(db: Database) -> tuple[int, int]:
@@ -58,7 +58,7 @@ class TheFold(unittest.IsolatedAsyncioTestCase):
         self._tmp.cleanup()
 
     async def test_fold_creates_instance_and_pointer_per_binding(self) -> None:
-        from database.legacy_fold import fold_legacy_profiles
+        from libzentsuite.database.legacy_fold import fold_legacy_profiles
 
         report = await fold_legacy_profiles(self.db)
         self.assertEqual(report["folded"], 1)
@@ -70,7 +70,7 @@ class TheFold(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active, "main")
 
     async def test_fold_is_idempotent(self) -> None:
-        from database.legacy_fold import fold_legacy_profiles
+        from libzentsuite.database.legacy_fold import fold_legacy_profiles
 
         first = await fold_legacy_profiles(self.db)
         second = await fold_legacy_profiles(self.db)
@@ -85,7 +85,7 @@ class TheFold(unittest.IsolatedAsyncioTestCase):
                 " settings_json, created_at, updated_at)"
                 " VALUES ('exporter', 'unused', '', '{}', 1.0, 1.0)"
             )
-        from database.legacy_fold import fold_legacy_profiles
+        from libzentsuite.database.legacy_fold import fold_legacy_profiles
 
         report = await fold_legacy_profiles(self.db)
         self.assertEqual(report["folded"], 1)
@@ -102,7 +102,7 @@ class TheFold(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO account_plugins (account, plugin, profile)"
                 " VALUES ('beta', 'exporter', 'ghost')"
             )
-        from database.legacy_fold import fold_legacy_profiles
+        from libzentsuite.database.legacy_fold import fold_legacy_profiles
 
         report = await fold_legacy_profiles(self.db)
         self.assertEqual(report["folded"], 2)

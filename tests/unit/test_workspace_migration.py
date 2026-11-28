@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from database.db import Database
+from libzentsuite.database.db import Database
 
 
 async def _row(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
@@ -37,7 +37,7 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
         # database as a REAL v9 state first: connect with the migration
         # list truncated at v9, populate every fold source, then let
         # the full list apply v10.
-        import database.db as db_module
+        import libzentsuite.database.db as db_module
 
         # MIGRATIONS/latest_version are re-imported into db.py's module
         # globals (which connect() reads), so THIS module's attributes are

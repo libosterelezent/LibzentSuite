@@ -48,11 +48,11 @@ TOKEN_ENV_X = "SYNTHETIC-TOKEN-env-x-do-not-use-0004"
 def _pending_reason() -> str | None:
     """Which pinned contracts are still missing (None when all landed)."""
     missing: list[str] = []
-    from core import bootstrap
+    from libzentsuite.core import bootstrap
 
     if not inspect.iscoroutinefunction(getattr(bootstrap, "build", None)):
         missing.append("bootstrap.build is not async")
-    from core.api import ControlAPI
+    from libzentsuite.core.api import ControlAPI
 
     for name in (
         "accounts_set_credential",
@@ -63,7 +63,7 @@ def _pending_reason() -> str | None:
     ):
         if not inspect.iscoroutinefunction(getattr(ControlAPI, name, None)):
             missing.append(f"ControlAPI.{name}")
-    from core.account_manager import AccountManager
+    from libzentsuite.core.account_manager import AccountManager
 
     if not inspect.iscoroutinefunction(getattr(AccountManager, "load", None)):
         missing.append("AccountManager.load")
@@ -107,7 +107,7 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
     async def build(self, *, env: bool = True) -> Any:
         """bootstrap.build's Framework (typed loosely: this suite pins
         the wiring contract, not the framework class shape)."""
-        from core import bootstrap
+        from libzentsuite.core import bootstrap
 
         return await bootstrap.build(
             env_file=str(self.env_path) if env else str(self.root / "absent.env"),
@@ -171,7 +171,7 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         svc = getattr(fw, "cooldowns", None)
         if svc is not None:
             return svc
-        from core.cooldowns import CooldownService
+        from libzentsuite.core.cooldowns import CooldownService
 
         return CooldownService(fw.database.cooldowns)
 
@@ -180,14 +180,14 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
             svc = getattr(fw, attr, None)
             if svc is not None:
                 return svc  # the FRAMEWORK'S instance (runtime cache + sources)
-        from core.credential_service import CredentialService
+        from libzentsuite.core.credential_service import CredentialService
 
         return CredentialService(
             fw.database.credentials, key_path=self.root / "state" / "credentials.key"
         )
 
     def plugin_state(self, fw: Any) -> Any:
-        from core.plugin_state import PluginStateService
+        from libzentsuite.core.plugin_state import PluginStateService
 
         return PluginStateService(fw.database.kv)
 

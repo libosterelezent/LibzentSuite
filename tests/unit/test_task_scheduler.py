@@ -15,9 +15,9 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from adapters.base import DiscordMessage
-from core.errors import FlowBlocked, SchedulerError, ServerRateLimit
-from core.event_bus import (
+from libzentsuite.adapters.base import DiscordMessage
+from libzentsuite.core.errors import FlowBlocked, SchedulerError, ServerRateLimit
+from libzentsuite.core.event_bus import (
     Event,
     EventBus,
     TaskCancelled,
@@ -26,8 +26,8 @@ from core.event_bus import (
     TaskQueued,
     TaskStarted,
 )
-from core.priority import Priority
-from core.task_scheduler import Task, TaskScheduler
+from libzentsuite.core.priority import Priority
+from libzentsuite.core.task_scheduler import Task, TaskScheduler
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1374,8 +1374,8 @@ class TestErrorKindSeam(SchedulerTestBase):
         published TaskFailed must carry error_kind == '<ClassName>' and
         TaskAckRegistry must reconstruct the SAME class for the waiter
         (pins the seam the services layer hardens)."""
-        from core.account_manager.services import TaskAckRegistry
-        from core.errors import AccessDenied, CacheInvalid, FetchRequired, TargetGone
+        from libzentsuite.core.account_manager.services import TaskAckRegistry
+        from libzentsuite.core.errors import AccessDenied, CacheInvalid, FetchRequired, TargetGone
 
         registry = TaskAckRegistry(self.bus, scheduler=self.scheduler)
         cases = (
@@ -1407,7 +1407,7 @@ class TestErrorKindSeam(SchedulerTestBase):
                 self.assertIn(exc.reason, ctx.exception.reason)
 
     async def test_non_flow_failure_maps_to_scheduler_error(self) -> None:
-        from core.account_manager.services import TaskAckRegistry
+        from libzentsuite.core.account_manager.services import TaskAckRegistry
 
         registry = TaskAckRegistry(self.bus, scheduler=self.scheduler)
 
@@ -1493,15 +1493,15 @@ class TestDelayFreeScheduling(unittest.TestCase):
     def test_scheduler_has_no_backoff_machinery(self) -> None:
         import inspect
 
-        from core.task_scheduler.scheduler import TaskScheduler
+        from libzentsuite.core.task_scheduler.scheduler import TaskScheduler
 
         src = inspect.getsource(TaskScheduler)
         self.assertNotIn("_sleep_backoff", src)
         self.assertNotIn("_backoff_wakers", src)
 
     def test_engine_counts_429_per_account(self) -> None:
-        from core.event_bus import EventBus
-        from core.rate_limit_manager import RateLimitManager
+        from libzentsuite.core.event_bus import EventBus
+        from libzentsuite.core.rate_limit_manager import RateLimitManager
 
         lim = RateLimitManager(EventBus(), _StubLogger(), None)
         self.assertEqual(lim.stats()["hits_429"], {"accounts": {}, "total": 0})
@@ -1513,14 +1513,14 @@ class TestDelayFreeScheduling(unittest.TestCase):
         self.assertEqual(s["total"], 3)
 
     def test_engine_has_no_bucket_capture(self) -> None:
-        from core.rate_limit_manager import RateLimitManager
+        from libzentsuite.core.rate_limit_manager import RateLimitManager
 
         self.assertFalse(hasattr(RateLimitManager, "report_bucket"))
         self.assertFalse(hasattr(RateLimitManager, "_bucket_block"))
 
     def test_effective_interval_reads_policy_layers(self) -> None:
-        from core.event_bus import EventBus
-        from core.rate_limit_manager import RateLimitManager
+        from libzentsuite.core.event_bus import EventBus
+        from libzentsuite.core.rate_limit_manager import RateLimitManager
 
         lim = RateLimitManager(EventBus(), _StubLogger(), None)
         lim.set_policy_values("message", 2.6)

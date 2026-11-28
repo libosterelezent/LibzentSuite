@@ -12,8 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import TYPE_CHECKING
 
-from core.event_bus import Event, EventBus, MessageReceived
-from core.task_scheduler import TaskScheduler
+from libzentsuite.core.event_bus import Event, EventBus, MessageReceived
+from libzentsuite.core.task_scheduler import TaskScheduler
 from tests.unit.helpers import enforces_file_modes
 from tests.unit.test_task_scheduler import (
     FakeAudit,
@@ -33,8 +33,8 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
     cleanup registered for after the ``with`` block hid that ordering."""
 
     async def test_off_by_default_zero_records(self) -> None:
-        from database.db import Database
-        from database.telemetry import TELEMETRY
+        from libzentsuite.database.db import Database
+        from libzentsuite.database.telemetry import TELEMETRY
 
         was = TELEMETRY.enabled
         TELEMETRY.enabled = False
@@ -54,8 +54,8 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
             TELEMETRY.enabled = was
 
     async def test_enabled_populates_from_real_db(self) -> None:
-        from database.db import Database
-        from database.telemetry import TELEMETRY
+        from libzentsuite.database.db import Database
+        from libzentsuite.database.telemetry import TELEMETRY
 
         was = TELEMETRY.enabled
         TELEMETRY.enabled = True
@@ -81,8 +81,8 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
             TELEMETRY.enabled = was
 
     async def test_no_per_record_logging(self) -> None:
-        from database.db import Database
-        from database.telemetry import TELEMETRY
+        from libzentsuite.database.db import Database
+        from libzentsuite.database.telemetry import TELEMETRY
 
         was = TELEMETRY.enabled
         TELEMETRY.enabled = True
@@ -259,7 +259,7 @@ class DispatchCacheEquivalenceTests(unittest.IsolatedAsyncioTestCase):
 
 class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_median_block(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(
             ["--scenario", "log_burst", "--records", "100", "--repeat", "3", "--quiet"]
@@ -271,7 +271,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(samples), 3)
 
     async def test_profiled_repeat_refused(self) -> None:
-        from benchmark.cli import run_bench_cli
+        from libzentsuite.benchmark.cli import run_bench_cli
 
         with self.assertRaises(SystemExit):
             run_bench_cli(
@@ -300,7 +300,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_run_mode_labels(self) -> None:
-        from benchmark.cli import _run_mode, build_parser
+        from libzentsuite.benchmark.cli import _run_mode, build_parser
 
         base = build_parser().parse_args(["--scenario", "log_burst"])
         self.assertEqual(_run_mode(base), "BASELINE")
@@ -312,7 +312,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_run_mode(spikes), "DEEP_DIAGNOSTIC")
 
     async def test_spike_capture_under_synthetic_stall(self) -> None:
-        from benchmark.sampler import SamplerSession, SpikeCapture
+        from libzentsuite.benchmark.sampler import SamplerSession, SpikeCapture
 
         capture = SpikeCapture(floor_ms=5.0, k_lag=1.0)
         session = SamplerSession(loop_interval_ms=5, spike_capture=capture)
@@ -336,7 +336,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
         # machine was calm for 200 ms" is an assumption about the host, and
         # it is false under parallel load on a platform whose timer ticks
         # every ~15.6 ms (one late wake past 10x p50 fired a capture).
-        from benchmark.sampler import SamplerSession, SpikeCapture
+        from libzentsuite.benchmark.sampler import SamplerSession, SpikeCapture
 
         capture = SpikeCapture()
         session = SamplerSession(loop_interval_ms=5, spike_capture=capture)
@@ -348,7 +348,7 @@ class BenchmarkReliabilityTests(unittest.IsolatedAsyncioTestCase):
 class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(enforces_file_modes(), "POSIX permission bits are not enforced here")
     async def test_json_report_mode_0600(self) -> None:
-        from benchmark.report import to_json
+        from libzentsuite.benchmark.report import to_json
 
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "r.json")
@@ -359,8 +359,8 @@ class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_report_value_free_of_fake_tokens(self) -> None:
         """The sentinel scan: a full bench stack report contains neither
         the fake token nor live key material (G7 pin)."""
-        from benchmark.cli import build_parser, run_suite
-        from benchmark.report import to_json
+        from libzentsuite.benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.report import to_json
 
         args = build_parser().parse_args(
             [

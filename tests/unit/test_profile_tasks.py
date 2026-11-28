@@ -18,11 +18,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.account_manager import DiscordCache
-from core.account_manager.services import AccountPluginServices
-from core.event_bus import EventBus
-from core.task_scheduler import Task, TaskScheduler
-from database.db import Database
+from libzentsuite.core.account_manager import DiscordCache
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.task_scheduler import Task, TaskScheduler
+from libzentsuite.database.db import Database
 
 
 class _SilentLogger:
@@ -44,7 +44,7 @@ class _SilentLogger:
 
 class TaskAttribution(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        from core.event_bus import EventBus
+        from libzentsuite.core.event_bus import EventBus
 
         async def parked_sender(task: Task) -> None:  # never completes: tasks stay live
             await asyncio.Event().wait()

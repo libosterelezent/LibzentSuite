@@ -14,12 +14,12 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from core.event_bus import EventBus
-from core.plugin_state import PluginStateService
-from core.rate_limit_manager.engine import ManualClock, RateLimitManager
-from core.settings_manager import Setting, SettingsManager
-from core.task_scheduler.scheduler import TaskScheduler
-from database.db import Database
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.plugin_state import PluginStateService
+from libzentsuite.core.rate_limit_manager.engine import ManualClock, RateLimitManager
+from libzentsuite.core.settings_manager import Setting, SettingsManager
+from libzentsuite.core.task_scheduler.scheduler import TaskScheduler
+from libzentsuite.database.db import Database
 
 _LOG = logging.getLogger("tests.round3_reaudit_a")
 
@@ -181,7 +181,7 @@ class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
 
     @unittest.expectedFailure
     async def test_lowercase_severity_still_filters_by_severity(self) -> None:
-        from interfaces.cli.commands import run_command
+        from libzentsuite.interfaces.cli.commands import run_command
 
         api = self._Api()
         await run_command(api, "logs 50 error")
@@ -190,14 +190,14 @@ class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
     async def test_lowercase_severity_now_account_filters(self) -> None:
         """Pin the (introduced) new behavior: `logs 50 error` silently
         account-filters instead of severity-filtering — see the report."""
-        from interfaces.cli.commands import run_command
+        from libzentsuite.interfaces.cli.commands import run_command
 
         api = self._Api()
         await run_command(api, "logs 50 error")
         self.assertEqual(api.calls, [{"limit": 50, "account": "error", "severity": None}])
 
     async def test_uppercase_severity_filters(self) -> None:
-        from interfaces.cli.commands import run_command
+        from libzentsuite.interfaces.cli.commands import run_command
 
         api = self._Api()
         await run_command(api, "logs 50 ERROR")
@@ -206,7 +206,7 @@ class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
     async def test_bare_lowercase_token_is_an_account_filter(self) -> None:
         """`logs error` was an ACCOUNT filter before round 3 too (the old
         detection needed >= 2 args) — pin that unchanged."""
-        from interfaces.cli.commands import run_command
+        from libzentsuite.interfaces.cli.commands import run_command
 
         api = self._Api()
         await run_command(api, "logs error")
@@ -303,7 +303,7 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         await _settle()
         # a task-less abort: fault must still gate submits and start() must
         # retire it (the estop-resume recovery path)
-        from core.errors import SchedulerError
+        from libzentsuite.core.errors import SchedulerError
 
         with self.assertRaises(SchedulerError):
             scheduler.submit("a", "p", "message")
@@ -487,7 +487,7 @@ class ConnectionDoubleClose(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------------------
 class IdentifyGateSanity(unittest.TestCase):
     def test_single_account_unchanged(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(5.0)
         self.assertEqual(gate.effective_interval, 5.0)
@@ -495,7 +495,7 @@ class IdentifyGateSanity(unittest.TestCase):
         self.assertEqual(gate.effective_interval, 5.0)
 
     def test_zero_and_negative_expected_clamped(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(5.0)
         gate.expected = 0
@@ -514,14 +514,14 @@ class RetryAfterClamp(unittest.TestCase):
         self.assertEqual(manager.cooldown_remaining("alpha", "message"), 3600.0)
 
     def test_over_cap_clamped_to_max_interval(self) -> None:
-        from core.rate_limit_manager.policies import MAX_INTERVAL
+        from libzentsuite.core.rate_limit_manager.policies import MAX_INTERVAL
 
         manager = RateLimitManager(EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
         manager.report_server_limit("alpha", "message", 1e9)
         self.assertEqual(manager.cooldown_remaining("alpha", "message"), MAX_INTERVAL)
 
     def test_none_action_rejected_not_stored(self) -> None:
-        from core.errors import RatePolicyError
+        from libzentsuite.core.errors import RatePolicyError
 
         manager = RateLimitManager(EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
         no_action: Any = None  # runtime validation rejects a None action

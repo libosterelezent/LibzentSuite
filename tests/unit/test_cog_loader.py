@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.errors import PluginError
+from libzentsuite.core.errors import PluginError
 
 
 def _write(root: Path, name: str, body: str) -> None:
@@ -15,7 +15,7 @@ def _write(root: Path, name: str, body: str) -> None:
 
 class CogDeclarationLoaderTests(unittest.TestCase):
     def setUp(self) -> None:
-        from core.plugin_manager.loader import PluginLoader
+        from libzentsuite.core.plugin_manager.loader import PluginLoader
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -26,7 +26,7 @@ class CogDeclarationLoaderTests(unittest.TestCase):
         _write(
             self.root,
             "goodcog",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "from discord.ext import commands\n"
             "class GoodCog(commands.Cog):\n"
             "    @commands.command(name='hi')\n"
@@ -43,7 +43,7 @@ class CogDeclarationLoaderTests(unittest.TestCase):
         _write(
             self.root,
             "badcog",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "from discord.ext import commands\n"
             "class C(commands.Cog):\n"
             "    pass\n"
@@ -59,7 +59,7 @@ class CogDeclarationLoaderTests(unittest.TestCase):
         _write(
             self.root,
             "notcog",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "class NotPlugin(PluginBase):\n"
             "    name = 'notcog'\n"
             "    COG = dict  # a class, but not a Cog\n",
@@ -72,7 +72,7 @@ class CogDeclarationLoaderTests(unittest.TestCase):
         _write(
             self.root,
             "legacy",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "class Legacy(PluginBase):\n"
             "    name = 'legacy'\n",
         )

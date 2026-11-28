@@ -83,7 +83,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - **pyright** is the static type checker (adopted 2026-11-19) and is a ratchet gate with `.github/pyright-baseline`. CI fails when the error count grows, and also when it shrinks without the baseline file being lowered in the same PR. Never raise the baseline. Use narrow, reasoned suppressions only.
 - The canonical configuration is `pyproject.toml`. Read it rather than copying settings.
 - Dependencies are declared in `pyproject.toml`. `uv.lock` pins them, and `requirements.txt` is generated from the lock. Regenerate it; never hand-edit it. Dev-only tools and test-only dependencies stay out of runtime dependencies.
-- The live Discord client (`better.py-self`) is imported lazily, only at the `adapters/discord/` boundary.
+- The live Discord client (`better.py-self`) is imported lazily, only at the `libzentsuite/adapters/discord/` boundary.
 - Pin every CI action and record it in `.github/workflows/actions.lock`. Workflow tokens stay read-only.
 - Verify third-party API behavior against current docs and the installed version, not memory.
 

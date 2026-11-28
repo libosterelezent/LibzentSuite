@@ -19,18 +19,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from core._asyncutil import outer_cancel_pending
-from core._persist_queue import PersistQueue
-from core.bootstrap import build
-from core.cooldowns import CooldownService
-from core.credential_service import CredentialService
-from core.credentials import Credentials, CredentialsError
-from core.errors import CredentialsError as CoreCredentialsError
-from core.errors import DatabaseError
-from core.event_bus import Event, EventBus
-from core.logging_service import LogService, ServiceLogger
-from database.connection import DatabaseError as ConnDatabaseError
-from database.db import Database
+from libzentsuite.core._asyncutil import outer_cancel_pending
+from libzentsuite.core._persist_queue import PersistQueue
+from libzentsuite.core.bootstrap import build
+from libzentsuite.core.cooldowns import CooldownService
+from libzentsuite.core.credential_service import CredentialService
+from libzentsuite.core.credentials import Credentials, CredentialsError
+from libzentsuite.core.errors import CredentialsError as CoreCredentialsError
+from libzentsuite.core.errors import DatabaseError
+from libzentsuite.core.event_bus import Event, EventBus
+from libzentsuite.core.logging_service import LogService, ServiceLogger
+from libzentsuite.database.connection import DatabaseError as ConnDatabaseError
+from libzentsuite.database.db import Database
 from tests.unit.helpers import enforces_file_modes
 
 #: fixture plugins (the framework ships none; the fixture keeps the boot
@@ -209,7 +209,7 @@ class TestDatabaseLayer(_TmpCase):
 
 class TestTaskIdsSurviveRestart(_TmpCase):
     async def _boot(self, db_name: str, restore: bool, n: int) -> list[Any]:
-        from core.task_scheduler import TaskScheduler
+        from libzentsuite.core.task_scheduler import TaskScheduler
         from tests.unit.test_task_scheduler import FakeAudit, FakeLimiter, FakeLogger, FakeSender
 
         db = Database(self.dir / db_name)
@@ -457,7 +457,7 @@ class TestBootstrapRobustness(_TmpCase):
             )
         self.assertFalse(db.connection.connected)
         root = logging.getLogger("libzent")
-        from core.logging_service import StdlibBridge
+        from libzentsuite.core.logging_service import StdlibBridge
 
         self.assertFalse([h for h in root.handlers if isinstance(h, StdlibBridge)])
 
@@ -531,7 +531,7 @@ class TestBootstrapRobustness(_TmpCase):
 
 class TestConfigValidation(_TmpCase):
     def test_bad_policy_shapes_fail_loud_with_message(self) -> None:
-        from core.config import load_config
+        from libzentsuite.core.config import load_config
 
         cfg = self.dir / "c"
         cfg.mkdir()
@@ -543,7 +543,7 @@ class TestConfigValidation(_TmpCase):
             load_config(cfg)
 
     def test_bom_json_tolerated(self) -> None:
-        from core.config import load_config
+        from libzentsuite.core.config import load_config
 
         cfg = self.dir / "c2"
         cfg.mkdir()

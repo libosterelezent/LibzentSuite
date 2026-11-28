@@ -12,7 +12,7 @@ import time
 import unittest
 from typing import Any
 
-from core.audit import AuditEntry, AuditRecorder, format_audit
+from libzentsuite.core.audit import AuditEntry, AuditRecorder, format_audit
 
 
 class FakeAuditRepo:

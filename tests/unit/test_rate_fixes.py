@@ -22,10 +22,10 @@ import random
 import unittest
 from typing import TYPE_CHECKING, Any
 
-from core.errors import RatePolicyError
-from core.event_bus import EventBus
-from core.rate_limit_manager import RateLimitManager
-from core.rate_limit_manager.engine import DEFAULT_JITTER
+from libzentsuite.core.errors import RatePolicyError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.rate_limit_manager import RateLimitManager
+from libzentsuite.core.rate_limit_manager.engine import DEFAULT_JITTER
 from tests.unit.test_rate_engine import (
     ACTION,
     GatedSleepManager,
@@ -188,7 +188,7 @@ class LearnedDefaultWarnings(unittest.IsolatedAsyncioTestCase):
     async def test_default_no_jitter_entry_when_metronomic(self) -> None:
         """DEFAULT_JITTER is monkeypatched to zero: every default-paced
         action with no stored policy flags the metronomic pacing."""
-        import core.rate_limit_manager.engine as engine
+        import libzentsuite.core.rate_limit_manager.engine as engine
 
         manager = _plain_manager()
         saved = engine.DEFAULT_JITTER
@@ -289,8 +289,8 @@ class UnstudiedActionDefaultTests(unittest.IsolatedAsyncioTestCase):
     floor); learned defaults and stored policies keep their contracts."""
 
     def test_unstudied_effective_is_the_conservative_default(self) -> None:
-        from core.rate_limit_manager import UNSTUDIED_ACTION_INTERVAL
-        from core.rate_limit_manager.engine import RateLimitManager
+        from libzentsuite.core.rate_limit_manager import UNSTUDIED_ACTION_INTERVAL
+        from libzentsuite.core.rate_limit_manager.engine import RateLimitManager
 
         manager = RateLimitManager(EventBus(), StubLogger(), None)
         self.assertEqual(UNSTUDIED_ACTION_INTERVAL, 1.5)
@@ -299,13 +299,13 @@ class UnstudiedActionDefaultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.effective("message")["interval"], 2.6)
 
     def test_floor_above_default_dominates(self) -> None:
-        from core.rate_limit_manager.engine import RateLimitManager
+        from libzentsuite.core.rate_limit_manager.engine import RateLimitManager
 
         manager = RateLimitManager(EventBus(), StubLogger(), None, floor=3.0)
         self.assertEqual(manager.effective("poke")["interval"], 3.0)
 
     def test_stored_policy_displaces_the_default(self) -> None:
-        from core.rate_limit_manager.engine import RateLimitManager
+        from libzentsuite.core.rate_limit_manager.engine import RateLimitManager
 
         manager = RateLimitManager(EventBus(), StubLogger(), None)
         manager.set_policy_values("poke", 2.0)  # distinct pace proves displacement

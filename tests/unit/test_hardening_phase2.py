@@ -14,13 +14,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from core.account_manager import DiscordCache
-from core.account_manager.services import AccountPluginServices
-from core.errors import AccountError, DatabaseError
-from core.event_bus import EventBus, MessageReceived
-from core.plugin_state import PluginStateService
-from core.task_scheduler import Task, TaskScheduler
-from database.db import Database
+from libzentsuite.core.account_manager import DiscordCache
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.errors import AccountError, DatabaseError
+from libzentsuite.core.event_bus import EventBus, MessageReceived
+from libzentsuite.core.plugin_state import PluginStateService
+from libzentsuite.core.task_scheduler import Task, TaskScheduler
+from libzentsuite.database.db import Database
 from tests.unit.helpers import FakeScheduler, default_snapshot, make_manager
 
 
@@ -163,7 +163,7 @@ class ZombieClientGuards(_TmpCase):
         second = h.factory("alpha", "tok-alpha")
         h.manager._wire_client("alpha", runtime, second)
         runtime.client = second
-        from adapters.base import DiscordMessage
+        from libzentsuite.adapters.base import DiscordMessage
 
         def msg(i: int, text: str) -> DiscordMessage:
             return DiscordMessage(id=i, channel_id=1, author_id=2, content=text, dm=False)
@@ -184,7 +184,7 @@ class ZombieClientGuards(_TmpCase):
         await h.manager.stop("alpha")
 
     async def test_drop_without_supervisor_is_failed_not_wedged(self) -> None:
-        from core.account_manager.manager import AccountStatus
+        from libzentsuite.core.account_manager.manager import AccountStatus
         from tests.unit.test_account_manager import _fast_reconnect_settings
 
         settings = _fast_reconnect_settings()
@@ -235,7 +235,7 @@ class PersistQueueBoundedStop(_TmpCase):
             async def add(self, item: dict[str, Any]) -> None:
                 await asyncio.sleep(30)
 
-        import core._persist_queue as pq
+        import libzentsuite.core._persist_queue as pq
 
         q = pq.PersistQueue("test")
         await q.start(StuckRepo(), batch=50, interval=0.05)
@@ -254,7 +254,7 @@ class PersistQueueBoundedStop(_TmpCase):
 
 class CliEmptyName(unittest.IsolatedAsyncioTestCase):
     async def test_empty_name_token_is_usage_error(self) -> None:
-        from interfaces.cli.commands import UsageError, run_command
+        from libzentsuite.interfaces.cli.commands import UsageError, run_command
 
         with self.assertRaises(UsageError):
             await run_command(SimpleNamespace(), 'accounts stop ""')

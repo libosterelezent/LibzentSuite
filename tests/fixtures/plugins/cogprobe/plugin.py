@@ -9,7 +9,7 @@ from typing import Any
 
 from discord.ext import commands
 
-from core.plugin_base import PluginBase
+from libzentsuite.core.plugin_base import PluginBase
 
 
 class ProbeCog(commands.Cog):

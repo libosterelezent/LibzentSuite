@@ -5,14 +5,14 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from adapters.base import DiscordMessage
-from adapters.simulator import client as client_module
-from adapters.simulator.client import (
+from libzentsuite.adapters.base import DiscordMessage
+from libzentsuite.adapters.simulator import client as client_module
+from libzentsuite.adapters.simulator.client import (
     LATENCY_MAX_MS,
     LATENCY_MIN_MS,
     SimClient,
 )
-from adapters.simulator.world import (
+from libzentsuite.adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
     SYNTHETIC_BOT_ID,
@@ -20,7 +20,7 @@ from adapters.simulator.world import (
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
-from core.errors import ServerRateLimit, TargetGone
+from libzentsuite.core.errors import ServerRateLimit, TargetGone
 
 
 def _world() -> SimWorld:

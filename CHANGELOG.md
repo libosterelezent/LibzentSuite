@@ -68,6 +68,16 @@ nothing can ship until that hold is lifted; see
 - The push protocol swaps its enforcement point: the local
   full-suite gate (`scripts/local-ci.sh` + the stamp/hook
   mechanism) retires; `scripts/preflight.sh` (ruff + pyright,
+- The Python source folds into a single libzentsuite/ package:
+  every import becomes libzentsuite.core.*, libzentsuite.adapters.*,
+  etc. — the wheel ships collision-free names instead of the flat core,
+  dapters, database top-level packages that could collide with any
+  other package. main.py becomes libzentsuite/__main__.py with a
+  [project.scripts] console entry point (python -m libzentsuite and
+  libzentsuite both work). The 9-item PROD list in every config
+  (ruff, pyright, preflight, CI, coverage) collapses to one name.
+  plugins/ stays at the repository root (runtime-discovered, not a
+  package). 142 files rewritten, 702 import lines changed.
   seconds) runs before every commit, and the CI runner is the
   merge prerequisite. Every PR carries its tags and the body
   format (`.github/PULL_REQUEST_TEMPLATE.md`): Summary, Testing,

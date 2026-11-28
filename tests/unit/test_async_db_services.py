@@ -14,10 +14,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.cooldowns import CooldownService
-from core.credential_service import CredentialService
-from core.plugin_state import PluginStateService
-from database.db import Database
+from libzentsuite.core.cooldowns import CooldownService
+from libzentsuite.core.credential_service import CredentialService
+from libzentsuite.core.plugin_state import PluginStateService
+from libzentsuite.database.db import Database
 
 
 class AsyncTestCase(unittest.IsolatedAsyncioTestCase):
@@ -51,7 +51,7 @@ class TestAsyncDatabase(AsyncTestCase):
         db = self.tmp_db()
         await db.connect()
         await db.accounts.add("alpha")
-        from database.connection import DatabaseError
+        from libzentsuite.database.connection import DatabaseError
 
         with self.assertRaises(DatabaseError):
             await db.accounts.add("alpha")  # PK violation -> wrapped error
@@ -93,7 +93,7 @@ class TestAsyncDatabase(AsyncTestCase):
 
     async def test_connect_required_before_use(self) -> None:
         db = self.tmp_db()
-        from database.connection import DatabaseError
+        from libzentsuite.database.connection import DatabaseError
 
         with self.assertRaises(DatabaseError):
             await db.kv.set("x", "1")
@@ -152,7 +152,7 @@ class TestAsyncDatabase(AsyncTestCase):
     async def test_same_database_on_second_event_loop_rejected(self) -> None:
         """Two loops driving one connection corrupt the lock/sqlite
         session; the guard must fail loud with a clean DatabaseError."""
-        from core.errors import DatabaseError
+        from libzentsuite.core.errors import DatabaseError
 
         db = self.tmp_db()
         await db.connect()
@@ -329,7 +329,7 @@ class TestPluginStateService(AsyncTestCase):
         db = Database(":memory:")
         await db.connect()
         state = PluginStateService(db.kv)
-        from core.errors import PluginError
+        from libzentsuite.core.errors import PluginError
 
         with self.assertRaises(PluginError):
             state._key("global", None, "")

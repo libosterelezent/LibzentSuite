@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.plugin_base import PluginBase
+from libzentsuite.core.plugin_base import PluginBase
 
 
 class EchoPlugin(PluginBase):

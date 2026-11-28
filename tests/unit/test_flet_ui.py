@@ -7,7 +7,7 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from interfaces.ui import PAGES, ApiClient, page
+from libzentsuite.interfaces.ui import PAGES, ApiClient, page
 
 
 class ApiClientTests(unittest.TestCase):

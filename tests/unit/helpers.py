@@ -28,12 +28,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from adapters.base import DiscordMessage
-from core.account_manager import AccountManager
-from core.credentials import Credentials
-from core.errors import DatabaseError, SchedulerError
-from core.event_bus import EventBus
-from database.models import AccountRecord
+from libzentsuite.adapters.base import DiscordMessage
+from libzentsuite.core.account_manager import AccountManager
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import DatabaseError, SchedulerError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.database.models import AccountRecord
 
 if TYPE_CHECKING:
     import builtins
@@ -624,7 +624,7 @@ def make_manager(
     )
     # Wire a CredentialService backed by an in-memory store so the
     # database-only resolution works in tests (no .env fallback exists)
-    from core.credential_service import CredentialService
+    from libzentsuite.core.credential_service import CredentialService
 
     class _MemCredRepo:
         def __init__(self) -> None:
@@ -677,7 +677,7 @@ def make_manager(
         else FakeAccountPluginsRepo(),
     )
     collector = EventCollector(bus)
-    from core.event_bus import (
+    from libzentsuite.core.event_bus import (
         AccountConnected,
         AccountDisconnected,
         AccountFailed,

@@ -8,8 +8,8 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from benchmark.report import _verdict, compare
-from benchmark.scenarios import BenchScenario
+from libzentsuite.benchmark.report import _verdict, compare
+from libzentsuite.benchmark.scenarios import BenchScenario
 
 
 async def _stub_run(session: Any, perf: Any, **kw: Any) -> dict[str, Any]:
@@ -34,7 +34,7 @@ def _stub_scenarios() -> dict[str, BenchScenario]:
 
 class RunSuiteMultiScenarioTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_scenarios_reported(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(["--quiet"])
         with mock.patch("benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):
@@ -42,7 +42,7 @@ class RunSuiteMultiScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["name"] for s in report["scenarios"]], ["stub_one", "stub_two"])
 
     async def test_repeat_aggregation_lands_per_scenario(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(["--repeat", "2", "--quiet"])
         with mock.patch("benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):

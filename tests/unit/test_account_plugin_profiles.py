@@ -18,18 +18,18 @@ from typing import TYPE_CHECKING, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.errors import DatabaseError
-from database.db import Database
+from libzentsuite.core.errors import DatabaseError
+from libzentsuite.database.db import Database
 
 if TYPE_CHECKING:
-    from core.api import ControlAPI
+    from libzentsuite.core.api import ControlAPI
 
 
 def _api_with_stubs(**collaborators: Any) -> ControlAPI:
     """Build a ControlAPI wired with placeholder collaborators — the
     constructor pins the concrete collaborator classes these tests
     replace (the placeholders are never touched on these paths)."""
-    from core.api import ControlAPI
+    from libzentsuite.core.api import ControlAPI
 
     return ControlAPI(**collaborators)
 
@@ -170,7 +170,7 @@ class Lifecycle(_Base):
         self.assertTrue(await self.repo.exists("beta", "exporter", "main"))
 
     async def test_migration_version_is_current(self) -> None:
-        from database.schema import latest_version
+        from libzentsuite.database.schema import latest_version
 
         self.assertGreaterEqual(latest_version(), 16)  # v16 = preset defs/execs
 

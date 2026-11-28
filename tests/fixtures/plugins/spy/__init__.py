@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.event_bus import Event  # noqa: TC001 -- runtime event registration
-from core.plugin_base import PluginBase, PluginContext
-from core.settings_manager import Setting
+from libzentsuite.core.event_bus import Event  # noqa: TC001 -- runtime event registration
+from libzentsuite.core.plugin_base import PluginBase, PluginContext
+from libzentsuite.core.settings_manager import Setting
 
 
 class SpyPlugin(PluginBase):
