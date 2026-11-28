@@ -13,7 +13,7 @@ from libzentsuite.interfaces.ui import PAGES, ApiClient, page
 class ApiClientTests(unittest.TestCase):
     def test_get_fetches_json(self) -> None:
         client = ApiClient(base_url="http://x", token="t")
-        with mock.patch("interfaces.ui.urlopen") as mock_open:
+        with mock.patch("libzentsuite.interfaces.ui.urlopen") as mock_open:
             mock_open.return_value.__enter__.return_value = mock.MagicMock(
                 status=200, read=lambda: json.dumps({"ok": True}).encode()
             )
@@ -22,7 +22,7 @@ class ApiClientTests(unittest.TestCase):
 
     def test_post_sends_body(self) -> None:
         client = ApiClient(base_url="http://x", token="t")
-        with mock.patch("interfaces.ui.urlopen") as mock_open:
+        with mock.patch("libzentsuite.interfaces.ui.urlopen") as mock_open:
             mock_open.return_value.__enter__.return_value = mock.MagicMock(
                 status=200, read=lambda: b"{}"
             )

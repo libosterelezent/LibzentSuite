@@ -25,7 +25,7 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.path = Path(self.tmp.name) / "legacy.db"
 
     async def test_legacy_values_backfill_then_fold_to_workspaces(self) -> None:
-        with mock.patch("database.db.MIGRATIONS", MIGRATIONS[:4]):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", MIGRATIONS[:4]):
             db = Database(self.path)
             await db.connect()
             # the v4-era writes use the v4-era column directly (the

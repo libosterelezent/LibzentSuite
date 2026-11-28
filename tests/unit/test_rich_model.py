@@ -649,12 +649,12 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
 
         saved = {
             name: sys.modules.get(name)
-            for name in ("discord", "adapters.discord", "adapters.discord.client")
+            for name in ("discord", "libzentsuite.adapters.discord", "libzentsuite.adapters.discord.client")
         }
         for name in saved:
             sys.modules.pop(name, None)
         try:
-            importlib.import_module("adapters.discord")
+            importlib.import_module("libzentsuite.adapters.discord")
             self.assertNotIn("discord", sys.modules)
         finally:
             for name, mod in saved.items():

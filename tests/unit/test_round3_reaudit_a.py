@@ -431,7 +431,7 @@ class SettingsClearRoundTrip(unittest.IsolatedAsyncioTestCase):
                 bus = EventBus()
                 seen: list[Any] = []
                 bus.subscribe(
-                    __import__("core.event_bus", fromlist=["SettingChanged"]).SettingChanged,
+                    __import__("libzentsuite.core.event_bus", fromlist=["SettingChanged"]).SettingChanged,
                     seen.append,
                 )
                 mgr = SettingsManager(

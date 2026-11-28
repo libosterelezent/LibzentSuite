@@ -37,7 +37,7 @@ class RunSuiteMultiScenarioTests(unittest.IsolatedAsyncioTestCase):
         from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(["--quiet"])
-        with mock.patch("benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):
+        with mock.patch("libzentsuite.benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):
             report = await run_suite(args)
         self.assertEqual([s["name"] for s in report["scenarios"]], ["stub_one", "stub_two"])
 
@@ -45,7 +45,7 @@ class RunSuiteMultiScenarioTests(unittest.IsolatedAsyncioTestCase):
         from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(["--repeat", "2", "--quiet"])
-        with mock.patch("benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):
+        with mock.patch("libzentsuite.benchmark.cli.BENCH_SCENARIOS", _stub_scenarios()):
             report = await run_suite(args)
         self.assertEqual(len(report["scenarios"]), 2)
         for scen in report["scenarios"]:

@@ -70,7 +70,7 @@ class TestDatabaseLayer(_TmpCase):
     async def test_failed_migration_is_atomic(self) -> None:
         bad = ((1, "bad", "CREATE TABLE ok_t (x INTEGER);\nTHIS IS NOT SQL;"),)
         db = Database(self.dir / "m.db")
-        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(DatabaseError):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", bad), self.assertRaises(DatabaseError):
             await db.connect()
         # connection was released and nothing half-applied remained
         self.assertFalse(db.connection.connected)
@@ -443,7 +443,7 @@ class TestBootstrapRobustness(_TmpCase):
             raise ValueError("mid-build failure")
 
         with (
-            mock.patch("core.bootstrap._seed_config_defaults", boom),
+            mock.patch("libzentsuite.core.bootstrap._seed_config_defaults", boom),
             self.assertRaises(ValueError),
         ):
             await build(

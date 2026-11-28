@@ -22,7 +22,7 @@ def flat_embed(
     footer_text: str | None = None,
     fields: tuple[tuple[str, str, bool], ...] = (),
 ) -> SimpleNamespace:
-    """adapters.model.DiscordEmbed shape (FLAT author/footer)."""
+    """libzentsuite.adapters.model.DiscordEmbed shape (FLAT author/footer)."""
     return SimpleNamespace(
         author_name=author_name or "",
         title=title or "",
