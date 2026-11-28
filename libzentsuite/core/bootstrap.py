@@ -940,10 +940,6 @@ async def _assemble(
     # C2: the cog host rides the plugin manager (host_cog/unhost_cog
     # drive add_cog/remove_cog per (account, plugin))
     plugins.cog_host = cog_host
-    # the self-command executor's command gate reads this attribute; it
-    # was never set here, so framework verbs fell back to the RETIRED env
-    # OWNER_USER_IDS grant instead of the DB admin panel
-    plugins._access_manager = access
     cleanups.append(("plugins", plugins.close))
     plugins.discover()
     # Plugin dashboard UIs register at BOOT (discovery time) so plugin
@@ -1107,12 +1103,6 @@ async def _assemble(
         plugin_data=plugin_data_store,
         started_at=_time.time(),
     )
-
-    # The framework verbs no longer ride the accounts (owner call
-    # 2026-11-17) so the hub's api_provider has no consumer — the
-    # mention bridge and the verbs cog both live in dump/ history. The
-    # account manager's access seam is direct injection now (the
-    # AccountManager constructor takes it).
 
     return Framework(
         api=api,
