@@ -94,6 +94,7 @@ Keep the rules high-level. When a detail is needed, read the file that owns it (
 - [ ] Reused the existing owner of any shared logic.
 - [ ] Added types, docstrings, and regression tests, including failure paths.
 - [ ] Synced `README.md`, `docs/`, `docs/roadmap.md`, and `CHANGELOG.md` `[Unreleased]` where affected.
+- [ ] **Updated every CI workflow path reference** (`ruff`, `pyright`, `--cov=` targets in `.github/workflows/tests.yml`) when files move, rename, or delete — a structural change without its workflow update ships a red CI (E902: file not found).
 - [ ] Ran Ruff, pyright, and the relevant tests. Recorded anything not run.
 - [ ] Reviewed the full diff for unrelated changes, stale comments, API breakage, secrets, and dead code.
 
