@@ -25,9 +25,11 @@ Semantics (the contract plugin authors rely on):
   opened with. Under a flood beyond ``RING_MAX`` unconsumed events the
   oldest are evicted — matching degrades honestly, memory stays
   bounded.
-* Checks see the frozen DTO: the ``MessageReceived`` event (flat
-  fields plus the parsed ``.message`` rich model — embeds and
-  components are parsed once at the adapter boundary).
+* Checks see the ``MessageReceived`` event (flat fields plus the
+  parsed ``.message`` rich model — embeds and components are parsed
+  once at the adapter boundary). The rich model is frozen; the event
+  itself is a shared plain dataclass — checks must not mutate it, the
+  same object reaches later consumers).
 * A raising check surfaces as :class:`core.errors.AccountError` from
   the awaiting call with the cause attached — the same contract as
   ``wait_for_message`` / ``collect_messages``.

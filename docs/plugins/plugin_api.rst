@@ -71,7 +71,9 @@ Awaits: ``window.match()`` (first unconsumed match, ``None`` when the
 deadline lapses), ``window.collect(n)`` (up to ``n`` matches, partial
 on deadline — judge by ``len()``), ``window.first_of(check_a,
 check_b)`` (first match of ANY check; the window's own check is not
-consulted). Checks see the frozen event DTO; a raising check surfaces
+consulted). Checks receive the shared ``MessageReceived`` event — its
+``.message`` rich model is frozen, the event itself is a plain
+dataclass, so a check must not mutate it; a raising check surfaces
 as :class:`core.errors.AccountError` with the cause. Awaits after the
 block exits raise ``RuntimeError`` — a stale window fails loud.
 

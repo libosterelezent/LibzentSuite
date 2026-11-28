@@ -108,7 +108,7 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
         seam = SeamRecorder()
         async with make_window(lambda e: True, 2.0, seam) as window:
             pending = asyncio.create_task(window.match())
-            await asyncio.sleep(0.02)  # parked on the wake event
+            await asyncio.sleep(0)  # one loop turn: the task parks (FIFO)
             seam.feed(1, content="reply")
             reply = await asyncio.wait_for(pending, 1.0)
         self.assertIsNotNone(reply)
@@ -136,7 +136,7 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
         async with make_window(lambda e: "page" in e.content, 2.0, seam) as window:
             seam.feed(1, content="page 0")
             pending = asyncio.create_task(window.collect(2))
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0)  # one loop turn: the collector parks
             seam.feed(2, content="page 1")
             pages = await asyncio.wait_for(pending, 1.0)
         self.assertEqual([p.message_id for p in pages], [1, 2])
@@ -204,7 +204,7 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
         window = make_window(lambda e: True, 5.0, seam)
         await window.__aenter__()
         pending = asyncio.create_task(window.match())
-        await asyncio.sleep(0.02)  # parked inside the window
+        await asyncio.sleep(0)  # one loop turn: the task parks (FIFO)
         await window.__aexit__(None, None, None)
         with self.assertRaises(RuntimeError):
             await asyncio.wait_for(pending, 1.0)
@@ -215,7 +215,7 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
         window = make_window(lambda e: True, 5.0, seam)
         await window.__aenter__()
         pending = asyncio.create_task(window.match())
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0)  # one loop turn: the task parks (FIFO)
         pending.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await pending
@@ -236,7 +236,11 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
         seam = SeamRecorder()
         async with make_window(lambda e: "hit" in e.content, 0.05, seam) as window:
             seam.feed(1, content="hit")
-            await asyncio.sleep(0.1)  # deadline lapses INSIDE the block
+            # canary entered AFTER the first window, so its expiry —
+            # awaited to None — proves the first deadline has lapsed:
+            # deadline order is entry order, no wall-clock margin
+            async with make_window(lambda e: False, 0.05, seam) as canary:
+                self.assertIsNone(await canary.match())
             reply = await window.match()  # no park: the buffered match
         self.assertIsNotNone(reply)
         self.assertEqual(reply.message_id, 1)
@@ -270,7 +274,8 @@ class ExpectFacadeTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(bus=bus, scheduler=scheduler)
         async with services.expect(lambda e: e.content == "reply", 2.0) as window:
             pending_send = asyncio.create_task(services.send_message(100, "$wa"))
-            await asyncio.sleep(0.02)  # submitted, parked on its ack
+            await asyncio.sleep(0)  # one loop turn: submit is synchronous
+            self.assertEqual(len(scheduler.submitted), 1)
             await bus.publish(
                 MessageReceived(
                     account="alpha",
@@ -305,7 +310,7 @@ class ExpectFacadeTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(bus=bus, waiter_registry=registry)
         async with services.expect(lambda e: e.content == "hit", 1.0) as window:
             pending = asyncio.create_task(window.match())
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0)  # one loop turn: the waiter parks
             await bus.publish(
                 MessageReceived(
                     account="alpha", message_id=2, channel_id=1, author_id=1, content="hit"

@@ -27,7 +27,8 @@ nothing can ship until that hold is lifted; see
   Await surface: `window.match()` (first match, `None` on deadline),
   `window.collect(n)` (up to `n`, partial on deadline),
   `window.first_of(*checks)` (any-check match over the same buffer).
-  Checks see the frozen `MessageReceived` DTO; raising checks surface
+  Checks see the `MessageReceived` event — the `.message` rich model is
+  frozen, the event is shared; raising checks surface
   as `AccountError`; `wait_for_message`/`collect_messages` now share
   the window's subscription seam (`_subscribe_waits`).
 - Anti-flake tooling for the test suite: every test now carries a
