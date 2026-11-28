@@ -1,7 +1,7 @@
 """LiveDebug — the whole-suite LIVE reconnaissance harness.
 
 A human-supervised pass over the REAL LibzentSuite stack (the exact
-``core.bootstrap.build`` path of ``main.py``) with only the Discord
+``libzentsuite.core.bootstrap.build`` path of ``libzentsuite/__main__.py``) with only the Discord
 boundary replaced by the offline simulator: no network, no real
 tokens, no second stack. Its job is to drive every feature area in
 ordered PHASES while an anomaly-capture layer watches alongside:
@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 # the repository root must be importable BEFORE the first repository
-# import below (core.errors): direct invocation
+# import below (libzentsuite.core.errors): direct invocation
 # ``python scripts/live-debugging/live_debug.py`` from any working
 # directory puts only this file's directory on sys.path
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2106,7 +2106,7 @@ async def phase_simulation(h: Harness) -> None:
     # POSITIVE check at the CURRENT `--sim` default: main.py points the
     # runner at the workload fixtures (tests/fixtures/sim_plugins)
     # POSITIVE check through the CLI ENTRYPOINT — the exact command the
-    # operator types (``python main.py --sim export_basic``), so the
+    # operator types (``python -m libzentsuite --sim export_basic``), so the
     # default plugin dir, exit code, and summary line are all exercised
     # as shipped rather than through the internal runner
     async def run_cli_sim() -> tuple[int | None, str]:

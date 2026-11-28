@@ -1,7 +1,7 @@
 # Live-debugging toolkit — the whole-suite LIVE harness
 
 `live_debug.py` boots the **real** LibzentSuite stack — the exact
-`core.bootstrap.build()` path `main.py` uses — with only the Discord
+`libzentsuite.core.bootstrap.build()` path `libzentsuite/__main__.py` uses — with only the Discord
 boundary replaced by the offline simulator (`adapters/simulator/`), then
 drives **every feature area** in ordered phases while a parallel anomaly
 window watches for anything that deviates from the documented contracts
@@ -156,7 +156,7 @@ patching the framework:
    the sim client has none, so cogs never host on sim boots. The
    harness hosts the cog itself to exercise the command face.
 6. **`--sim` with an explicit production `--plugins` override finds no
-   workload.** `main.py --sim` now defaults to
+   workload.** `python -m libzentsuite --sim` now defaults to
    `tests/fixtures/sim_plugins` (where the exporter workload lives), but
    pointing `--plugins plugins` at the production dir still leaves every
    scenario without its workload. The `simulation` phase runs the
