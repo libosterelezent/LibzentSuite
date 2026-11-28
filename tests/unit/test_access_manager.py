@@ -3,6 +3,7 @@ prefix settings, admin accounts, the_bot id, and the env migration."""
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from typing import Any
 
@@ -235,3 +236,36 @@ class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
         unwired = type("S", (), {"_logger": logging.getLogger("t"), "_access": None})()
         await AccountManager._record_access_user_id(unwired, "alpha", 777)
         self.assertTrue(await am.is_admin_id(777))
+
+
+class PrefixCacheCoherenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_set_during_full_warm_survives_the_warm(self) -> None:
+        """REGRESSION (cache race, 2026-11-28): warm_prefix_cache(None)
+        replaced the whole cache unlocked — a set_prefix_config landing
+        between its kv read and its replace was silently clobbered. Both
+        paths share the lock now; the mutation must survive."""
+
+        class GatedKv(FakeKv):
+            """Delivers a PRE-gate snapshot late: the warm's replace can
+            land after a mutation its read never saw."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.gate = asyncio.Event()
+
+            async def prefix(self, p: str) -> dict[str, Any]:
+                snapshot = {k: v for k, v in self.rows.items() if k.startswith(p)}
+                await self.gate.wait()
+                return snapshot
+
+        kv = GatedKv()
+        am = AccessManager(kv)
+        await am.set_prefix_config("alpha", "symbol", "$")
+        warm = asyncio.create_task(am.warm_prefix_cache())
+        await asyncio.sleep(0)  # the warm parks inside its gated kv read
+        setter = asyncio.create_task(am.set_prefix_config("alpha", "symbol", "!"))
+        await asyncio.sleep(0)  # the setter parks on the warm's lock
+        kv.gate.set()
+        await warm
+        await setter
+        self.assertEqual(am.prefix_config_sync("alpha")["prefix_symbol"], "!")

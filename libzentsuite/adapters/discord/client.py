@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from libzentsuite.adapters.base import DiscordMessage
 from libzentsuite.adapters.model import _emoji_repr, convert_message
 from libzentsuite.core._asyncutil import outer_cancel_pending
+from libzentsuite.core.access_manager import DEFAULT_PREFIX_CONFIG
 from libzentsuite.core.errors import (
     AccessDenied,
     AccountError,
@@ -1891,7 +1892,8 @@ class RealClientFactory:
         # client resolves the prefix through the AccessManager's warmed
         # cache on EVERY message — an adminprefix mutation lands on the
         # live account immediately.
-        prefix_mode, prefix_symbol = "mention", ""
+        prefix_mode = DEFAULT_PREFIX_CONFIG["prefix_mode"]
+        prefix_symbol = DEFAULT_PREFIX_CONFIG["prefix_symbol"]
         prefix_provider = None
         if self._access_manager is not None:
             manager, account_name = self._access_manager, name
