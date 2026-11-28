@@ -12,9 +12,7 @@
 
 ### Static checks
 
-- **ruff**: clean
-- **pyright**: 0 errors
-- **Preflight**: green
+- **Preflight**: green (ruff clean, pyright 0 errors)
 
 ### Details
 
