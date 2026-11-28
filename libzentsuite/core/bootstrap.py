@@ -57,7 +57,7 @@ from .logging_service import (
     detach_stdlib_bridge,
     release_stderr_pipeline,
 )
-from .plugin_manager import COMMAND_HUB, PluginManager
+from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
@@ -921,7 +921,6 @@ async def _assemble(
     access = AccessManager(database.kv, credentials=credentials)
     await access.migrate_from_credentials()
     await access.warm_prefix_cache()
-    COMMAND_HUB.access = access
     # task ids continue after the archived ones (they used to restart at 1
     # every boot, colliding with old rows; the swallowed insert error meant
     # a restarted process archived none of its tasks)
@@ -988,6 +987,7 @@ async def _assemble(
         signals=signals_outbox,
         profile_store=database.account_plugin_profiles,  # P3: profile lifecycle
         account_plugins=database.account_plugins,  # capability source
+        access=access,  # connect-time user-id recording for the admin gate
     )
     cleanups.append(("accounts", accounts.stop_all))
     await accounts.load()  # restore persisted accounts (attach their plugins)
@@ -1108,10 +1108,11 @@ async def _assemble(
         started_at=_time.time(),
     )
 
-    # The hub's ACCESS seam stays (the account manager records account
-    # user ids through it); the framework verbs no longer ride the
-    # accounts (owner call 2026-11-17) so api_provider has no consumer —
-    # the mention bridge and the verbs cog both live in dump/ history.
+    # The framework verbs no longer ride the accounts (owner call
+    # 2026-11-17) so the hub's api_provider has no consumer — the
+    # mention bridge and the verbs cog both live in dump/ history. The
+    # account manager's access seam is direct injection now (the
+    # AccountManager constructor takes it).
 
     return Framework(
         api=api,

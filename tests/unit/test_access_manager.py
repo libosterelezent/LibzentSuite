@@ -226,15 +226,12 @@ class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
         import logging
 
         from libzentsuite.core.account_manager import AccountManager
-        from libzentsuite.core.plugin_manager.commands import COMMAND_HUB
 
         am = make()
         await am.set_admin_flag("alpha", True)
-        saved, COMMAND_HUB.access = COMMAND_HUB.access, am
-        try:
-            stub = type("S", (), {"_logger": logging.getLogger("t")})()
-            await AccountManager._record_access_user_id(stub, "alpha", 777)
-            await AccountManager._record_access_user_id(stub, "alpha", None)
-        finally:
-            COMMAND_HUB.access = saved
+        stub = type("S", (), {"_logger": logging.getLogger("t"), "_access": am})()
+        await AccountManager._record_access_user_id(stub, "alpha", 777)
+        await AccountManager._record_access_user_id(stub, "alpha", None)
+        unwired = type("S", (), {"_logger": logging.getLogger("t"), "_access": None})()
+        await AccountManager._record_access_user_id(unwired, "alpha", 777)
         self.assertTrue(await am.is_admin_id(777))

@@ -369,6 +369,7 @@ class AccountManager:
         profile_store: Any = None,  # account-owned plugin profiles (P3)
         lifecycle: Any = None,
         account_plugins: Any = None,
+        access: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
         ``supervisor_tick`` is the supervisor's poll granularity in seconds;
@@ -387,6 +388,9 @@ class AccountManager:
         account_plugins table rows decide which plugins an account runs
         (ProfileManager no longer does). Unwired stacks degrade to ZERO
         attached plugins (fail-closed), never to "all plugins".
+        ``access`` (optional AccessManager) records each account's
+        Discord user id on its access row at connect (the per-account
+        admin gate); None on unwired stacks skips the recording.
 
         The constructor does NO repository I/O — persisted accounts are
         restored by awaiting :meth:`load` (the bootstrap does, right after
@@ -396,6 +400,7 @@ class AccountManager:
         self._logger = logger or logging.getLogger("libzent.accounts")
         self._accounts_repo = accounts_repo
         self._plugin_manager = plugin_manager
+        self._access = access
 
         # never consults it anymore (direct account→plugin assignments).
         self._scheduler = scheduler
@@ -1993,9 +1998,7 @@ class AccountManager:
         if name not in getattr(self, "_accounts", {name: None}):
             return  # removed mid-connect: never resurrect its access row
         try:
-            from ..plugin_manager.commands import COMMAND_HUB
-
-            access = COMMAND_HUB.access
+            access = self._access
             if access is not None:
                 await access.set_account_user_id(name, user_id)
         except Exception as exc:
