@@ -65,11 +65,11 @@ jobs:
         run: uv sync --locked
       - name: Ruff lint (production tree)
         run: |
-          uv run --frozen ruff check libzentsuite \
+          uv run --frozen ruff check libzentsuite scripts plugins \
             && echo "ruff check clean"
       - name: Ruff format check (production tree)
         run: |
-          uv run --frozen ruff format --check libzentsuite \
+          uv run --frozen ruff format --check libzentsuite scripts plugins \
             && echo "ruff format clean"
       - name: requirements.txt export sync (the AGENTS.md §8 contract)
         run: |
@@ -81,7 +81,7 @@ jobs:
           # bare `python3` is whatever the runner has on PATH, which is not
           # necessarily that interpreter
           ERRORS=$(uv run --frozen pyright --outputjson \
-            libzentsuite \
+            libzentsuite scripts plugins \
             2>/dev/null | uv run --frozen python -c "import json, sys; print(json.load(sys.stdin)['summary']['errorCount'])")
           BASELINE=$(cat .github/pyright-baseline)
           echo "pyright errors: $ERRORS (baseline: $BASELINE)"
@@ -97,7 +97,7 @@ jobs:
         # one -q: pyproject's addopts already carry one, and a second hides
         # the "N passed" summary line from the log
         run: |
-          uv run --frozen pytest tests/ -n auto --dist loadscope --cov=libzentsuite --cov-report=term-missing
+          uv run --frozen pytest tests/ -n auto --dist loadscope --cov=libzentsuite --cov=scripts --cov=plugins --cov-report=term-missing
           uv run --frozen coverage report
       - name: Coverage summary (job annotation)
         if: always()

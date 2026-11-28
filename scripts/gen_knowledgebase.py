@@ -45,8 +45,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 KB = ROOT / "knowledgebase"
-PACKAGES = ["core", "adapters", "database", "interfaces", "plugins"]
-EXTRA_MODULES = ["libzentsuite/__main__.py"]
+PACKAGES = ["libzentsuite", "plugins"]
+EXTRA_MODULES: list[str] = []
 
 #: symbols that are part of the SUPPORTED plugin API (architecture intent,
 #: maintained by hand — everything else public is internal core API)
