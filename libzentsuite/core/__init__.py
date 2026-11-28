@@ -9,6 +9,7 @@ Component layout (see docs/architecture/integration.md and ARCHITECTURE.md):
   core.rate_limit_manager 4-level rate policies, pacing, server limits, warnings
   core.task_scheduler     centralized task pipeline (priority/retry/timeout)
   core.event_bus          typed pub/sub with handler isolation
+  core.expect           send-coupled reactive waits (the expect window)
   core.logging_service   structured logging for every component
   core.api                CoreAPI — the ONE facade both interfaces call
 """

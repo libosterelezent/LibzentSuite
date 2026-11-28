@@ -30,6 +30,7 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
 
     from .credentials import Credentials as Credentials
     from .event_bus import Event, MessageReceived
+    from .expect import ExpectWindow
     from .settings_manager import Setting as Setting
 
 
@@ -268,6 +269,27 @@ class PluginServices(Protocol):
     ) -> list[MessageReceived]:
         """Collect matching inbound messages until ``idle_timeout`` passes
         with no new match (port of the audited container semantics)."""
+
+        raise NotImplementedError
+
+    def expect(
+        self,
+        check: Callable[[MessageReceived], bool],
+        timeout: float,
+    ) -> ExpectWindow:
+        """Open a send-coupled reactive window (client-capability Track B).
+
+        ``async with ctx.services.expect(check, timeout) as window:`` —
+        entering subscribes BEFORE the send runs inside the block, so
+        a reply landing during the send's queue wait matches exactly
+        like one landing after: the wait_for-after-send race is closed
+        by construction, and the framework owns and unwires the waiter
+        (no dangling plugin task). ``timeout`` is a total budget from
+        entry shared by every await; the window keeps observing the
+        account's events until the block exits. See
+        :class:`libzentsuite.core.expect.ExpectWindow` for the await
+        surface (``match`` / ``collect`` / ``first_of``).
+        """
 
         raise NotImplementedError
 
