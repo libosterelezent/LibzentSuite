@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database.db import Database
+from libzentsuite.database.db import Database
 
 
 class AccountPluginsTestBase(unittest.IsolatedAsyncioTestCase):

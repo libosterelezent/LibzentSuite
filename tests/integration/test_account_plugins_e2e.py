@@ -46,8 +46,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from core.bootstrap import build
-from core.errors import AccountError
+from libzentsuite.core.bootstrap import build
+from libzentsuite.core.errors import AccountError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: fixture plugins — the framework bundles none; probe/spy/echo carry the

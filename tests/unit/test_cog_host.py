@@ -11,7 +11,7 @@ from typing import Any
 
 from discord.ext import commands
 
-from core.plugin_manager.cog_host import CogServices, PluginCogHost
+from libzentsuite.core.plugin_manager.cog_host import CogServices, PluginCogHost
 
 
 class SampleCog(commands.Cog):

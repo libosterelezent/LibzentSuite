@@ -14,11 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any
 
-from core.api import ControlAPI
-from core.event_bus import EventBus
-from core.rate_limit_manager import RateLimitManager
-from core.workspace.service import WorkspaceService
-from database.db import Database
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.rate_limit_manager import RateLimitManager
+from libzentsuite.core.workspace.service import WorkspaceService
+from libzentsuite.database.db import Database
 
 LOG_NS = NS(logger=NS(warning=lambda *a, **k: None))
 

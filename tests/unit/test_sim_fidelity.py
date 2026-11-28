@@ -23,9 +23,9 @@ import unittest
 from types import SimpleNamespace as NS
 from typing import Any
 
-from adapters.model import DiscordMessage, convert_message
-from adapters.simulator.client import SimClient
-from adapters.simulator.world import (
+from libzentsuite.adapters.model import DiscordMessage, convert_message
+from libzentsuite.adapters.simulator.client import SimClient
+from libzentsuite.adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
     SYNTHETIC_BOT_ID,
@@ -34,7 +34,7 @@ from adapters.simulator.world import (
     SimWorld,
     WorldMessage,
 )
-from core.errors import ServerRateLimit
+from libzentsuite.core.errors import ServerRateLimit
 
 
 def _world(responder_id: int | None = None) -> SimWorld:
@@ -140,7 +140,7 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.reactions[0].count, 1)
 
     async def test_armed_limit_blocks_next_click_button(self) -> None:
-        from adapters.model import DiscordComponent
+        from libzentsuite.adapters.model import DiscordComponent
 
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
@@ -163,7 +163,7 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5)
-        from core.errors import TargetGone
+        from libzentsuite.core.errors import TargetGone
 
         with self.assertRaises(TargetGone):
             await client.add_reaction(SYNTHETIC_GUILD_CHANNEL, 424242, "❤")

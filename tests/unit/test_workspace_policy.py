@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from core.workspace import (
+from libzentsuite.core.workspace import (
     CooldownRecord,
     CooldownScopeType,
     DispatchFacts,

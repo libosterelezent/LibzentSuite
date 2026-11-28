@@ -20,7 +20,7 @@ _SEAMS = ("access", "pacing", "api_provider")
 def _isolate_hub(run: Callable[..., _R]) -> Callable[..., _R]:
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> _R:
         try:
-            from core.plugin_manager.commands import COMMAND_HUB
+            from libzentsuite.core.plugin_manager.commands import COMMAND_HUB
         except Exception:  # production tree not importable: nothing to guard
             return run(self, *args, **kwargs)
         saved = {name: getattr(COMMAND_HUB, name, None) for name in _SEAMS}

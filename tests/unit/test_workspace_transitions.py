@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.workspace import (
+from libzentsuite.core.workspace import (
     CHAIN_RUN_TRANSITIONS,
     MEMBER_TRANSITIONS,
     STEP_TRANSITIONS,

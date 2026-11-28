@@ -25,11 +25,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from core.plugin_base import PluginBase
-from core.settings_manager import Setting
+from libzentsuite.core.plugin_base import PluginBase
+from libzentsuite.core.settings_manager import Setting
 
 if TYPE_CHECKING:
-    from core.plugin_base import PluginContext
+    from libzentsuite.core.plugin_base import PluginContext
 
 
 class LdpFollowerPlugin(PluginBase):

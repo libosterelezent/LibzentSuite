@@ -36,14 +36,14 @@ from types import SimpleNamespace as NS
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 
-from adapters.discord import client as client_module
-from adapters.discord.client import IdentifyGate, RealClientFactory, RealDiscordClient
-from core.account_manager import AccountStatus
-from core.errors import AccountError
-from core.event_bus import AccountConnected, AccountFailed, EventBus
-from core.logging_service import LogService, ServiceLogger
-from core.rate_limit_manager.engine import RateLimitManager
-from core.task_scheduler import TaskScheduler
+from libzentsuite.adapters.discord import client as client_module
+from libzentsuite.adapters.discord.client import IdentifyGate, RealClientFactory, RealDiscordClient
+from libzentsuite.core.account_manager import AccountStatus
+from libzentsuite.core.errors import AccountError
+from libzentsuite.core.event_bus import AccountConnected, AccountFailed, EventBus
+from libzentsuite.core.logging_service import LogService, ServiceLogger
+from libzentsuite.core.rate_limit_manager.engine import RateLimitManager
+from libzentsuite.core.task_scheduler import TaskScheduler
 from tests.unit.helpers import FakeClientFactory, make_manager, make_task
 from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
@@ -58,7 +58,7 @@ from tests.unit.test_task_scheduler import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
-    from database.models import AccountRecord
+    from libzentsuite.database.models import AccountRecord
 
 LOG = logging.getLogger("t-isolation")
 
@@ -408,7 +408,7 @@ class ServiceLoggerContextTests(unittest.IsolatedAsyncioTestCase):
 # -------------------------------------------------------------------- K14
 class MirrorForgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_settings_forget_account(self) -> None:
-        from core.settings_manager import SettingsManager
+        from libzentsuite.core.settings_manager import SettingsManager
 
         sm = SettingsManager(EventBus(), LOG)
         sm._account_plugin["alpha"] = {"probe": {"trigger": "x"}}
@@ -426,7 +426,7 @@ class EnginePruneTests(unittest.IsolatedAsyncioTestCase):
         manager._last_fire[("beta", "message")] = 456.0
         manager._account_cooldowns[("alpha", "message")] = 999.0
         manager._account_cooldowns[("beta", "message")] = 998.0
-        from core.rate_limit_manager.policies import RatePolicy
+        from libzentsuite.core.rate_limit_manager.policies import RatePolicy
 
         manager.set_policy(RatePolicy(action="message", interval=3.0), "account", "alpha")
         manager.set_policy(RatePolicy(action="message", interval=4.0), "account", "beta")
@@ -559,7 +559,7 @@ class _CountingHeaders:
 
 class HeadersCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_properties_fetched_once_per_process(self) -> None:
-        import adapters.discord.client as adapter_mod
+        import libzentsuite.adapters.discord.client as adapter_mod
 
         adapter_mod._headers_patch_installed = False
         adapter_mod._headers_cache.clear()
@@ -574,7 +574,7 @@ class HeadersCacheTests(unittest.IsolatedAsyncioTestCase):
         adapter_mod._headers_patch_installed = False  # don't leak the patch
 
     async def test_cache_expires_after_ttl(self) -> None:
-        import adapters.discord.client as adapter_mod
+        import libzentsuite.adapters.discord.client as adapter_mod
 
         adapter_mod._headers_patch_installed = False
         adapter_mod._headers_cache.clear()

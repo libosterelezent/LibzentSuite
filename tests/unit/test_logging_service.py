@@ -31,7 +31,7 @@ import threading
 import unittest
 from typing import Any
 
-from core.logging_service import (
+from libzentsuite.core.logging_service import (
     LogEntry,
     LogService,
     ServiceLogger,
@@ -111,7 +111,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         """Round-3: attach pinned propagate=False forever; detach must
         restore the value observed at FIRST attach once the last bridge
         goes away."""
-        from core.logging_service import _BRIDGE_PRIOR_PROPAGATE
+        from libzentsuite.core.logging_service import _BRIDGE_PRIOR_PROPAGATE
 
         service = LogService()
         self.root.propagate = True
@@ -490,7 +490,7 @@ class StderrPipelineClaims(unittest.TestCase):
     def test_last_release_stops_first_does_not(self) -> None:
         import logging
 
-        from core import logging_service as m
+        from libzentsuite.core import logging_service as m
 
         # snapshot + restore the process-global state (the pipeline AND
         # the stdlib logger it touches — configure_stderr flips
@@ -535,7 +535,7 @@ class DiscordTreeCaptureTests(unittest.TestCase):
     def test_discord_tree_bridges_and_stops_propagation(self) -> None:
         import logging as _logging
 
-        from core.logging_service import (
+        from libzentsuite.core.logging_service import (
             LogService,
             attach_stdlib_bridge,
             detach_stdlib_bridge,

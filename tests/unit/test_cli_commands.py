@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace as NS
 from typing import Any, ClassVar
 
-from interfaces.cli.commands import (
+from libzentsuite.interfaces.cli.commands import (
     HELP,
     QuitRequested,
     UsageError,
@@ -24,7 +24,7 @@ from interfaces.cli.commands import (
     format_warnings,
     run_command,
 )
-from interfaces.cli.repl import Repl, render_error, run_once
+from libzentsuite.interfaces.cli.repl import Repl, render_error, run_once
 
 
 class FakeApi:
@@ -591,7 +591,7 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plugin-add", text)
 
     async def test_plugins_list_unknown_account_error(self) -> None:
-        from core.errors import AccountError
+        from libzentsuite.core.errors import AccountError
 
         class GhostApi(FakeApi):
             async def accounts_plugins_list(self, account: str) -> list[str]:
@@ -1569,7 +1569,7 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Traceback", out.getvalue())
 
     async def test_failing_estop_exit_one(self) -> None:
-        from core.errors import AccountError
+        from libzentsuite.core.errors import AccountError
 
         class HaltApi(FakeApi):
             async def emergency_stop_all(self, surface: str = "api") -> dict[str, Any]:
@@ -1704,7 +1704,7 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
     """'ratelimit floor' round-1 cap (86400) renders correctly end to end."""
 
     async def test_floor_at_cap_displays_bare(self) -> None:
-        from core.errors import RatePolicyError
+        from libzentsuite.core.errors import RatePolicyError
 
         class CappedFloorApi(FakeApi):
             async def ratelimit_set_floor(self, seconds: float) -> dict[str, Any]:
@@ -1732,7 +1732,7 @@ if __name__ == "__main__":
 
 class ColumnSeparationTests(unittest.TestCase):
     def test_overlong_cell_never_runs_into_the_next_column(self) -> None:
-        from interfaces.cli.commands import _col
+        from libzentsuite.interfaces.cli.commands import _col
 
         self.assertEqual(_col("ab", 5), "ab   ")
         self.assertEqual(_col("a-very-long-account-name", 8), "a-very-long-account-name ")

@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-from core.errors import RatePolicyError, UnsafePolicyError
-from core.event_bus import EventBus
-from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
-from core.rate_limit_manager.policies import parse_scope, policy_from_row
-from database.models import RatePolicyRecord
+from libzentsuite.core.errors import RatePolicyError, UnsafePolicyError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
+from libzentsuite.core.rate_limit_manager.policies import parse_scope, policy_from_row
+from libzentsuite.database.models import RatePolicyRecord
 
 
 # ----------------------------------------------------------------- test doubles

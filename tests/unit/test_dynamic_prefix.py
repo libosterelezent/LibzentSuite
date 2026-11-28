@@ -15,7 +15,7 @@ import unittest
 from types import SimpleNamespace as NS
 from typing import TYPE_CHECKING, Any
 
-from adapters.discord.client import RealDiscordClient
+from libzentsuite.adapters.discord.client import RealDiscordClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -117,7 +117,7 @@ class DynamicPrefixTests(unittest.TestCase):
 
 class FactoryProviderWiringTests(unittest.TestCase):
     def test_factory_threads_provider_and_snapshot(self) -> None:
-        from adapters.discord.client import RealClientFactory
+        from libzentsuite.adapters.discord.client import RealClientFactory
 
         class StubAccess:
             def __init__(self) -> None:

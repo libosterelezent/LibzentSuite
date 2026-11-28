@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.errors import AccountError
+from libzentsuite.core.errors import AccountError
 from tests.unit.helpers import make_manager
 
 

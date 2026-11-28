@@ -14,9 +14,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from core.workspace.models import InvalidDefinition, SignalIdentity
-from core.workspace.signals import DEAD_LETTER_MAX_ATTEMPTS, SignalOutbox
-from database.db import Database
+from libzentsuite.core.workspace.models import InvalidDefinition, SignalIdentity
+from libzentsuite.core.workspace.signals import DEAD_LETTER_MAX_ATTEMPTS, SignalOutbox
+from libzentsuite.database.db import Database
 
 
 class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
@@ -120,9 +120,9 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
 
 class EmitSignalFacadeTests(unittest.IsolatedAsyncioTestCase):
     async def test_unwired_stack_fails_honestly(self) -> None:
-        from core.account_manager.cache import DiscordCache
-        from core.account_manager.services import AccountPluginServices
-        from core.event_bus import EventBus
+        from libzentsuite.core.account_manager.cache import DiscordCache
+        from libzentsuite.core.account_manager.services import AccountPluginServices
+        from libzentsuite.core.event_bus import EventBus
 
         services = AccountPluginServices(
             "A",
@@ -137,9 +137,9 @@ class EmitSignalFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not configured", str(ctx.exception))
 
     async def test_wired_facade_routes_to_outbox(self) -> None:
-        from core.account_manager.cache import DiscordCache
-        from core.account_manager.services import AccountPluginServices
-        from core.event_bus import EventBus
+        from libzentsuite.core.account_manager.cache import DiscordCache
+        from libzentsuite.core.account_manager.services import AccountPluginServices
+        from libzentsuite.core.event_bus import EventBus
 
         class StubOutbox:
             def __init__(self) -> None:

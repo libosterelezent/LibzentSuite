@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.workspace import (
+from libzentsuite.core.workspace import (
     ChainDefinition,
     ChainRun,
     ChainRunStatus,

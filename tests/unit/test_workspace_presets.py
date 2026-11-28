@@ -27,8 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.workspace.service import WorkspaceService
-from database.db import Database
+from libzentsuite.core.workspace.service import WorkspaceService
+from libzentsuite.database.db import Database
 
 
 class _Base(unittest.IsolatedAsyncioTestCase):

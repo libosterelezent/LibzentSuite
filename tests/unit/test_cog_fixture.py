@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from discord.ext import commands
 
-from core.plugin_manager.cog_host import PluginCogHost
+from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
 
 if TYPE_CHECKING:
     from collections.abc import Callable

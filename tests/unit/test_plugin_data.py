@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from core.account_manager.services import AccountPluginServices
-from core.api import ControlAPI
-from core.errors import PluginError
-from database.plugin_data import PLUGIN_GLOBAL, PluginDataStore, VersionConflict
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.errors import PluginError
+from libzentsuite.database.plugin_data import PLUGIN_GLOBAL, PluginDataStore, VersionConflict
 
 TOKEN = "MTMxNzg1MDk2MTY4Mjg5NDkxOA.GmW8Wg.qG4vmMjd"
 

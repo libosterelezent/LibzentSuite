@@ -17,7 +17,7 @@ import unittest
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from core.event_bus import (
+from libzentsuite.core.event_bus import (
     Event,
     EventBus,
     SettingChanged,

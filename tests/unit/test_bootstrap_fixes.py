@@ -13,15 +13,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from core.access_manager import AccessManager
-from core.bootstrap import Framework, _seed_config_defaults
-from core.config import ProjectConfig
-from core.cooldowns import CooldownService
-from core.credential_service import CredentialService
-from core.credentials import Credentials, CredentialsError
-from core.event_bus import EventBus
-from core.logging_service import LogService, ServiceLogger
-from core.rate_limit_manager import RateLimitManager
+from libzentsuite.core.access_manager import AccessManager
+from libzentsuite.core.bootstrap import Framework, _seed_config_defaults
+from libzentsuite.core.config import ProjectConfig
+from libzentsuite.core.cooldowns import CooldownService
+from libzentsuite.core.credential_service import CredentialService
+from libzentsuite.core.credentials import Credentials, CredentialsError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.logging_service import LogService, ServiceLogger
+from libzentsuite.core.rate_limit_manager import RateLimitManager
 from tests.unit.helpers import can_symlink
 
 
@@ -255,7 +255,7 @@ class TestCooldownSetClearRace(_TmpCase):
         self.assertTrue(await svc.is_active("alpha", "p", "k"))
 
     async def test_zero_duration_replaces_previous_cooldown(self) -> None:
-        from database.db import Database
+        from libzentsuite.database.db import Database
 
         db = Database(":memory:")
         await db.connect()
@@ -269,7 +269,7 @@ class TestCooldownSetClearRace(_TmpCase):
             await db.close()
 
     async def test_active_for_prefers_extended_db_row(self) -> None:
-        from database.db import Database
+        from libzentsuite.database.db import Database
 
         now = [1000.0]
         db = Database(":memory:")
@@ -308,7 +308,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core import logging_service as m
+        from libzentsuite.core import logging_service as m
 
         self._m = m
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-claims-")
@@ -327,7 +327,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
 
         # re-imported (not via self._m): the attribute loses the specific
         # module type, and mypy then rejects the private-name writes below
-        from core import logging_service as m
+        from libzentsuite.core import logging_service as m
 
         m._STDERR_USERS = self.users
         m._STDERR_LISTENER = self.listener
@@ -339,7 +339,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
     async def _build(
         self, *, env_file: Path | None = None, config_dir: Path | None = None
     ) -> Framework:
-        from core import bootstrap
+        from libzentsuite.core import bootstrap
 
         env = str(env_file or self.root / "absent.env")
         cfg = str(config_dir or self.root / "config")
@@ -374,7 +374,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         # a Credentials.from_file failure lands AFTER the claim but
         # BEFORE _assemble: patch it to raise instead of relying on
         # a symlinked .env (which needs Developer Mode on Windows)
-        from core.credentials import Credentials as _Credentials
+        from libzentsuite.core.credentials import Credentials as _Credentials
 
         def _boom(path: object) -> None:
             raise RuntimeError("credentials exploded")
@@ -408,7 +408,7 @@ class PluginDataTeardownTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
 
     async def _build(self) -> Framework:
-        from core import bootstrap
+        from libzentsuite.core import bootstrap
 
         return await bootstrap.build(
             env_file=str(self.root / "absent.env"),

@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from adapters.simulator.runner import SimulationRunner
-from adapters.simulator.scenarios import (
+from libzentsuite.adapters.simulator.runner import SimulationRunner
+from libzentsuite.adapters.simulator.scenarios import (
     ACCOUNT_NAME,
     DEMO_PLUGIN_SETTINGS,
     EXPORT_COMMAND,
@@ -26,14 +26,14 @@ from adapters.simulator.scenarios import (
     Scenario,
     quiet_window,
 )
-from adapters.simulator.world import (
+from libzentsuite.adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BOT_ID,
     SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
-from core.errors import SimulationError
+from libzentsuite.core.errors import SimulationError
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -281,7 +281,7 @@ class TestChecksPure(unittest.TestCase):
         self.assertTrue(any("never started" in f for f in failures))
 
     def test_estop_halt_pass_and_violations(self) -> None:
-        from adapters.simulator.scenarios import ESTOP_GRACE_S
+        from libzentsuite.adapters.simulator.scenarios import ESTOP_GRACE_S
 
         scenario = SCENARIOS["estop_halt"]
         audit = [{"account": "system", "direction": "out", "action": "mgmt:estop", "ts": 100.0}]

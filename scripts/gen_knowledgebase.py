@@ -45,15 +45,15 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 KB = ROOT / "knowledgebase"
-PACKAGES = ["core", "adapters", "database", "interfaces", "plugins"]
-EXTRA_MODULES = ["main.py"]
+PACKAGES = ["libzentsuite", "plugins"]
+EXTRA_MODULES: list[str] = []
 
 #: symbols that are part of the SUPPORTED plugin API (architecture intent,
 #: maintained by hand — everything else public is internal core API)
 PLUGIN_API = {
-    "core.plugin_base.PluginBase",
-    "core.plugin_base.PluginContext",
-    "core.plugin_base.PluginServices",
+    "libzentsuite.core.plugin_base.PluginBase",
+    "libzentsuite.core.plugin_base.PluginContext",
+    "libzentsuite.core.plugin_base.PluginServices",
     "core.plugin_base.PluginBase.on_load",
     "core.plugin_base.PluginBase.on_enable",
     "core.plugin_base.PluginBase.on_disable",
@@ -275,7 +275,7 @@ def plugin_manifests() -> list[dict[str, Any]]:
     beyond the loader's own create() (a plain constructor).
     """
     sys.path.insert(0, str(ROOT))
-    from core.plugin_manager.loader import PluginLoader
+    from libzentsuite.core.plugin_manager.loader import PluginLoader
 
     manifests: list[dict[str, Any]] = []
     loader = PluginLoader(ROOT / "plugins")

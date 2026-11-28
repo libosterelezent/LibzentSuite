@@ -36,9 +36,9 @@ from types import SimpleNamespace as NS
 from typing import Any
 from unittest import mock
 
-from adapters.discord import client as client_module
-from adapters.discord.client import IdentifyGate, RealDiscordClient
-from core.errors import AccountError
+from libzentsuite.adapters.discord import client as client_module
+from libzentsuite.adapters.discord.client import IdentifyGate, RealDiscordClient
+from libzentsuite.core.errors import AccountError
 
 
 # --------------------------------------------------------------- harness

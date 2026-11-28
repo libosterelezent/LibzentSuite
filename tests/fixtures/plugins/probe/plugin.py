@@ -16,16 +16,16 @@ from typing import TYPE_CHECKING
 
 from discord.ext import commands as _ext_commands
 
-from core.plugin_base import (
+from libzentsuite.core.plugin_base import (
     PluginBase,
     PluginContext,
 )
-from core.settings_manager import Setting
+from libzentsuite.core.settings_manager import Setting
 
 if TYPE_CHECKING:
     from typing import Any
 
-    from core.event_bus import Event
+    from libzentsuite.core.event_bus import Event
 
 
 class ProbePlugin(PluginBase):

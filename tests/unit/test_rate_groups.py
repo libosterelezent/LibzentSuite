@@ -14,14 +14,14 @@ import asyncio
 import itertools
 import unittest
 
-from core.event_bus import EventBus
+from libzentsuite.core.event_bus import EventBus
 from tests.unit.test_rate_engine import SleepAdvanceManager, StubLogger
 
 ACTION = "poke"  # no learned default — floor semantics testable
 
 
 def make_group_manager() -> SleepAdvanceManager:
-    from core.rate_limit_manager.engine import ManualClock
+    from libzentsuite.core.rate_limit_manager.engine import ManualClock
 
     manager = SleepAdvanceManager(
         EventBus(), StubLogger(), None, clock=ManualClock(0.0), jitter_seed=7
@@ -87,7 +87,7 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
 
     async def test_validation(self) -> None:
         manager = make_group_manager()
-        from core.errors import RatePolicyError
+        from libzentsuite.core.errors import RatePolicyError
 
         with self.assertRaises(RatePolicyError):
             manager.set_account_group("", "g")
@@ -128,7 +128,7 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         """A member cancelled mid-wait leaves the shared stamp intact AND
         consumes no virtual time (gated sleep never ran): the next member
         still waits out the full interval from the LAST grant, never less."""
-        from core.rate_limit_manager.engine import ManualClock
+        from libzentsuite.core.rate_limit_manager.engine import ManualClock
         from tests.unit.test_rate_engine import GatedSleepManager
 
         manager = GatedSleepManager(
@@ -164,7 +164,7 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         """Chaos variant: three members racing with one cancellation —
         every shared-clock grant stamp stays >= interval apart (measured on
         exact stamps, not task-resume times)."""
-        from core.rate_limit_manager.engine import ManualClock
+        from libzentsuite.core.rate_limit_manager.engine import ManualClock
         from tests.unit.test_rate_engine import GrantRecorderManager
 
         interval = 1.5
@@ -203,7 +203,7 @@ class TestGroupWireGapsWithJitter(unittest.IsolatedAsyncioTestCase):
     members' WIRE gap to interval - jitter_max (0.07s here) or invert it."""
 
     async def test_group_wire_gap_holds_under_jitter_differential(self) -> None:
-        from core.rate_limit_manager.engine import ManualClock
+        from libzentsuite.core.rate_limit_manager.engine import ManualClock
 
         interval = 1.5
         # seed 15: draws ~1.948 then ~0.517 in (0.5, 2.0) — under the old

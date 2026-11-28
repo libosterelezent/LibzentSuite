@@ -6,9 +6,9 @@ import asyncio
 import unittest
 from pathlib import Path
 
-from benchmark.collector import PerfCollector
-from benchmark.report import compare, leak_verdict, render_table
-from benchmark.sampler import LoopLagMonitor, TaskSampler
+from libzentsuite.benchmark.collector import PerfCollector
+from libzentsuite.benchmark.report import compare, leak_verdict, render_table
+from libzentsuite.benchmark.sampler import LoopLagMonitor, TaskSampler
 
 
 class LoopLagMonitorTests(unittest.TestCase):
@@ -140,7 +140,7 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
     """Minimal-parameter smoke: every core scenario runs and tears down."""
 
     async def test_scenarios_smoke(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         for name in ("cold_boot",):
             args = build_parser().parse_args(
@@ -152,7 +152,7 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("loop_lag_ms", scen)
 
     async def test_restart_churn_leak_protocol(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         args = build_parser().parse_args(
             ["--scenario", "restart_churn", "--cycles", "4", "--quiet"]
@@ -165,7 +165,7 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bootstrap_key_isolation(self) -> None:
         """The bench workspace must never touch state/credentials.key."""
-        from benchmark.stack import BenchStack, TemporaryWorkspace
+        from libzentsuite.benchmark.stack import BenchStack, TemporaryWorkspace
 
         live_key = Path("state/credentials.key")
         existed = live_key.is_file()

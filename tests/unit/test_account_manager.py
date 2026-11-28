@@ -12,16 +12,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from adapters.base import DiscordMessage
-from core.account_manager import AccountManager, AccountStatus
-from core.errors import AccountError, CredentialsError, SchedulerError, TargetGone
-from core.event_bus import (
+from libzentsuite.adapters.base import DiscordMessage
+from libzentsuite.core.account_manager import AccountManager, AccountStatus
+from libzentsuite.core.errors import AccountError, CredentialsError, SchedulerError, TargetGone
+from libzentsuite.core.event_bus import (
     AccountConnected,
     AccountDisconnected,
     AccountFailed,
     EventBus,
 )
-from core.task_scheduler import (
+from libzentsuite.core.task_scheduler import (
     STATUS_COMPLETED,
     STATUS_RUNNING,
     TERMINAL_STATUSES,
@@ -502,7 +502,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.stop("alpha")
 
     def test_auth_marker_ignores_401_inside_names(self) -> None:
-        from core.account_manager.manager import _looks_like_auth_error
+        from libzentsuite.core.account_manager.manager import _looks_like_auth_error
 
         self.assertTrue(_looks_like_auth_error(Exception("HTTP 401 Unauthorized")))
         self.assertTrue(_looks_like_auth_error(Exception("Improper token passed")))
@@ -916,8 +916,8 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.credential_service import CredentialService
-        from database.db import Database
+        from libzentsuite.core.credential_service import CredentialService
+        from libzentsuite.database.db import Database
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(":memory:")
@@ -950,7 +950,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.credential_service import CredentialService
+        from libzentsuite.core.credential_service import CredentialService
 
         with tempfile.TemporaryDirectory() as tmp:
             # .env HAS a token, but the credential service has NO DB store
@@ -965,7 +965,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
             ).runtime.status.value == "running" else None
 
     async def test_auth_error_classified_invalid_credential(self) -> None:
-        from core.errors import AccountError
+        from libzentsuite.core.errors import AccountError
 
         h = make_manager()
         await h.manager.add_account("alpha")
@@ -988,8 +988,8 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.credential_service import CredentialService
-        from database.db import Database
+        from libzentsuite.core.credential_service import CredentialService
+        from libzentsuite.database.db import Database
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(":memory:")
@@ -1172,7 +1172,7 @@ class FakeRejectingClient:
         self.latency_ms: float | None = None
 
     async def connect(self) -> None:
-        from core.errors import AccountError
+        from libzentsuite.core.errors import AccountError
 
         raise AccountError("live client connected without a user (bad token?)")
 
@@ -1185,8 +1185,8 @@ class FakeRejectingClient:
 
 class CachePortTests(unittest.IsolatedAsyncioTestCase):
     async def test_cache_invalidation_flow(self) -> None:
-        from core.account_manager import DiscordCache
-        from core.errors import TargetGone as TGone
+        from libzentsuite.core.account_manager import DiscordCache
+        from libzentsuite.core.errors import TargetGone as TGone
 
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
@@ -1205,7 +1205,7 @@ class CachePortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["invalidated"], [100])
 
     async def test_cache_record_dm_resurrects_invalidated(self) -> None:
-        from core.account_manager import DiscordCache
+        from libzentsuite.core.account_manager import DiscordCache
 
         cache = DiscordCache("alpha")
         cache.record_dm(5000, 999)
@@ -1216,7 +1216,7 @@ class CachePortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache.dm_channel_for(999), 5000)
 
     async def test_describe_channels(self) -> None:
-        from core.account_manager import DiscordCache
+        from libzentsuite.core.account_manager import DiscordCache
 
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
@@ -1238,7 +1238,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
     async def test_attach_hosts_unhosts_and_rebinds(self) -> None:
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()
@@ -1295,7 +1295,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         attach."""
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()
@@ -1334,7 +1334,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         empty runtime view and the call silently "succeeded")."""
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()
@@ -1358,7 +1358,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         guard."""
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()
@@ -1399,7 +1399,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         the newer start)."""
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()
@@ -1440,7 +1440,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         recheck the flag after hosting and take the cog back off."""
         from types import SimpleNamespace as NS
 
-        from core.plugin_manager.cog_host import PluginCogHost
+        from libzentsuite.core.plugin_manager.cog_host import PluginCogHost
         from plugins.ping.plugin import PingCog
 
         h = make_manager()

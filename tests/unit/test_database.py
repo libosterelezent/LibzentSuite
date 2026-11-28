@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from core.errors import DatabaseError as CoreDatabaseError
-from database.connection import DatabaseError as ConnectionDatabaseError
-from database.db import Database
-from database.models import AccountRecord, RatePolicyRecord
-from database.schema import MIGRATIONS, latest_version
+from libzentsuite.core.errors import DatabaseError as CoreDatabaseError
+from libzentsuite.database.connection import DatabaseError as ConnectionDatabaseError
+from libzentsuite.database.db import Database
+from libzentsuite.database.models import AccountRecord, RatePolicyRecord
+from libzentsuite.database.schema import MIGRATIONS, latest_version
 
 #: both flavors are RuntimeError subclasses raised by different layers
-#: (repositories import core.errors, base wraps into connection) — accept either
+#: (repositories import libzentsuite.core.errors, base wraps into connection) — accept either
 ANY_DB_ERROR = (ConnectionDatabaseError, CoreDatabaseError)
 
 
@@ -73,7 +73,7 @@ class TestMigrations(AsyncDatabaseTestCase):
             await db.close()
 
     async def test_connect_required_before_use(self) -> None:
-        from database.connection import DatabaseError
+        from libzentsuite.database.connection import DatabaseError
 
         db = Database(Path(self.tmp.name) / "unconnected.db")
         with self.assertRaises(DatabaseError):
@@ -81,12 +81,12 @@ class TestMigrations(AsyncDatabaseTestCase):
 
     async def test_misordered_migrations_rejected(self) -> None:
         bad = ((2, "later", ""), (1, "earlier", ""))
-        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
             await self.db.migrate()
 
     async def test_duplicate_migration_versions_rejected(self) -> None:
         bad = ((1, "first", ""), (1, "second", ""))
-        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
             await self.db.migrate()
 
     async def test_bad_list_leaves_fresh_file_untouched(self) -> None:
@@ -94,7 +94,7 @@ class TestMigrations(AsyncDatabaseTestCase):
         nothing (not even the schema_migrations bookkeeping table)."""
         path = Path(self.tmp.name) / "bad.db"
         bad = ((2, "later", ""), (1, "earlier", ""))
-        with mock.patch("database.db.MIGRATIONS", bad):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", bad):
             db = Database(path)
             with self.assertRaises(ANY_DB_ERROR):
                 await db.connect()
@@ -120,7 +120,7 @@ class TestMigrations(AsyncDatabaseTestCase):
             ),
         ]
         await self.db.close()
-        with mock.patch("database.db.MIGRATIONS", broken):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", broken):
             db2 = Database(self.path)
             with self.assertRaises(ANY_DB_ERROR) as ctx:
                 await db2.connect()
@@ -150,7 +150,7 @@ class TestMigrations(AsyncDatabaseTestCase):
             (version + 1, "addon table", "CREATE TABLE sm_addon (id INTEGER PRIMARY KEY);"),
         ]
         await self.db.close()
-        with mock.patch("database.db.MIGRATIONS", addon):
+        with mock.patch("libzentsuite.database.db.MIGRATIONS", addon):
             db2 = Database(self.path)
             applied = await db2.connect()
             try:
@@ -649,7 +649,7 @@ class TestConnectionRobustness(AsyncDatabaseTestCase):
                 await conn.execute("INSERT INTO kv (key, value) VALUES ('outer','x')")
                 await asyncio.gather(inner())
 
-        with mock.patch("database.connection.LOCK_WAIT_TIMEOUT_S", 0.3):
+        with mock.patch("libzentsuite.database.connection.LOCK_WAIT_TIMEOUT_S", 0.3):
             with self.assertRaises(ANY_DB_ERROR) as ctx:
                 await asyncio.wait_for(outer(), 10)
             self.assertIn("lock not acquired", str(ctx.exception))
@@ -941,7 +941,7 @@ class TestPruningBounds(AsyncDatabaseTestCase):
             await db.close()
 
     async def test_task_history_custom_keep(self) -> None:
-        from database.repositories.tasks import TaskHistoryRepository
+        from libzentsuite.database.repositories.tasks import TaskHistoryRepository
 
         repo = TaskHistoryRepository(self.db, keep=5)
         for i in range(30):

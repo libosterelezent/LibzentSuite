@@ -29,16 +29,16 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 
-from core.account_manager import AccountStatus
-from core.account_manager.cache import DiscordCache, resolve_dm_channel
-from core.account_manager.lifecycle import (
+from libzentsuite.core.account_manager import AccountStatus
+from libzentsuite.core.account_manager.cache import DiscordCache, resolve_dm_channel
+from libzentsuite.core.account_manager.lifecycle import (
     LifecycleGovernor,
     LifecyclePolicy,
 )
-from core.account_manager.services import AccountPluginServices
-from core.credentials import Credentials
-from core.errors import AccountError
-from core.event_bus import AccountFailed, EventBus, MessageReceived
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import AccountError
+from libzentsuite.core.event_bus import AccountFailed, EventBus, MessageReceived
 from tests.unit.helpers import FakeSettings, default_snapshot, make_manager
 
 if TYPE_CHECKING:
@@ -340,7 +340,7 @@ class DmChannelIndexTests(unittest.TestCase):
 # ---------------------------------------------------------------- (f)
 class OpenDmBoundedTests(unittest.IsolatedAsyncioTestCase):
     async def test_hung_open_dm_resolves_within_timeout(self) -> None:
-        from core.account_manager import cache as cache_mod
+        from libzentsuite.core.account_manager import cache as cache_mod
 
         class HungClient:
             async def open_dm(self, user_id: int) -> None:

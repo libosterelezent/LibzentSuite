@@ -30,14 +30,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-from core.account_manager import AccountManager
-from core.api import ControlAPI
-from core.credentials import Credentials
-from core.errors import AccountError
-from core.event_bus import EventBus
-from core.plugin_manager import PluginManager
-from core.settings_manager import SettingsManager
-from database.db import Database
+from libzentsuite.core.account_manager import AccountManager
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import AccountError
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.plugin_manager import PluginManager
+from libzentsuite.core.settings_manager import SettingsManager
+from libzentsuite.database.db import Database
 from tests.unit.helpers import (
     FakeAudit,
     FakeClientFactory,

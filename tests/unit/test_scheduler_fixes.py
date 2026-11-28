@@ -23,10 +23,10 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from core.event_bus import Event, EventBus, MessageReceived, TaskCancelled, TaskCompleted
-from core.priority import Priority
-from core.task_scheduler import Task, TaskScheduler
-from core.task_scheduler.scheduler import LOW_STARVATION_S
+from libzentsuite.core.event_bus import Event, EventBus, MessageReceived, TaskCancelled, TaskCompleted
+from libzentsuite.core.priority import Priority
+from libzentsuite.core.task_scheduler import Task, TaskScheduler
+from libzentsuite.core.task_scheduler.scheduler import LOW_STARVATION_S
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeGrant,
@@ -237,7 +237,7 @@ class TestPy310IsolationPath(unittest.IsolatedAsyncioTestCase):
     outer_cancel_pending -> True), which is exactly what 3.10 produces."""
 
     def _patch_310(self) -> tuple[Any, Any]:
-        import core.event_bus as eb
+        import libzentsuite.core.event_bus as eb
 
         return (
             mock.patch.object(eb, "cancellation_attributable", lambda task=None: False),

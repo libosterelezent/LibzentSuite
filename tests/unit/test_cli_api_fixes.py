@@ -24,11 +24,11 @@ import time
 import unittest
 from typing import Any
 
-from core.api import ControlAPI
-from core.audit import format_audit
-from core.logging_service import LogService, StdlibBridge
-from interfaces.cli.commands import format_effective, run_command
-from interfaces.cli.repl import Repl
+from libzentsuite.core.api import ControlAPI
+from libzentsuite.core.audit import format_audit
+from libzentsuite.core.logging_service import LogService, StdlibBridge
+from libzentsuite.interfaces.cli.commands import format_effective, run_command
+from libzentsuite.interfaces.cli.repl import Repl
 
 
 # ---------------------------------------------------------------- helpers
@@ -160,14 +160,14 @@ class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cleared", text)
 
     async def test_clear_usage_errors(self) -> None:
-        from interfaces.cli.commands import UsageError
+        from libzentsuite.interfaces.cli.commands import UsageError
 
         for line in ("plugins clear a p", "plugins clear a p k extra", "plugins clear"):
             with self.subTest(line=line), self.assertRaises(UsageError):
                 await run_command(FakeClearApi(), line)
 
     async def test_help_advertises_clear(self) -> None:
-        from interfaces.cli.commands import run_command
+        from libzentsuite.interfaces.cli.commands import run_command
         from tests.unit.test_cli_commands import FakeApi
 
         focused = await run_command(FakeApi(), "help plugins")

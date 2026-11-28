@@ -14,15 +14,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from core.account_manager.cache import (
+from libzentsuite.core.account_manager.cache import (
     DiscordCache,
     invalidate_dm_channel,
     resolve_dm_channel,
 )
-from core.account_manager.services import AccountPluginServices
-from core.credentials import Credentials
-from core.event_bus import EventBus
-from database.db import Database
+from libzentsuite.core.account_manager.services import AccountPluginServices
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.database.db import Database
 
 
 class FakeClient:

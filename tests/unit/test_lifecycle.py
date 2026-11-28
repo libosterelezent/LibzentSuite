@@ -7,13 +7,13 @@ import unittest
 from types import SimpleNamespace as NS
 from typing import Any
 
-from core.account_manager.lifecycle import (
+from libzentsuite.core.account_manager.lifecycle import (
     OUTCOME_RATE_LIMITED,
     LifecycleGovernor,
     LifecyclePolicy,
     _TokenBucket,
 )
-from core.errors import AccountError
+from libzentsuite.core.errors import AccountError
 from tests.unit.helpers import make_manager, wait_until_async
 
 

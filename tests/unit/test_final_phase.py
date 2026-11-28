@@ -10,16 +10,16 @@ import unittest
 from types import SimpleNamespace as NS
 from typing import TYPE_CHECKING, Any
 
-from core.account_manager import AccountStatus
-from core.account_manager.services import MessageWaiterRegistry
-from core.cooldowns import CooldownService
-from core.event_bus import EventBus, MessageReceived
-from core.rate_limit_manager.engine import RateLimitManager
+from libzentsuite.core.account_manager import AccountStatus
+from libzentsuite.core.account_manager.services import MessageWaiterRegistry
+from libzentsuite.core.cooldowns import CooldownService
+from libzentsuite.core.event_bus import EventBus, MessageReceived
+from libzentsuite.core.rate_limit_manager.engine import RateLimitManager
 from tests.unit.helpers import enforces_file_modes, make_manager
 from tests.unit.test_rate_engine import StubLogger
 
 if TYPE_CHECKING:
-    from database.models import AccountRecord
+    from libzentsuite.database.models import AccountRecord
 
 
 def _msg(account: str, i: int) -> MessageReceived:
@@ -71,8 +71,8 @@ class WaiterRegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         bus = h.bus
         registry = MessageWaiterRegistry(bus)
-        from core.account_manager.cache import DiscordCache
-        from core.account_manager.services import AccountPluginServices
+        from libzentsuite.core.account_manager.cache import DiscordCache
+        from libzentsuite.core.account_manager.services import AccountPluginServices
 
         # a fresh DiscordCache IS the empty channels/guilds view the NS
         # double used to fake (both empty dicts at construction)
@@ -149,7 +149,7 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cap_bounds_the_cache(self) -> None:
         m = self._engine()
-        import core.rate_limit_manager.engine as eng
+        import libzentsuite.core.rate_limit_manager.engine as eng
 
         eng._EFFECTIVE_CACHE_CAP = 8
         try:
@@ -348,7 +348,7 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
 class GateDepthTests(unittest.IsolatedAsyncioTestCase):
     async def test_projected_depth_fast_fail(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         # deterministic wave (review rounds: the wall-clock arrival race
         # left the queue too shallow; a future-armed _last rejected on
@@ -395,7 +395,7 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed, list(range(4, 12)))  # the depth past it
 
     async def test_spacing_still_honored(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(interval=0.05, max_wait=45.0)
         loop = asyncio.get_running_loop()
@@ -419,7 +419,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.credential_service import CredentialService
+        from libzentsuite.core.credential_service import CredentialService
 
         with tempfile.TemporaryDirectory() as tmp:
             key = Path(tmp) / "k.key"
@@ -433,7 +433,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mode, 0o600)
 
     async def test_audit_content_capped(self) -> None:
-        from core.audit import AuditRecorder
+        from libzentsuite.core.audit import AuditRecorder
 
         recorder = AuditRecorder(db_repo=None)
         entry = recorder.record("alpha", "out", "message", content="x" * 50_000)
@@ -444,7 +444,7 @@ class RealClientShim:
     """Uses the real repr against a real instance shape."""
 
     def __init__(self, token: str) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         self._inner = RealDiscordClient.__new__(RealDiscordClient)
         self._inner._token = token

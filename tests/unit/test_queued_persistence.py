@@ -17,10 +17,10 @@ import sqlite3
 import unittest
 from typing import Any
 
-from core.audit import AuditRecorder
-from core.event_bus import EventBus
-from core.logging_service import LogService
-from core.task_scheduler import TaskScheduler
+from libzentsuite.core.audit import AuditRecorder
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.logging_service import LogService
+from libzentsuite.core.task_scheduler import TaskScheduler
 
 
 # ----------------------------------------------------------------- fakes
@@ -369,7 +369,7 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
     durations (the log used the raw value before the float() coercion)."""
 
     async def test_failed_db_clear_does_not_resurrect(self) -> None:
-        from core.cooldowns import CooldownService
+        from libzentsuite.core.cooldowns import CooldownService
 
         repo = FlakyCooldownRepo()
         svc = CooldownService(repo)
@@ -388,7 +388,7 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await svc.get("alfa", "roll", "wed"))
 
     async def test_expired_memory_row_rechecked_once_then_dropped(self) -> None:
-        from core.cooldowns import CooldownService
+        from libzentsuite.core.cooldowns import CooldownService
 
         repo = FlakyCooldownRepo()
         clock = {"now": 1000.0}
@@ -408,7 +408,7 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.clear_expired_for_calls, 1)
 
     async def test_expired_memory_row_adopts_extension_by_other_process(self) -> None:
-        from core.cooldowns import CooldownService
+        from libzentsuite.core.cooldowns import CooldownService
 
         repo = FlakyCooldownRepo()
         clock = {"now": 1000.0}
@@ -428,7 +428,7 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.clear_expired_for_calls, 1)
 
     async def test_set_survives_numeric_string_duration(self) -> None:
-        from core.cooldowns import CooldownService
+        from libzentsuite.core.cooldowns import CooldownService
 
         svc = CooldownService(FlakyCooldownRepo(), time_fn=lambda: 0.0)
         numeric_string: Any = "60"  # printf %f used to TypeError
@@ -480,7 +480,7 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         def _on(event: Any) -> None:
             seen.append(type(event).__name__)
 
-        from core.event_bus import Event
+        from libzentsuite.core.event_bus import Event
 
         bus.subscribe(Event, _on)
         audit = FakeAudit()

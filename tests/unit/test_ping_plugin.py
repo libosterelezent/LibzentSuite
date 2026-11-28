@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from discord.ext import commands
 
-from core.errors import TargetGone
+from libzentsuite.core.errors import TargetGone
 from plugins.ping.plugin import PingCog, PingPlugin
 
 

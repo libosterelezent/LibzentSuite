@@ -21,9 +21,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database.db import Database
-from database.schema import MIGRATIONS, latest_version
-from database.telemetry import DbTelemetry
+from libzentsuite.database.db import Database
+from libzentsuite.database.schema import MIGRATIONS, latest_version
+from libzentsuite.database.telemetry import DbTelemetry
 
 
 class AsyncDatabaseTestCase(unittest.IsolatedAsyncioTestCase):

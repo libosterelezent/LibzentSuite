@@ -10,22 +10,22 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from core.account_manager import DiscordCache
-from core.account_manager.services import AccountPluginServices, TaskAckRegistry
-from core.credentials import Credentials
-from core.errors import AccountError, SchedulerError, ServerRateLimit, TargetGone
-from core.event_bus import EventBus, MessageReceived, TaskCancelled, TaskCompleted, TaskFailed
-from core.priority import Priority
-from core.task_scheduler import TaskScheduler
+from libzentsuite.core.account_manager import DiscordCache
+from libzentsuite.core.account_manager.services import AccountPluginServices, TaskAckRegistry
+from libzentsuite.core.credentials import Credentials
+from libzentsuite.core.errors import AccountError, SchedulerError, ServerRateLimit, TargetGone
+from libzentsuite.core.event_bus import EventBus, MessageReceived, TaskCancelled, TaskCompleted, TaskFailed
+from libzentsuite.core.priority import Priority
+from libzentsuite.core.task_scheduler import TaskScheduler
 from tests.unit.helpers import FakeClient, FakeScheduler, default_snapshot, make_manager
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from core.cooldowns import CooldownService
-    from core.credential_service import CredentialService
-    from core.plugin_state import PluginStateService
-    from core.task_scheduler import Task
+    from libzentsuite.core.cooldowns import CooldownService
+    from libzentsuite.core.credential_service import CredentialService
+    from libzentsuite.core.plugin_state import PluginStateService
+    from libzentsuite.core.task_scheduler import Task
 
 _TEST_LOG = logging.getLogger("tests.account_services")
 
@@ -120,7 +120,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         TargetGone must re-raise TargetGone at the waiting plugin — NOT an
         opaque SchedulerError — so the flow-abort contract (exporter's
         catch-all) actually fires."""
-        from core.errors import TargetGone
+        from libzentsuite.core.errors import TargetGone
 
         bus, scheduler = EventBus(), FakeScheduler()
         services = make_services(bus=bus, scheduler=scheduler)
@@ -451,9 +451,9 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.cooldowns import CooldownService
-        from core.plugin_state import PluginStateService
-        from database.db import Database
+        from libzentsuite.core.cooldowns import CooldownService
+        from libzentsuite.core.plugin_state import PluginStateService
+        from libzentsuite.database.db import Database
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "t.db")
@@ -486,7 +486,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
                 await db.close()
 
     async def test_pair_scoping_isolation(self) -> None:
-        from core.plugin_state import PluginStateService
+        from libzentsuite.core.plugin_state import PluginStateService
 
         written: dict[str, Any] = {}
 
@@ -519,7 +519,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await beta.state_get("k"), "beta-value")
 
     async def test_unwired_services_raise_clear_errors(self) -> None:
-        from core.errors import PluginError
+        from libzentsuite.core.errors import PluginError
 
         services = self._services()
         with self.assertRaises(PluginError) as ctx:
@@ -669,9 +669,9 @@ class CredentialKeyRotationTests(unittest.IsolatedAsyncioTestCase):
     async def test_rotated_master_key_fails_closed_with_clear_error(self) -> None:
         from cryptography.fernet import Fernet
 
-        from core.credential_service import CredentialService
-        from core.errors import CredentialsError
-        from database.db import Database
+        from libzentsuite.core.credential_service import CredentialService
+        from libzentsuite.core.errors import CredentialsError
+        from libzentsuite.database.db import Database
 
         with tempfile.TemporaryDirectory() as tmp:
             key_a = Path(tmp) / "a.key"
@@ -707,7 +707,7 @@ class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from core.credential_service import CredentialService
+        from libzentsuite.core.credential_service import CredentialService
 
         tmp = tempfile.mkdtemp(prefix="sm-cred-")
         self.addCleanup(shutil.rmtree, tmp, True)

@@ -17,7 +17,7 @@ always share a worker — two classes from the same module may not):
    scripts/run_tests.sh                 # the locked environment, serial
    scripts/run_tests.sh -n auto         # parallel
    scripts/preflight.sh                 # ruff + pyright (seconds; the runner does the suite)
-   python3 main.py --sim export_basic   # one scenario, end to end
+   python3 -m libzentsuite --sim export_basic   # one scenario, end to end
 
 The two shell scripts are bash: on Windows run them from Git Bash (they come
 with Git for Windows).

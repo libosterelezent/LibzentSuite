@@ -13,8 +13,8 @@ import itertools
 import unittest
 from typing import Any
 
-from core.account_manager import AccountRuntime, AccountStatus
-from core.event_bus import AccountConnected
+from libzentsuite.core.account_manager import AccountRuntime, AccountStatus
+from libzentsuite.core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 

@@ -13,9 +13,9 @@ import logging
 import unittest
 from typing import Any
 
-from core.errors import SettingsValidationError
-from core.event_bus import EventBus, SettingChanged
-from core.settings_manager import Setting, SettingsManager
+from libzentsuite.core.errors import SettingsValidationError
+from libzentsuite.core.event_bus import EventBus, SettingChanged
+from libzentsuite.core.settings_manager import Setting, SettingsManager
 
 SCHEMA = (
     Setting("gain", "int", 1),
@@ -300,7 +300,7 @@ class TestCoercionEdges(unittest.TestCase):
         self.assertEqual(s.validate(None), "d")
 
     def test_str_length_capped_at_schema_default(self) -> None:
-        from core.settings_manager import STR_MAX_LENGTH
+        from libzentsuite.core.settings_manager import STR_MAX_LENGTH
 
         s = Setting("t", "str", "d")
         self.assertEqual(len(s.validate("x" * STR_MAX_LENGTH)), STR_MAX_LENGTH)

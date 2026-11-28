@@ -12,8 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database.db import Database
-from database.models import WorkspaceMemberRecord, WorkspaceTaskRecord
+from libzentsuite.database.db import Database
+from libzentsuite.database.models import WorkspaceMemberRecord, WorkspaceTaskRecord
 
 
 class WorkspaceRepoTests(unittest.IsolatedAsyncioTestCase):
@@ -201,7 +201,7 @@ class PluginDataDropAccountTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._tmp.cleanup)
 
     async def test_drop_account_is_the_cross_store_boundary(self) -> None:
-        from database.plugin_data import PluginDataStore
+        from libzentsuite.database.plugin_data import PluginDataStore
 
         store = PluginDataStore(Path(self._tmp.name) / "data.db")
         await store.connect()

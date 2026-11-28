@@ -17,9 +17,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from core.errors import AccountError
-from core.event_bus import AccountConnected, MessageReceived
-from database.db import Database
+from libzentsuite.core.errors import AccountError
+from libzentsuite.core.event_bus import AccountConnected, MessageReceived
+from libzentsuite.database.db import Database
 from tests.unit.helpers import FakeClientFactory, make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 
@@ -149,7 +149,7 @@ class ProfilingChaosTests(unittest.IsolatedAsyncioTestCase):
     async def test_tracemalloc_stops_after_suite(self) -> None:
         import tracemalloc
 
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         self.assertFalse(tracemalloc.is_tracing())
         tracemalloc.start(1)
@@ -163,8 +163,8 @@ class ProfilingChaosTests(unittest.IsolatedAsyncioTestCase):
     async def test_tracemalloc_stops_even_when_scenario_fails(self) -> None:
         import tracemalloc
 
-        from benchmark import scenarios as scen_mod
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark import scenarios as scen_mod
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         tracemalloc.start(1)
         original = scen_mod.BENCH_SCENARIOS["log_burst"]
@@ -188,7 +188,7 @@ class ProfilingChaosTests(unittest.IsolatedAsyncioTestCase):
                 tracemalloc.stop()
 
     async def test_cprofile_hooks_restored(self) -> None:
-        from benchmark.cli import build_parser, run_suite
+        from libzentsuite.benchmark.cli import build_parser, run_suite
 
         self.assertIsNone(sys.getprofile())
         with tempfile.TemporaryDirectory(prefix="sm-prof-") as tmp:

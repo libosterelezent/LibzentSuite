@@ -57,10 +57,10 @@ from typing import TYPE_CHECKING
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from adapters.model import convert_message  # noqa: E402
-from core._persist_queue import PersistQueue  # noqa: E402
-from core.event_bus import EventBus, MessageReceived  # noqa: E402
-from core.rate_limit_manager.engine import (  # noqa: E402
+from libzentsuite.adapters.model import convert_message  # noqa: E402
+from libzentsuite.core._persist_queue import PersistQueue  # noqa: E402
+from libzentsuite.core.event_bus import EventBus, MessageReceived  # noqa: E402
+from libzentsuite.core.rate_limit_manager.engine import (  # noqa: E402
     ManualClock,
     RateLimitManager,
 )

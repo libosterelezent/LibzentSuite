@@ -29,10 +29,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from core.event_bus import EventBus
-from core.plugin_manager import PluginManager
-from core.plugin_manager.loader import PluginLoader
-from core.settings_manager import SettingsManager
+from libzentsuite.core.event_bus import EventBus
+from libzentsuite.core.plugin_manager import PluginManager
+from libzentsuite.core.plugin_manager.loader import PluginLoader
+from libzentsuite.core.settings_manager import SettingsManager
 
 LOG = logging.getLogger("test-plugin-fixes")
 
@@ -50,7 +50,7 @@ GUILD = 7
 def _plugin_src(body: str = "") -> str:
     """Minimal well-formed plugin source for loader tests."""
     return f"""
-from core.plugin_base import PluginBase, PluginContext
+from libzentsuite.core.plugin_base import PluginBase, PluginContext
 
 class _P(PluginBase):
     name = "good"
@@ -81,7 +81,7 @@ class LoaderFailurePurgeTests(unittest.TestCase):
             self.assertEqual(delta, set(), f"leaked modules: {delta}")
             # and the loader is retry-able: healing the tree works
             (bad / "__init__.py").write_text(
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class BadPlugin(PluginBase):\n"
                 "    name = 'bad'\n"
             )

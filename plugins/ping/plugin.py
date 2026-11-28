@@ -24,13 +24,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from discord.ext import commands
 
-from core.errors import FlowBlocked
-from core.plugin_base import PluginBase
+from libzentsuite.core.errors import FlowBlocked
+from libzentsuite.core.plugin_base import PluginBase
 
 if TYPE_CHECKING:
-    from core.event_bus import Event
-    from core.plugin_base import PluginContext, Setting
-    from core.plugin_manager.cog_host import CogServices
+    from libzentsuite.core.event_bus import Event
+    from libzentsuite.core.plugin_base import PluginContext, Setting
+    from libzentsuite.core.plugin_manager.cog_host import CogServices
 
 LOG = logging.getLogger("libzent.ping")
 

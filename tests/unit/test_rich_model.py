@@ -22,7 +22,7 @@ from types import SimpleNamespace as NS
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest import mock
 
-from adapters.model import (
+from libzentsuite.adapters.model import (
     DiscordComponent,
     DiscordEmbed,
     DiscordEmbedField,
@@ -30,7 +30,7 @@ from adapters.model import (
     convert_component,
     convert_message,
 )
-from core.event_bus import (
+from libzentsuite.core.event_bus import (
     EventBus,
     MessageReceived,
     ReactionAdded,
@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
-    from adapters.discord.client import RealDiscordClient
-    from adapters.simulator.world import SimWorld
+    from libzentsuite.adapters.discord.client import RealDiscordClient
+    from libzentsuite.adapters.simulator.world import SimWorld
 
 #: shape of the fork's ``Headers.get_api_properties`` result tuple
 _HEADERS_RESULT = tuple[dict[str, str], dict[str, int], str]
@@ -241,7 +241,7 @@ class TestConversion(unittest.TestCase):
         self.assertEqual(dto.reactions[0].emoji, "<a:kakera:77>")
 
     def test_embed_timestamp_datetime_becomes_iso(self) -> None:
-        from adapters.model import convert_embed as ce
+        from libzentsuite.adapters.model import convert_embed as ce
 
         embed = ce(NS(title="t", timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc)))
         self.assertEqual(embed.timestamp, "2026-01-01T00:00:00+00:00")
@@ -339,7 +339,7 @@ class TestIsolationAndRaw(unittest.TestCase):
 
 class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
     def _world(self) -> SimWorld:
-        from adapters.simulator.world import SimWorld
+        from libzentsuite.adapters.simulator.world import SimWorld
 
         world = SimWorld(responder_id=None)
         world.add_user(1001, "owner")
@@ -348,7 +348,7 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
         return world
 
     async def test_rich_delivery_and_events(self) -> None:
-        from adapters.simulator.client import SimClient
+        from libzentsuite.adapters.simulator.client import SimClient
 
         world = self._world()
         client = SimClient(world, 1001)
@@ -401,13 +401,13 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
     async def test_capability_actions_through_pipeline(self) -> None:
         """kakerareact + kakeraloot shapes: services actions flow through the
         scheduler (paced) into the world; audit rows carry the action kind."""
-        from core.audit import AuditRecorder
-        from core.event_bus import EventBus, TaskCompleted
-        from core.priority import Priority
-        from core.task_scheduler import TaskScheduler
+        from libzentsuite.core.audit import AuditRecorder
+        from libzentsuite.core.event_bus import EventBus, TaskCompleted
+        from libzentsuite.core.priority import Priority
+        from libzentsuite.core.task_scheduler import TaskScheduler
 
         world = self._world()
-        from adapters.simulator.client import SimClient
+        from libzentsuite.adapters.simulator.client import SimClient
 
         client = SimClient(world, 1001)
         await client.connect()
@@ -477,8 +477,8 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
             await scheduler.stop(drain=True)
 
     async def test_button_target_gone(self) -> None:
-        from adapters.simulator.client import SimClient
-        from core.errors import TargetGone
+        from libzentsuite.adapters.simulator.client import SimClient
+        from libzentsuite.core.errors import TargetGone
 
         world = self._world()
         client = SimClient(world, 1001)
@@ -649,12 +649,12 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
 
         saved = {
             name: sys.modules.get(name)
-            for name in ("discord", "adapters.discord", "adapters.discord.client")
+            for name in ("discord", "libzentsuite.adapters.discord", "libzentsuite.adapters.discord.client")
         }
         for name in saved:
             sys.modules.pop(name, None)
         try:
-            importlib.import_module("adapters.discord")
+            importlib.import_module("libzentsuite.adapters.discord")
             self.assertNotIn("discord", sys.modules)
         finally:
             for name, mod in saved.items():
@@ -664,7 +664,7 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
                     sys.modules.pop(name, None)
 
     async def test_fetch_user_none_for_gone_users(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         for exc in (
             self.NotFound("404 Not Found (error code: 10013): Unknown User"),
@@ -676,7 +676,7 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await client.fetch_user(1))
 
     async def test_fetch_user_raises_real_denials(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         client = RealDiscordClient("tok")
         _install_lib_client(
@@ -690,7 +690,7 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
             await client.fetch_user(1)
 
     async def test_sends_raise_connection_error_offline(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         client = RealDiscordClient("tok")
         self.assertFalse(client.connected)
@@ -706,7 +706,7 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
             client._require_client()
 
     async def test_connected_lifecycle_through_connect_and_disconnect(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
         from tests.unit.helpers import fake_discord_sysmodules
 
         lib_cls = type("LibClient", (self._ReadyLibClient,), {})
@@ -723,7 +723,7 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
                 client._require_client()
 
     async def test_latency_ms_rejects_inf_and_nan(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         client = RealDiscordClient("tok")
         self.assertIsNone(client.latency_ms)
@@ -771,7 +771,7 @@ class TestErrorMappingRound2(unittest.TestCase):
     """Exception-shape table from the installed fork (errors.py / http.py)."""
 
     def _client(self) -> RealDiscordClient:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         client = RealDiscordClient("tok")
         client._discord = NS(
@@ -782,7 +782,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         return client
 
     def test_rate_limited_maps_to_server_rate_limit(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         client = self._client()
         mapped = client._map_send_error(_LibErrors.RateLimited(73.5), 1)
@@ -792,7 +792,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertFalse(mapped.global_)
 
     def test_rate_limited_garbage_retry_after_defaults(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         client = self._client()
         mapped = client._map_send_error(_LibErrors.RateLimited(None), 1)
@@ -801,7 +801,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertEqual(mapped.retry_after, 1.0)
 
     def test_captcha_required_maps_to_access_denied(self) -> None:
-        from core.errors import AccessDenied
+        from libzentsuite.core.errors import AccessDenied
 
         client = self._client()
         client.account = "alpha"
@@ -810,7 +810,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertIn("captcha", str(mapped))
 
     def test_429_header_intake_honors_retry_after(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         client = self._client()
         exc = _LibErrors.HTTPException(429, {"Retry-After": "0.625", "X-RateLimit-Global": "true"})
@@ -821,7 +821,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertTrue(mapped.global_)
 
     def test_429_lowercase_headers_and_defaults(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         client = self._client()
         exc = _LibErrors.HTTPException(429, {"retry-after": "2"})
@@ -835,7 +835,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertEqual(bare.retry_after, 1.0)
 
     def test_429_non_finite_retry_after_clamped(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         for garbage in ("inf", "-inf", "nan", "Infinity"):
             client = self._client()
@@ -858,7 +858,7 @@ class TestErrorMappingRound2(unittest.TestCase):
         self.assertIsNone(client._map_send_error(_LibErrors.HTTPException(400), 1))
 
     def test_403_and_404_map_to_domain_errors(self) -> None:
-        from core.errors import AccessDenied, TargetGone
+        from libzentsuite.core.errors import AccessDenied, TargetGone
 
         client = self._client()
         self.assertIsInstance(client._map_send_error(_LibErrors.Forbidden(), 1), AccessDenied)
@@ -910,7 +910,7 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
         return mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls))
 
     async def test_disconnect_during_connect_is_not_a_bad_token(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         lib_cls: Any = type("LibClient", (_HangingLibClient,), {})
         with self._patch_discord(lib_cls):
@@ -936,7 +936,7 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.cached_snapshot(), {"available": False})
 
     async def test_run_exit_flips_connected_and_snapshot(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         lib_cls: Any = type("LibClient", (_CrashingLibClient,), {})
         with self._patch_discord(lib_cls):
@@ -965,7 +965,7 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
                 client._require_client()
 
     async def test_resume_replay_duplicate_suppressed(self) -> None:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         lib_cls: Any = type("LibClient", (_CrashingLibClient,), {})
         with self._patch_discord(lib_cls):
@@ -1214,7 +1214,7 @@ class TestIdentifyGateScaling(unittest.TestCase):
     giant waves are the fast-fail projection's job instead."""
 
     def test_interval_scales_with_expected_fleet(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(5.0)
         self.assertEqual(gate.effective_interval, 5.0)  # single account
@@ -1228,14 +1228,14 @@ class TestIdentifyGateScaling(unittest.TestCase):
         self.assertEqual(gate.effective_interval, 5.0)  # floor holds
 
     def test_base_interval_below_formula_is_kept(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(2.0)
         gate.expected = 5  # formula says 10s — the tighter base wins
         self.assertEqual(gate.effective_interval, 2.0)
 
     def test_factory_counts_distinct_accounts_not_reconnects(self) -> None:
-        from adapters.discord.client import RealClientFactory
+        from libzentsuite.adapters.discord.client import RealClientFactory
 
         factory = RealClientFactory()
         self.assertEqual(factory._identify_gate.expected, 1)
@@ -1247,7 +1247,7 @@ class TestIdentifyGateScaling(unittest.TestCase):
         self.assertEqual(factory._identify_gate.expected, 3)
 
     def test_expected_is_dynamic_between_releases(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         # interval above the floor so the fleet scaling stays observable
         # (a default 5.0s gate is already AT the per-IP floor for every
@@ -1267,7 +1267,7 @@ class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
     numbers — the production defaults are 5.0/50.0/1.0)."""
 
     async def test_synchronized_wave_stays_under_budget(self) -> None:
-        from adapters.discord.client import IdentifyGate
+        from libzentsuite.adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(1.0, min_interval=0.01, wait_budget=0.30)
         gate.expected = 8
@@ -1307,7 +1307,7 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         return mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls))
 
     async def test_max_ratelimit_timeout_passed_and_no_intents(self) -> None:
-        from adapters.discord.client import MAX_RATELIMIT_TIMEOUT_S, RealDiscordClient
+        from libzentsuite.adapters.discord.client import MAX_RATELIMIT_TIMEOUT_S, RealDiscordClient
 
         captured: dict[str, Any] = {}
 
@@ -1351,8 +1351,8 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         contained by contract — a layout that rejects it fails the
         connect with the AccountError connect() promises, never a
         silent uncapped client."""
-        from adapters.discord.client import RealDiscordClient
-        from core.errors import AccountError
+        from libzentsuite.adapters.discord.client import RealDiscordClient
+        from libzentsuite.core.errors import AccountError
 
         class OldLayoutClient(TestLiveClientBoundary._ReadyLibClient):
             def __init__(self, **kwargs: Any) -> None:
@@ -1374,7 +1374,7 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         captured: dict[str, Any] = {}
 
@@ -1429,7 +1429,7 @@ class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
     rich-polarity coverage lives in tests/unit/test_discord_adapter_fixes.py."""
 
     async def _connected_client(self) -> RealDiscordClient:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
         from tests.unit.helpers import fake_discord_sysmodules
 
         lib_cls = type("LibClient", (_RawEventLibClient,), {})
@@ -1611,7 +1611,7 @@ class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
         pass
 
     def _clickable(self, click: Any) -> RealDiscordClient:
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         client = RealDiscordClient("tok")
         client.connected = True
@@ -1635,7 +1635,7 @@ class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.click_button(500, 11, "kakera:claim"), "interaction-result")
 
     async def test_click_timeout_maps_to_transient_connection_error(self) -> None:
-        import adapters.discord.client as adc
+        import libzentsuite.adapters.discord.client as adc
 
         async def click() -> None:
             await asyncio.sleep(30)  # stuck 202 retry loop
@@ -1657,7 +1657,7 @@ class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
         # unittest's runs it AFTER — the isolation bug pytest exposed)
         import sys as _sys
 
-        from adapters.discord.client import RealDiscordClient
+        from libzentsuite.adapters.discord.client import RealDiscordClient
 
         adc = _sys.modules[RealDiscordClient.__module__]
 
@@ -1704,7 +1704,7 @@ class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
             await task
 
     async def test_click_rate_limited_still_maps_to_domain(self) -> None:
-        from core.errors import ServerRateLimit
+        from libzentsuite.core.errors import ServerRateLimit
 
         class RateLimited(Exception):
             def __init__(self) -> None:
@@ -1754,7 +1754,7 @@ class TestHeadersCacheRound3(unittest.TestCase):
             return cls.RESULT
 
     def setUp(self) -> None:
-        import adapters.discord.client as adc
+        import libzentsuite.adapters.discord.client as adc
 
         adc._headers_patch_installed = False
         adc._headers_cache.clear()

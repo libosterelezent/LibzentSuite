@@ -11,8 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.errors import PluginError
-from core.plugin_base import PluginBase
+from libzentsuite.core.errors import PluginError
+from libzentsuite.core.plugin_base import PluginBase
 
 
 def _write_plugin(root: Path, name: str, body: str) -> None:
@@ -21,7 +21,7 @@ def _write_plugin(root: Path, name: str, body: str) -> None:
 
 class ChainDeclarationLoaderTests(unittest.TestCase):
     def setUp(self) -> None:
-        from core.plugin_manager.loader import PluginLoader
+        from libzentsuite.core.plugin_manager.loader import PluginLoader
 
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -32,7 +32,7 @@ class ChainDeclarationLoaderTests(unittest.TestCase):
         _write_plugin(
             self.root,
             "plain",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "class Plain(PluginBase):\n"
             "    name = 'plain'\n",
         )
@@ -43,8 +43,8 @@ class ChainDeclarationLoaderTests(unittest.TestCase):
         _write_plugin(
             self.root,
             "chained",
-            "from core.plugin_base import PluginBase\n"
-            "from core.workspace import FollowSpec\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.workspace import FollowSpec\n"
             "class Chained(PluginBase):\n"
             "    name = 'chained'\n"
             "    EMITS = ('claim_done',)\n"
@@ -59,8 +59,8 @@ class ChainDeclarationLoaderTests(unittest.TestCase):
         _write_plugin(
             self.root,
             "broken",
-            "from core.plugin_base import PluginBase\n"
-            "from core.workspace import FollowSpec\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.workspace import FollowSpec\n"
             "class Broken(PluginBase):\n"
             "    name = 'broken'\n"
             "    FOLLOWS = (FollowSpec(handler='does_not_exist', task_action='message'),)\n",
@@ -76,7 +76,7 @@ class ChainDeclarationLoaderTests(unittest.TestCase):
         _write_plugin(
             self.root,
             "spoofy",
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "class Spoofy(PluginBase):\n"
             "    name = 'spoofy'\n"
             "    EMITS = ('grinder:claim_done',)\n",

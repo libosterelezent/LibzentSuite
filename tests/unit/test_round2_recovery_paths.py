@@ -25,13 +25,13 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from core.account_manager.services import TaskAckRegistry
-from core.credential_service import CredentialService
-from core.errors import SchedulerError
-from core.event_bus import EventBus, PluginEnabledChanged, PluginUnloaded
-from core.plugin_manager import PluginManager
-from core.rate_limit_manager.engine import ManualClock, RateLimitManager
-from core.settings_manager import SettingsManager
+from libzentsuite.core.account_manager.services import TaskAckRegistry
+from libzentsuite.core.credential_service import CredentialService
+from libzentsuite.core.errors import SchedulerError
+from libzentsuite.core.event_bus import EventBus, PluginEnabledChanged, PluginUnloaded
+from libzentsuite.core.plugin_manager import PluginManager
+from libzentsuite.core.rate_limit_manager.engine import ManualClock, RateLimitManager
+from libzentsuite.core.settings_manager import SettingsManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine

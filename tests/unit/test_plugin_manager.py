@@ -10,11 +10,11 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.errors import PluginError, SettingsValidationError
-from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
-from core.plugin_manager import PluginLoader, PluginManager
-from core.settings_manager import SettingsManager
-from database.repositories.kv import KvRepository
+from libzentsuite.core.errors import PluginError, SettingsValidationError
+from libzentsuite.core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
+from libzentsuite.core.plugin_manager import PluginLoader, PluginManager
+from libzentsuite.core.settings_manager import SettingsManager
+from libzentsuite.database.repositories.kv import KvRepository
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -257,7 +257,7 @@ class TestConstructorIsolation(unittest.IsolatedAsyncioTestCase):
             boom = Path(tmp) / "boom"
             boom.mkdir()
             (boom / "__init__.py").write_text(
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class BoomPlugin(PluginBase):\n"
                 "    name = 'boom'\n"
                 "    def __init__(self):\n"
@@ -266,7 +266,7 @@ class TestConstructorIsolation(unittest.IsolatedAsyncioTestCase):
             ok = Path(tmp) / "ok"
             ok.mkdir()
             (ok / "__init__.py").write_text(
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class OkPlugin(PluginBase):\n"
                 "    name = 'ok'\n"
                 "    def __init__(self):\n"
@@ -453,7 +453,7 @@ class TestLoaderHardening(unittest.TestCase):
 
     def test_same_plugin_name_in_two_dirs_no_collision(self) -> None:
         source = (
-            "from core.plugin_base import PluginBase\n"
+            "from libzentsuite.core.plugin_base import PluginBase\n"
             "class TwinPlugin(PluginBase):\n"
             "    name = 'twin'\n"
             "    marker = {__r__!r}\n"
@@ -483,7 +483,7 @@ class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
             boom.mkdir()
             init = boom / "__init__.py"
             init.write_text(
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class BoomPlugin(PluginBase):\n"
                 "    name = 'boom'\n"
                 "    def __init__(self):\n"
@@ -494,7 +494,7 @@ class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(manager._accounts["alpha"]["boom"].enabled)
 
             init.write_text(  # heal the plugin on disk
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class BoomPlugin(PluginBase):\n"
                 "    name = 'boom'\n"
                 "    async def handle_event(self, ctx, event):\n"
@@ -512,7 +512,7 @@ class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
             boom = Path(tmp) / "boom"
             boom.mkdir()
             (boom / "__init__.py").write_text(
-                "from core.plugin_base import PluginBase\n"
+                "from libzentsuite.core.plugin_base import PluginBase\n"
                 "class BoomPlugin(PluginBase):\n"
                 "    name = 'boom'\n"
                 "    def __init__(self):\n"
@@ -804,7 +804,7 @@ class TestPluginStateKeys(unittest.IsolatedAsyncioTestCase):
     """Round-2: kv key-space collisions, cascade completeness, big values."""
 
     async def asyncSetUp(self) -> None:
-        from core.plugin_state import PluginStateService
+        from libzentsuite.core.plugin_state import PluginStateService
 
         self.kv = FakeKv()
         self.state = PluginStateService(self.kv)

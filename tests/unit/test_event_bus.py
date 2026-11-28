@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from core.event_bus import EventBus, MessageReceived
+from libzentsuite.core.event_bus import EventBus, MessageReceived
 
 
 def _msg(account: str, i: int) -> MessageReceived:

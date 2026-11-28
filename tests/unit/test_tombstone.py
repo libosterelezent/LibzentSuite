@@ -15,7 +15,7 @@ import unittest
 import weakref
 from typing import Any
 
-from core.event_bus import AccountConnected
+from libzentsuite.core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
 
 NAME = "churn"

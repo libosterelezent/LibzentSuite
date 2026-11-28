@@ -17,11 +17,11 @@ import random
 import unittest
 from typing import Any, TypeVar, overload
 
-from core.errors import RatePolicyError, UnsafePolicyError
-from core.event_bus import EventBus, RateLimitTriggered
-from core.priority import Priority
-from core.rate_limit_manager import Grant, RateLimitManager
-from core.rate_limit_manager.engine import (
+from libzentsuite.core.errors import RatePolicyError, UnsafePolicyError
+from libzentsuite.core.event_bus import EventBus, RateLimitTriggered
+from libzentsuite.core.priority import Priority
+from libzentsuite.core.rate_limit_manager import Grant, RateLimitManager
+from libzentsuite.core.rate_limit_manager.engine import (
     GLOBAL_KEY,
     POLL_INTERVAL,
     ManualClock,
@@ -463,7 +463,7 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
         """Round-3: a finite-huge retry_after (1e9 -> 31.7 years, memory
         only) would block every waiter until restart — intake clamps to
         MAX_INTERVAL (86400s), exactly like policies are capped."""
-        from core.rate_limit_manager.policies import MAX_INTERVAL
+        from libzentsuite.core.rate_limit_manager.policies import MAX_INTERVAL
 
         manager = make_manager()
         manager.report_server_limit("alpha", ACTION, 1e9, global_=True)
