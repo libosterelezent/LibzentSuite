@@ -84,17 +84,16 @@ grants inside the limiter. Every services action is paced (per-task +
 group scopes, the learned per-action default intervals, jitter) —
 plugins never self-throttle.
 
-Self-commands & UI extension
-----------------------------
-Plugins may declare ``COMMANDS`` (a tuple of
-:class:`core.plugin_base.CommandSpec`, whose ``args`` are declarative
-:class:`core.plugin_base.ArgSpec` positional grammar) — each verb
-becomes a ``<prefix><command>`` on every account the plugin is
-assigned+enabled on; handlers receive a
-:class:`core.plugin_base.CommandContext` (same ``services`` facade,
-validated ``settings_api``, ``invoker_id``) and reply through the paced
-pipeline. The optional ``EMITS`` / ``FOLLOWS`` declarations opt the
-plugin into workspace chains (durable signals, follow handlers — see
+Self-commands & chain declarations
+----------------------------------
+Plugins declare self-commands as COG classes (``COG`` on the plugin
+class — a real library cog the loader validates at discovery). The
+cog host builds one instance per (account, plugin) while attached,
+with the services toolbox injected; typed converter params, command
+groups and native help come from the library itself (the retired
+COMMANDS/CommandSpec grammar lives in ``dump/``). The optional
+``EMITS`` / ``FOLLOWS`` declarations opt the plugin into workspace
+chains (durable signals, follow handlers — see
 :doc:`writing_plugins`).
 
 Deep dives, examples, and the anti-pattern catalog live in the

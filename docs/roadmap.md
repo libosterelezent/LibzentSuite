@@ -112,4 +112,5 @@ structure is tested and waiting.
 | Sync groups + fleet | 2026-11-14 | Workspace unification (`core/workspace/`) |
 | COMMANDS/CommandSpec/ArgSpec facade | 2026-11-15 | Cog declarations (the convergence) |
 | RemoteControl mention bridge + hub machinery | 2026-11-15 | The retirement wing (`dump/`) |
+| SelfCommandHub (the lean command seam holder) | 2026-11-28 | Direct wiring (access injection; library cogs own commands) |
 | Legacy template profiles | 2026-11-16 | Account-owned instances (the v15 fold) |

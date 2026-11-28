@@ -29,6 +29,7 @@ wiring note the entry lists.
 | `fragments/test_bootstrap_remote_control_matrix.py`, `test_round3b_remote_control_mask.py` | 2026-11-15 | The gate's tests / the bridge's masking-contract test | (retired with their subjects) |
 | `fragments/cog_host_intake_mixin.py` | 2026-11-15 | The FrameworkIntakeCog mixin from cog_host | (the adapter's own handlers) |
 | `fragments/names_group_name_re.py` | 2026-11-15 | The sync-group name validator | The workspace unification (W5) |
+| `fragments/commands_hub_seam_holder.py` | 2026-11-28 | The lean SelfCommandHub (bind/unbind/bound_manager + access/api_provider seams) | Direct wiring: AccessManager injected into the AccountManager; the library's cogs own command registration |
 
 ## Restoration
 

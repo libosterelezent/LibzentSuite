@@ -165,8 +165,8 @@ The framework itself ships with **no bundled plugins** — `plugins/` can
 stay empty and everything still boots (the loader simply discovers zero
 plugins). Plugins are self-describing packages: a `PluginBase` subclass
 with metadata, a `Setting` manifest, lifecycle hooks, optional declared
-self-commands (`COMMANDS` with the `ArgSpec` argument grammar) and
-optional chain declarations (`EMITS` / `FOLLOWS`).
+self-command COGs (the library's command classes) and optional chain
+declarations (`EMITS` / `FOLLOWS`).
 
 **The plugin development guide is
 [`knowledgebase/PLUGIN_SYSTEM.md`](knowledgebase/PLUGIN_SYSTEM.md)**
