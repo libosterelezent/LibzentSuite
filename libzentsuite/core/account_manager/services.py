@@ -61,6 +61,7 @@ from ..event_bus import (
     TaskCompleted,
     TaskFailed,
 )
+from ..expect import ExpectWindow
 from ..priority import Priority
 from .cache import DiscordCache, resolve_dm_channel
 
@@ -787,14 +788,7 @@ class AccountPluginServices:
             if match and not future.done():
                 future.set_result(event)
 
-        # FINAL-PHASE F1-b′: through the shared per-account waiter index
-        # when wired (one broadcast subscription at the manager; waiters
-        # are invoked only for their own account's events), else the
-        # legacy unfiltered bus subscription (direct-construction tests).
-        if self._waiter_registry is not None:
-            unsubscribe = self._waiter_registry.add(self._account, _handler)
-        else:
-            unsubscribe = self._bus.subscribe(MessageReceived, _handler)
+        unsubscribe = self._subscribe_waits(_handler)
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -836,10 +830,7 @@ class AccountPluginServices:
             if match:
                 queue.put_nowait(event)
 
-        if self._waiter_registry is not None:
-            unsubscribe = self._waiter_registry.add(self._account, _handler)
-        else:
-            unsubscribe = self._bus.subscribe(MessageReceived, _handler)
+        unsubscribe = self._subscribe_waits(_handler)
         collected: list[MessageReceived] = []
         try:
             while True:
@@ -867,6 +858,56 @@ class AccountPluginServices:
             return collected
         finally:
             unsubscribe()
+
+    def _subscribe_waits(self, handler: Callable[[MessageReceived], None]) -> Callable[[], None]:
+        """Register one per-account message waiter (FINAL-PHASE F1-b′).
+
+        The shared per-account waiter index when wired (one broadcast
+        subscription at the manager; waiters are invoked only for
+        their own account's events — M/A fan-out), else the unfiltered
+        bus subscription (direct-construction tests, unwired stacks).
+        ``wait_for_message``, ``collect_messages`` and the expect
+        window all route through this one seam.
+        """
+        if self._waiter_registry is not None:
+            return self._waiter_registry.add(self._account, handler)
+        return self._bus.subscribe(MessageReceived, handler)
+
+    def expect(
+        self,
+        check: Callable[[MessageReceived], bool],
+        timeout: float,
+    ) -> ExpectWindow:
+        """Open a send-coupled reactive window (client-capability Track B).
+
+        ``async with ctx.services.expect(check, timeout) as window:`` —
+        entering subscribes BEFORE the send runs inside the block, so
+        a reply landing during the send's queue wait matches exactly
+        like one landing after: the wait_for-after-send race is closed
+        by construction, and the framework owns and unwires the waiter
+        (no dangling plugin task). ``timeout`` is a total budget from
+        entry shared by every await; the window keeps observing the
+        account's events until the block exits. See
+        :class:`libzentsuite.core.expect.ExpectWindow` for the await
+        surface (``match`` / ``collect`` / ``first_of``).
+        """
+        if not callable(check):
+            raise AccountError(
+                f"expect check must be callable, got {check!r} (account"
+                f" {self._account!r} plugin {self._plugin!r})"
+            )
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise AccountError(
+                f"expect timeout must be > 0, got {timeout!r} (account"
+                f" {self._account!r} plugin {self._plugin!r})"
+            )
+        return ExpectWindow(
+            account=self._account,
+            plugin=self._plugin,
+            check=check,
+            timeout=timeout,
+            subscribe=self._subscribe_waits,
+        )
 
     # -------------------------------------------------------------- passthru
     def publish(self, event: Event) -> None:

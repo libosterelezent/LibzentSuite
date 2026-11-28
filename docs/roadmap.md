@@ -23,9 +23,9 @@ scheduling, rate-limit policies + the safety floor, credentials
 (encrypted at rest), logs and audit, simulation, workspace
 orchestration. Plugins stay independent of the interface layer.
 
-## Current State (2026-11-25)
+## Current State (2026-11-28)
 
-**1,681 tests green, CI green, pyright ZERO** (equality ratchet at
+**1,715 tests green, CI green, pyright ZERO** (equality ratchet at
 `.github/pyright-baseline`). The project is platform-independent: one
 suite, no platform-only modules, green on Linux and native Windows.
 CI runs it on Windows (the owner's platform) on 3.10; the local gate
@@ -46,12 +46,13 @@ first release.*
 
 ### 1 — Client capability adoption (the plugin surface)
 
-`docs/plans/client-capability-adoption.md`. Track B first: the
-`expect` primitive — a send-coupled reactive window that subscribes
-before the send, race-free by construction — because it unblocks
-game logic today. Then Track A reads (search, history, pins), then
-Track A lifecycle (edit, delete, reply, forward, ack). Track C
-(the direct client connection) is already shipped.
+`docs/plans/client-capability-adoption.md`. Track B (the `expect`
+primitive — a send-coupled reactive window that subscribes before
+the send, race-free by construction) is shipped: game logic
+expressiveness is unblocked today. Next: Track A reads (search,
+history, pins), then Track A lifecycle (edit, delete, reply,
+forward, ack). Track C (the direct client connection) is already
+shipped.
 
 ### 2 — Overseer + Task Runner (core infrastructure)
 
