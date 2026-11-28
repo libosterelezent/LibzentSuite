@@ -106,6 +106,10 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_match_wakes_on_live_event(self) -> None:
         seam = SeamRecorder()
+        # the 2.0 budget is headroom, never awaited: 2x the watchdog
+        # below. A missed wake fails at the watchdog first; reaching the
+        # budget needs a >=2s mid-test loop stall — the suite's 0.6s idle
+        # windows would break long before this test does.
         async with make_window(lambda e: True, 2.0, seam) as window:
             pending = asyncio.create_task(window.match())
             await asyncio.sleep(0)  # one loop turn: the task parks (FIFO)
@@ -133,6 +137,8 @@ class ExpectWindowMechanicsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_collect_gathers_n_across_arrivals(self) -> None:
         seam = SeamRecorder()
+        # same budget discipline as test_match_wakes_on_live_event:
+        # headroom at 2x the watchdog, never awaited on the green path
         async with make_window(lambda e: "page" in e.content, 2.0, seam) as window:
             seam.feed(1, content="page 0")
             pending = asyncio.create_task(window.collect(2))
